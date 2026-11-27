@@ -179,8 +179,10 @@ export type FixProgressVerdict =
   | { verdict: "continue"; reason: string }
   | { verdict: "change-approach"; approach: string; reason: string }
   | { verdict: "escalate"; loop: string; reason: string };
-export type FixProgressJudge = (input: FixProgressInput) => Promise<FixProgressVerdict |
-  { verdict: "harness"; reason: string } | undefined>;
+/** W1-T15163: the attempt a re-asked judgment replaced: provider, model and result subtype. */
+export interface FixProgressReaskedFrom { provider: string; model: string; subtype: string }
+export type FixProgressJudge = (input: FixProgressInput) => Promise<((FixProgressVerdict |
+  { verdict: "harness"; reason: string }) & { reasked_from?: FixProgressReaskedFrom }) | undefined>;
 export type FixProgressResult = FixProgressVerdict | { verdict: "unavailable"; reason: string };
 /** W1-T12711: the second answer was again an uncorroborated harness: rerun the head's failed checks once. */
 export interface FixProgressRerun { verdict: "rerun-checks"; reason: string; reask: 1 }
@@ -648,7 +650,10 @@ async function askFixProgress(input: FixProgressInput, judge?: FixProgressJudge)
     ].join("\n")).join("\n\n");
     return { result: { ...parsed, reason: `${parsed.reason}\n${evidence}` } };
   }
-  return parsed ? { result: parsed } : { refused: "unparseable", reason: UNPARSEABLE_REASON };
+  // W1-T15163: a judgment the judge re-asked on another provider names the attempt it replaced on the judged row.
+  const reaskedFrom = verdict && "reasked_from" in verdict ? verdict.reasked_from : undefined;
+  return parsed ? { result: reaskedFrom ? Object.assign({}, parsed, { reasked_from: reaskedFrom }) : parsed }
+    : { refused: "unparseable", reason: UNPARSEABLE_REASON };
 }
 
 /**

@@ -17,7 +17,7 @@ import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolv
   type FixProgressWitness, type FixProgressHostedProofResult,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict,
   sameCriterionStall, nextStallRemedy, stallRemedyRows, failedApproaches, rowPrNumber, type StallRemedy,
-  type FixProgressReaskResult, type PriorRoundHold } from "./fix-progress-judge.js";
+  type FixProgressReaskResult, type FixProgressReaskedFrom, type PriorRoundHold } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredNames, resolveCiGateRequiredSource, type CiGateRequiredSource } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehomePorts } from "./head-rehome.js";
@@ -2686,8 +2686,11 @@ export function productionFixProgressJudge(opts: {
     const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge");
     const primaryArgs: SpawnWorkerArgs = { ...args, prompt, memoryShadow: { ...args.memoryShadow, ...lightPassMemoryWaitPorts() },
       ...(mount.provider === undefined ? {} : { mountProvider: mount.provider }) };
-    const result = await spawn(primaryArgs);
-    const verdict = result.subtype !== undefined && result.subtype !== "success" ? undefined : parseFixProgressVerdict(result.text);
+    // W1-T15163: a worker that ended without a result (a non-success subtype, or a throw before one) is asked once
+    // more at once with its provider excluded. A worker that returned a success subtype is never re-asked here.
+    const { result, reaskedFrom } = await askFixProgressJudgeOnce(spawn, primaryArgs);
+    const parsed = result.subtype !== undefined && result.subtype !== "success" ? undefined : parseFixProgressVerdict(result.text);
+    const verdict = parsed === undefined || reaskedFrom === undefined ? parsed : { ...parsed, reasked_from: reaskedFrom };
     const shadowKey = `${input.prNumber === undefined ? input.taskId ?? "unknown" : `PR${input.prNumber}`}@${input.headSha}`;
     if (mount.shadow?.provider === "decisions" && opts.log !== undefined) {
       // W1-T12417: a decision-model arm. Not awaited: the verdict returned below is the primary's.
@@ -2710,6 +2713,27 @@ export function productionFixProgressJudge(opts: {
   };
   PRODUCTION_FIX_PROGRESS_JUDGES.add(judge);
   return judge;
+}
+
+/**
+ * W1-T15163: one fix-progress judge call. INVARIANT an-answer-is-asked-once: the second spawn runs only when the first
+ * ended without a result (a defined non-success subtype, or a throw), with the failed provider excluded so the
+ * auction routes elsewhere. A success subtype, parseable or not, returns as it is. A second failure returns that
+ * result (or rethrows), so the caller sees no verdict exactly as before.
+ */
+async function askFixProgressJudgeOnce(spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>, args: SpawnWorkerArgs):
+  Promise<{ result: WorkerResult; reaskedFrom?: FixProgressReaskedFrom }> {
+  let first: WorkerResult | undefined;
+  try { first = await spawn(args); } catch {
+    first = undefined; // a throw before a result is an attempt that ended without one: it is re-asked below
+  }
+  if (first !== undefined && (first.subtype === undefined || first.subtype === "success")) return { result: first };
+  const provider = first?.provider;
+  const reaskedFrom: FixProgressReaskedFrom = { provider: provider ?? "unknown", model: first?.model || "unknown",
+    subtype: first?.subtype ?? "threw" }; // the error text is never copied: a message may carry a secret
+  const exclude = provider === undefined ? args.excludeProviders : [...new Set([...(args.excludeProviders ?? []), provider])];
+  const result = await spawn({ ...args, ...(exclude === undefined || exclude.length === 0 ? {} : { excludeProviders: exclude }) });
+  return { result, reaskedFrom };
 }
 
 /** W1-T12711: a second uncorroborated harness answer reruns this head's failed checks once; the next pass judges their red. */
