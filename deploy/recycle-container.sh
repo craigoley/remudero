@@ -2810,8 +2810,19 @@ holder_worktrees() {
 # holds, one path per line. A lock written by another container (one an earlier recycle replaced, whose
 # pid number the new container may have reused), one whose pid is gone, and one the frozen-daemon proof
 # reclaimed print nothing and so never block the drain.
+# W1-T14947: the start time, in epoch seconds, of `pid` inside the target container, read from the container's own
+# /proc (its pids are not this host's). Prints nothing when it cannot be read.
+container_pid_start_epoch() {
+  docker exec "${CONTAINER_NAME}" sh -c '
+    b=$(awk "\$1 == \"btime\" { print \$2 }" /proc/stat 2>/dev/null)
+    t=$(sed -E "s/^.*\) //" "/proc/$1/stat" 2>/dev/null | awk "{ print \$20 }")
+    h=$(getconf CLK_TCK 2>/dev/null)
+    case "$b:$t:$h" in *[!0-9:]*|:*|*::*|*:) exit 0 ;; esac
+    [ "$h" -gt 0 ] && echo $((b + t / h))' sh "$1" 2>/dev/null | head -n 1 || true
+}
+
 live_review_locks() {
-  local f pid host target_host
+  local f pid host target_host lock_epoch start_epoch
   [ -d "${INFLIGHT_DIR}/reviews" ] || return 0
   target_host="$(docker inspect --format '{{.Config.Hostname}}' "${CONTAINER_NAME}" 2>/dev/null | head -n 1 || true)"
   for f in "${INFLIGHT_DIR}/reviews"/*.lock; do
@@ -2821,7 +2832,16 @@ live_review_locks() {
     printf '%s' "${pid}" | grep -Eq '^[0-9]+$' || continue
     # No readable target hostname or lock host means this run cannot tie the lock to the target: not counted.
     [ -n "${target_host}" ] && [ -n "${host}" ] && [ "${host}" = "${target_host}" ] || continue
-    docker exec "${CONTAINER_NAME}" kill -0 "${pid}" >/dev/null 2>&1 && printf '%s\n' "${f}"
+    docker exec "${CONTAINER_NAME}" kill -0 "${pid}" >/dev/null 2>&1 || continue
+    # A process that started after the lock was written holds a reused pid, not this review (an in-place restart
+    # killed the review and left its lock): not counted. An unreadable start time keeps the lock counted, and the
+    # drain's own wait still bounds it.
+    lock_epoch="$(epoch_of_started_at "$(lock_started_at_field "${f}")")"
+    start_epoch="$(container_pid_start_epoch "${pid}")"
+    if printf '%s' "${lock_epoch}:${start_epoch}" | grep -Eq '^[0-9]+:[0-9]+$' && [ "$((start_epoch - lock_epoch))" -gt 2 ]; then
+      continue
+    fi
+    printf '%s\n' "${f}"
   done
   return 0
 }

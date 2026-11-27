@@ -20,6 +20,8 @@ case "$1" in
       case " $FAKE_ALIVE_PIDS " in *" $5 "*) exit 0 ;; esac
       exit 1
     fi
+    # The container's own pid start-time read: FAKE_PID_START_EPOCH, or nothing when unset.
+    if [ "$3" = sh ]; then [ -z "\${FAKE_PID_START_EPOCH:-}" ] || echo "$FAKE_PID_START_EPOCH"; exit 0; fi
     exit 0 ;;
   pull) : > "$S/images/$PULL_ID"; echo "fixture pulled"; exit 0 ;;
   create) mkdir -p "$S/containers/$3"; echo "$4" > "$S/containers/$3/image"; echo "$3" > "$S/containers/$3/id"; echo "$3"; exit 0 ;;
@@ -64,7 +66,9 @@ exit 0
 
 /** Runs one recycle whose state holds a review lock owned by pid 4242 on `lockHost`; the target container's hostname is
  *  `core-host`. Returns its exit code and output. */
-async function recycleWithReviewLock(t: TestContext, alivePids: string, lockHost = "core-host"): Promise<{ code: number | null; out: string }> {
+async function recycleWithReviewLock(
+  t: TestContext, alivePids: string, lockHost = "core-host", pidStartAfterLockS?: number,
+): Promise<{ code: number | null; out: string }> {
   const owned = ownedFixtureDir(t, "recycle-review-lock");
   const root = owned.dir;
   const store = join(root, "store");
@@ -77,11 +81,13 @@ async function recycleWithReviewLock(t: TestContext, alivePids: string, lockHost
   writeFileSync(join(store, "images/sha256:old"), "");
   writeFileSync(join(store, "containers/core-daemon/image"), "sha256:old\n");
   writeFileSync(join(store, "containers/core-daemon/id"), "old-core-daemon\n");
+  const lockedAtS = Math.floor(Date.now() / 1000);
   writeFileSync(join(root, "core/state/inflight/reviews/review-run-a.lock"),
-    JSON.stringify({ pid: 4242, run_id: "run-a", host: lockHost, startedAt: new Date().toISOString() }));
+    JSON.stringify({ pid: 4242, run_id: "run-a", host: lockHost, startedAt: new Date(lockedAtS * 1000).toISOString() }));
   const env: NodeJS.ProcessEnv = {
     ...process.env, HOME: join(root, "home"), PATH: `${join(root, "bin")}:${process.env.PATH}`,
-    FAKE_STORE: store, FAKE_ALIVE_PIDS: alivePids, FAKE_HOSTNAME: "core-host", RMD_CLAUDE_DIR: join(root, "claude"),
+    FAKE_STORE: store, FAKE_ALIVE_PIDS: alivePids, FAKE_HOSTNAME: "core-host",
+    FAKE_PID_START_EPOCH: pidStartAfterLockS === undefined ? "" : String(lockedAtS + pidStartAfterLockS), RMD_CLAUDE_DIR: join(root, "claude"),
     RMD_CODEX_DIR: join(root, "absent-codex"), RMD_CONTAINER_CONFIG_DIR: join(root, "absent-config"),
     RMD_RECYCLE_FIRST_BOOT: "1", RMD_RECYCLE_POLL_S: "1", RMD_RECYCLE_DOCKERENV_PATH: join(root, "no-marker"),
     RMD_OPENWEIGHT_API_KEY_PATH: join(root, "key"), TMPDIR: join(root, "tmp"),
@@ -115,6 +121,13 @@ describe("test/deploy/a-recycle-drain-counts-in-flight-review-locks.test.ts", { 
 
     const gone = await recycleWithReviewLock(t, "");
     assert.match(gone.out, /no in-flight workers — safe to proceed/, `a lock whose owner is gone does not block:\n${gone.out}`);
+
+    const reused = await recycleWithReviewLock(t, "4242", "core-host", 600);
+    assert.match(reused.out, /no in-flight workers — safe to proceed/,
+      `a live pid that started after the lock was written is a reused pid, not the review:\n${reused.out}`);
+
+    const original = await recycleWithReviewLock(t, "4242", "core-host", -60);
+    assert.equal(original.code, 1, `the review's own process, started before its lock, still holds the drain:\n${original.out}`);
 
     const replaced = await recycleWithReviewLock(t, "4242", "replaced-container-host");
     assert.match(replaced.out, /no in-flight workers — safe to proceed/,
