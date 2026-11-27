@@ -188,7 +188,7 @@ test("W1-T12172 criterion 1: the mounts file names a preferred provider for a wo
     };
     const committed = load("committed.yaml", COMMITTED).capabilities;
     assert.deepEqual(committed?.rolePreference, { reviewer: "claude" });
-    assert.deepEqual(committed?.providerPreference, { frontier: "claude" }, "the capability preference is unchanged");
+    assert.deepEqual(committed?.providerPreference, { frontier: "claude", economy: "claude" }, "the capability preference is unchanged");
     assert.ok(COMMITTED.includes(ROLE_ROW));
     assert.deepEqual(load("codex.yaml", COMMITTED.replace("    reviewer: claude\n", "    reviewer: codex\n")).capabilities?.rolePreference,
       { reviewer: "codex" });

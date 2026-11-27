@@ -231,9 +231,17 @@ capabilities:
   # role_preference below, which is applied before this row. A balanced spawn returns to the headroom auction when
   # Codex is below its reserve, unreadable or excluded; the fix-routing learner then ranks only Codex models while
   # Codex serves. An operator's console preference still wins over this row.
+  # ECONOMY PREFERS CLAUDE FOR NOW (W1-T15178). DECIDED by the operator on 2026-11-27 ("Go with all of your
+  # recommendations", which included taking Luna out of the judging lanes until its error output shows the cause).
+  # MEASURED 2026-11-27: from 03:00Z codex/gpt-6-luna ended error_exit_1 on 144 of 175 risk-judge attempts (median
+  # 3.8 s, no Codex session written), 9 of 19 on ci-judge and 2 of 3 on refresh-judge, while claude-haiku-5-5
+  # answered 91 of 91; 77 of 140 fix-progress judgments had no answer. Luna is healthy on balanced build and fix work
+  # (sweep-fix 2 of 65 failed), and that row is unchanged. This overrides the economy note above only while the cause
+  # is open. REVERT (delete the economy row) once W1-T15168's stderr tail names the cause and its fix is deployed.
   provider_preference:
     frontier: claude
     balanced: codex
+    economy: claude
   # A REVIEW GOES TO CLAUDE FIRST (W1-T12172). DECIDED by the operator on 2026-11-10: Sonnet reviews first and
   # the balanced Codex model is the backup. MEASURED in the randomised experiment sol61-vs-sonnet55 over 293
   # pull requests, 2026-10-27 to 2026-11-10, by assigned reviewer: 42.4% failed review at least once with

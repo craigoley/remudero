@@ -112,7 +112,7 @@ test("W1-T13445 criterion 3: cash inserts Sol 6.2 before Sol 6.1; all other rows
   assert.deepEqual(table.codex.economy, ORIGIN_CODEX_ECONOMY, "the Codex economy rows are as on origin/main");
   assert.deepEqual(table.cash, ORIGIN_CASH, "the cash rows add Sol 6.2 immediately ahead of Sol 6.1");
   // W1-T14297 (operator option A, 2026-11-22) adds balanced: codex; this suite's Sol rows are unchanged by it.
-  assert.deepEqual(table.providerPreference, { frontier: "claude", balanced: "codex" });
+  assert.deepEqual(table.providerPreference, { frontier: "claude", balanced: "codex", economy: "claude" });
   assert.deepEqual(table.rolePreference, { reviewer: "claude" });
   assert.deepEqual(table.subscriptionOnly, ["frontier"]);
   assert.deepEqual(Object.keys(table.codex).sort(), ["balanced", "economy", "frontier"]);
