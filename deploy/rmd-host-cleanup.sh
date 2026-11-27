@@ -753,6 +753,7 @@ retire_held_worktree() {
   if ! mkdir -p -- "$PRESERVE_ROOT" 2>/dev/null || ! chmod 700 "$PRESERVE_ROOT" 2>/dev/null; then
     log "KEEP $wt: $reason; cannot create $PRESERVE_ROOT"; return 0
   fi
+  preserve_root_mark
   if ! preserve_root_has_room; then log "KEEP $wt: $reason; preserve root $PRESERVE_ROOT is past its watched mark"; return 0; fi
   if ! preserve_repo "$wt" "$wt"; then log "KEEP $wt: $reason; save failed: $PRESERVE_REASON"; return 0; fi
   copy="$PRESERVED_DIR"
@@ -1578,7 +1579,7 @@ preserve_exclusions() {
   return 0
 }
 preserve_write() {
-  local repo="$1" unit="$2" work="$3" head="$4" final="$5" branch excl count objects r name url remotes_text=""
+  local repo="$1" unit="$2" work="$3" head="$4" final="$5" branch excl count objects r name url path remotes_text=""
   local -a revs=() tar_excludes=()
   branch="$(rgit "$repo" symbolic-ref -q --short HEAD 2>/dev/null)" || branch="(detached)"
   while IFS= read -r name; do
@@ -1601,15 +1602,21 @@ preserve_write() {
   fi
   rgit "$repo" diff --binary HEAD > "$work/uncommitted.patch" 2>/dev/null || { PRESERVE_REASON="diff-failed"; return 1; }
   [ -s "$work/uncommitted.patch" ] || rm -f -- "$work/uncommitted.patch"
-  rgit "$repo" ls-files -z --others "${tar_excludes[@]}" > "$work/.untracked" 2>/dev/null || { PRESERVE_REASON="untracked-listing-failed"; return 1; }
+  rgit "$repo" ls-files -z --others > "$work/.untracked" 2>/dev/null || { PRESERVE_REASON="untracked-listing-failed"; return 1; }
   if [ -s "$work/.untracked" ]; then
     tar_excludes=(--exclude=.git)
-    if ! ( cd -- "$repo" && tar -czf "$work/untracked.tar.gz" "${tar_excludes[@]}" --null -T "$work/.untracked" ) </dev/null >/dev/null 2>&1 ||
-       ! tar -tzf "$work/untracked.tar.gz" </dev/null >/dev/null 2>&1; then
+    : > "$work/.untracked-to-archive" || { PRESERVE_REASON="untracked-listing-failed"; return 1; }
+    while IFS= read -r -d '' path; do
+      case "$path" in node_modules|node_modules/*|coverage|coverage/*) continue ;; esac
+      printf '%s\0' "$path" >> "$work/.untracked-to-archive" || { PRESERVE_REASON="untracked-listing-failed"; return 1; }
+    done < "$work/.untracked"
+    if [ -s "$work/.untracked-to-archive" ] &&
+       { ! ( cd -- "$repo" && tar -czf "$work/untracked.tar.gz" "${tar_excludes[@]}" --null -T "$work/.untracked-to-archive" ) </dev/null >/dev/null 2>&1 ||
+         ! tar -tzf "$work/untracked.tar.gz" </dev/null >/dev/null 2>&1; }; then
       PRESERVE_REASON="untracked-tarball-failed"; return 1
     fi
   fi
-  rm -f -- "$work/.untracked"
+  rm -f -- "$work/.untracked" "$work/.untracked-to-archive"
   {
     printf 'Preserved by the Azure host janitor (deploy/rmd-host-cleanup.sh, preserve-then-retire).\n'
     printf 'path:   %s\nunit:   %s\nhead:   %s  branch: %s\npreserved_at: %s\n' "$repo" "$unit" "$head" "$branch" "$PRESERVE_STAMP"

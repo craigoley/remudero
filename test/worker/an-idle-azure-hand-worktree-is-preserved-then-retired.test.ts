@@ -39,6 +39,10 @@ function heldHandTree(fx: Fixture, name: string) {
   writeFileSync(join(wt, "test", "ci", "coverage", "new-test.ts"), "export {};\n");
   mkdirSync(join(wt, "src", "dist"), { recursive: true });
   writeFileSync(join(wt, "src", "dist", "new-source.ts"), "export {};\n");
+  mkdirSync(join(wt, "node_modules"), { recursive: true });
+  writeFileSync(join(wt, "node_modules", "generated.js"), "generated cache\n");
+  mkdirSync(join(wt, "coverage"), { recursive: true });
+  writeFileSync(join(wt, "coverage", "report.json"), "generated report\n");
   return { main, wt, branch, root: join(wt, "..") };
 }
 
@@ -69,11 +73,20 @@ test("W1-T14400 criterion 1: an idle hand worktree with uncommitted and unpushed
   for (const path of ["test/ci/coverage/new-test.ts", "src/dist/new-source.ts"]) {
     assert.equal(readFileSync(join(extracted, path), "utf8"), "export {};\n", `${path} survives the skipped-name class`);
   }
+  assert.equal(existsSync(join(extracted, "node_modules", "generated.js")), false, "root node_modules stays excluded");
+  assert.equal(existsSync(join(extracted, "coverage", "report.json")), false, "root coverage stays excluded");
 });
 
 test("W1-T14400 criterion 2: invariant:nothing-unsaved-is-removed — a failed save, a held worktree or a recent one is kept", () => {
   const fx = fixture();
   const { main, wt, root } = heldHandTree(fx, "wt-recent");
+  age(wt, 13);
+  writeFileSync(join(wt, "README"), "recent edit\n");
+  const recentRun = run(fx, handOnly(root));
+  assert.equal(recentRun.status, 0, recentRun.stderr + recentRun.stdout);
+  assert.equal(existsSync(wt), true, "a recent worktree stays when the preserve root is writable");
+  assert.match(recentRun.stdout, new RegExp(`KEEP ${wt}: written within 360 min`));
+
   const locked = join(root, "wt-locked");
   git(main, "worktree", "add", "--quiet", "-b", "hand/locked", locked, "main");
   writeFileSync(join(locked, "README"), "locked edit\n");
@@ -81,7 +94,6 @@ test("W1-T14400 criterion 2: invariant:nothing-unsaved-is-removed — a failed s
   const unsavable = join(root, "wt-unsavable");
   git(main, "worktree", "add", "--quiet", "-b", "hand/unsavable", unsavable, "main");
   writeFileSync(join(unsavable, "README"), "dirty\n");
-  age(wt, 13);
   age(locked, 10 * DAY_HOURS);
   age(unsavable, 10 * DAY_HOURS);
 
@@ -90,12 +102,26 @@ test("W1-T14400 criterion 2: invariant:nothing-unsaved-is-removed — a failed s
   writeFileSync(blocked, "a file, not a folder\n");
   const r = run(fx, handOnly(root, { RMD_CLEANUP_PRESERVE_ROOT: join(blocked, "preserved") }));
   assert.equal(r.status, 0, r.stderr + r.stdout);
-  for (const kept of [wt, locked, unsavable]) {
+  for (const kept of [locked, unsavable]) {
     assert.equal(existsSync(kept), true, `${kept} stays:\n${r.stdout}`);
     assert.doesNotMatch(r.stdout, new RegExp(`REMOVE ${kept}[: ]`));
   }
   assert.match(r.stdout, new RegExp(`KEEP ${unsavable}: uncommitted changes; cannot create`));
   assert.match(r.stdout, new RegExp(`KEEP ${locked}: Git worktree is locked`));
+});
+
+test("W1-T14400 criterion 2: invariant:nothing-unsaved-is-removed — a watched preserve-disk mark holds retirement", () => {
+  const fx = fixture();
+  const { wt, root } = heldHandTree(fx, "wt-disk-mark");
+  age(wt, 10 * DAY_HOURS);
+  const r = run(fx, handOnly(root, {
+    RMD_CLEANUP_WATCH_FS: `${fx.rootfs}:40`,
+    FAKE_DF_PCT: "95",
+  }));
+  assert.equal(r.status, 1, r.stderr + r.stdout);
+  assert.equal(existsSync(wt), true, "the worktree stays when the preserve disk is beyond its watched mark");
+  assert.match(r.stdout, new RegExp(`KEEP ${wt}: uncommitted changes; preserve root .* past its watched mark`));
+  assert.deepEqual(copies(fx, wt), [], "no copy is started when the watched mark already fails");
 });
 
 test("W1-T14400 criterion 2: preserve-retire keeps nested repositories, bundles and implicit agent worktrees", () => {
