@@ -19046,8 +19046,17 @@ export async function postReviewPastPacerGaps(
 
 const RETRYABLE_REVIEW_THROW_PREFIX = "post-review attempt threw — standing down rather than retrying this head unbounded:";
 
+/** W1-T15030: review refusals that say nothing about the input, so the next pass simply reviews it again. GitHub
+ *  refused the run's token twice (`token_unrenewable`): no count, no backoff and no strike cap, as for a
+ *  review.post_failed. */
+export function isUncountedRetryableReviewRefusal(reason: unknown): boolean {
+  return reason === "token_unrenewable";
+}
+
+/** The one classification every reader of a review refusal shares (the sweep's fold, tick-read-worker's
+ *  reviewPostRefusedFor): a thrown post-review attempt, or (W1-T15030) an uncounted retryable refusal, is retried. */
 export function isRetryableReviewThrow(reason: unknown): boolean {
-  return typeof reason === "string" && reason.startsWith(RETRYABLE_REVIEW_THROW_PREFIX);
+  return isUncountedRetryableReviewRefusal(reason) || (typeof reason === "string" && reason.startsWith(RETRYABLE_REVIEW_THROW_PREFIX));
 }
 
 export function isPostReviewDiffCeilingRefusal(reason: unknown): boolean {
@@ -20063,6 +20072,9 @@ function priorActionsFromLedger(
         } else if (isPostReviewDiffCeilingRefusal(line.reason)) {
           reviewDiffCeilingRefused.add(key);
           reviewRefused.add(key);
+        } else if (isUncountedRetryableReviewRefusal(line.reason)) {
+          // W1-T15030: retryable by the shared classifier, and uncounted: it enters no strike count, backoff or durable
+          // set, so the next pass re-reviews it, as a review.post_failed is.
         } else if (isRetryableReviewThrow(line.reason)) {
           const parsed = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
           const existing = reviewRetryableThrows.get(key);
@@ -20103,9 +20115,6 @@ function priorActionsFromLedger(
                 : {}),
             });
           }
-        } else if (line.reason === "token_unrenewable") {
-          // W1-T15030: GitHub refused the run's token twice, which says nothing about the input: neither durable nor
-          // counted, so the next pass re-reviews it, as a review.post_failed is.
         } else if (!isReopenedClosedLifecycleRefusal(line.reason)) {
           // W1-T1213: the "PR is already closed" refusal is excluded here, never added to
           // `reviewRefused` — see that field's own doc for why reaching this fold at all

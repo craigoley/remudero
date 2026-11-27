@@ -24,7 +24,7 @@ import { withTempDir } from "../../lib/tmp.js";
 import { systemClock } from "../../lib/clock.js";
 import { reapWorkerScratch } from "../../lib/worker-scratch.js";
 import { resolveInstallRoot } from "../../lib/install-root.js";
-import { escalate, ghIssueGateway, ghIssueGatewayAsync, tryEscalate, tryEscalateAsync } from "../../lib/escalate.js";
+import { escalate, ghIssueGatewayAsync, tryEscalateAsync, type AsyncIssueGateway } from "../../lib/escalate.js";
 import { combinedStatusRestArgs, compareRestArgs, mapRestPr, rollupForAsync, tryFetchReviewReuseFacts, type ReviewReuseFacts, type RestPullRow } from "../../lib/open-prs-rest.js";
 import { ghJsonAsync, ghLinesAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { appendLedger, REVIEW_LANE_ABORTED_STEP } from "../../lib/ledger.js";
@@ -43,7 +43,8 @@ import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/moun
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import type { ReviewTriagePullRequest } from "../../lib/review-triage.js";
-import { holdReviewRunLive, renewReviewPublisherToken, reviewClaimTakenOverBy, type ReviewTokenRenewal } from "../../lib/review.js";
+import { ghUnauthorizedError, holdReviewRunLive, renewReviewPublisherToken, reviewClaimTakenOverBy, type ReviewIssueGateway,
+  type ReviewTokenRenewal } from "../../lib/review.js";
 import { isTestRunner } from "../../lib/live-write-guard.js";
 import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, markUnbackedBodyGuards, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, postUnreadTaskHoldGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type CriterionVerdict, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure, type ReviewAdmission } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
@@ -341,7 +342,9 @@ function logArmWithdrawal(ctx: ArmWithdrawalCtx, refusal: string, outcome: Disar
 export async function withdrawArmIfVerdictRefusesAsync(
   verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
   ctx: Parameters<typeof withdrawArmIfVerdictRefuses>[1],
-  deps: Parameters<typeof withdrawArmIfVerdictRefuses>[2] & DisarmRenewal = {},
+  deps: Omit<NonNullable<Parameters<typeof withdrawArmIfVerdictRefuses>[2]>, "disarm"> & DisarmRenewal & {
+    disarm?: (prUrl: string) => DisarmOutcome | void | Promise<DisarmOutcome | void>;
+  } = {},
 ): Promise<{ withdrawn: boolean; outcome?: DisarmOutcome | void }> {
   // Only a capped verdict reads the ledger (its operator override), and that read is awaited.
   const rows = !verdict.capped ? [] : deps.ledgerLines?.() ??
@@ -365,6 +368,38 @@ export async function reviewClaimLost(ledgerPath: string, runId: string, headSha
     // An unreadable ledger proves no takeover; the guarded post's own lock and lifecycle reads still decide.
     return undefined;
   }
+}
+
+/** W1-T15030: an escalation's issue gateway whose every GitHub write and read renews a refused token once and retries
+ *  once, as the status posts and disarms do. A second 401 records `review.post_refused` reason `token_unrenewable`
+ *  (phase `escalation`) and fails the call as before, so tryEscalateAsync ledgers it and nothing is filed. */
+export function renewingIssueGateway(gateway: AsyncIssueGateway | ReviewIssueGateway, ctx: {
+  log: (step: string, extra?: Record<string, unknown>) => void; prUrl?: string; headSha?: string;
+  renewToken?: () => Promise<unknown>;
+}): AsyncIssueGateway {
+  const wrapped: Record<string, unknown> = {};
+  for (const [name, member] of Object.entries(gateway)) {
+    if (typeof member !== "function") { wrapped[name] = member; continue; }
+    const call = (args: unknown[]) => (member as (...a: unknown[]) => unknown).apply(gateway, args);
+    wrapped[name] = async (...args: unknown[]) => {
+      try {
+        return await call(args);
+      } catch (first) {
+        if (!ghUnauthorizedError(first)) throw first;
+      }
+      await (ctx.renewToken ?? (() => renewReviewPublisherToken({ force: true })))();
+      try {
+        return await call(args);
+      } catch (second) {
+        if (ghUnauthorizedError(second)) {
+          ctx.log("review.post_refused", { pr_url: ctx.prUrl, head_sha: ctx.headSha, reason: "token_unrenewable", phase: "escalation",
+            gateway_call: name });
+        }
+        throw second;
+      }
+    };
+  }
+  return wrapped as AsyncIssueGateway;
 }
 
 /** W1-T15030: an awaited withdrawal once this run may already have published. The claim is re-read first (a run that
@@ -834,7 +869,8 @@ async function holdDisputedPass(dispute: ReviewPassDispute, verdict: ReviewVerdi
     ],
     recommendation: "Run a third review",
     consequence: "The required review remains pending and the PR cannot merge.",
-  }, { issues: ghIssueGatewayAsync(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId });
+  }, { issues: renewingIssueGateway(ghIssueGatewayAsync(ctx.owner, ctx.repo), { log: ctx.log, prUrl: ctx.prUrl, headSha: ctx.headSha,
+    ...(ctx.renewToken ? { renewToken: ctx.renewToken } : {}) }), ledgerPath: ctx.ledgerPath, runId: ctx.runId });
   ctx.log("review.post_refused", {
     pr_url: ctx.prUrl, head_sha: ctx.headSha, attempted_state: "success", outcome: "disputed_pass_held", reason: dispute.reason,
     pass_run_id: ctx.runId, fail_run_id: dispute.failRunId ?? null, fail_review_input_digest: dispute.standing.inputDigest ?? null,
@@ -2264,7 +2300,9 @@ export async function runReview(host: ReviewCommandHost, args: {
     finishedReview: { admission: args.admission ?? "direct", reviewerMs: phases.postStart - phases.started },
     fetchLifecycle: () => fetchPrLifecycleAsync(prUrl),
     readRequiredContexts: readRequiredStatusCheckContextsAsync,
-    cannotEvaluateEscalation: (e, issues) => tryEscalate(task.catalog === "ops" ? { ...e, detail: "Review cannot evaluate this head; detailed evidence is retained on the host." } : e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath: args.ledgerPath, runId: args.runId }),
+    cannotEvaluateEscalation: (e, issues) => tryEscalateAsync(task.catalog === "ops" ? { ...e, detail: "Review cannot evaluate this head; detailed evidence is retained on the host." } : e,
+      { issues: renewingIssueGateway(issues ?? ghIssueGatewayAsync(owner, repo), { log, prUrl, headSha, renewToken: withdrawDeps.renewToken }),
+        ledgerPath: args.ledgerPath, runId: args.runId }),
     // W1-T14235 (invariant no-semantic-no-code-pass): a code pass publishes only on this run's own semantic judgement.
     semanticJudgement: { planOnly: planOnlySkip, reviewerOutcome: outcome },
     ...(args.taskHold !== undefined ? { taskHold: args.taskHold } : {}),
@@ -3228,7 +3266,8 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       subjectRepoDir,
       join(config.root, "state", `managed-checkout-${repo}.lock`),
       log,
-      (failure) => void tryEscalate(managedCheckoutInstallEscalation(failure, reviewKey, runId), { issues: ghIssueGateway(owner, repo), ledgerPath, runId }),
+      (failure) => void tryEscalateAsync(managedCheckoutInstallEscalation(failure, reviewKey, runId),
+        { issues: renewingIssueGateway(ghIssueGatewayAsync(owner, repo), { log }), ledgerPath, runId }),
       deps.refreshSubjectInstall,
     );
   }
@@ -3769,7 +3808,8 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       fetchCurrentStatusEntry: () => readReviewStatusEntry(owner, repo, view.headRefOid, deps.fetchView),
       fetchPublisher: deps.fetchView,
       readRequiredContexts: readRequiredStatusCheckContextsAsync,
-      cannotEvaluateEscalation: (e, issues) => tryEscalate(taskCatalog === "ops" ? { ...e, detail: "Review cannot evaluate this head; detailed evidence is retained on the host." } : e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+      cannotEvaluateEscalation: (e, issues) => tryEscalateAsync(taskCatalog === "ops" ? { ...e, detail: "Review cannot evaluate this head; detailed evidence is retained on the host." } : e,
+        { issues: renewingIssueGateway(issues ?? ghIssueGatewayAsync(owner, repo), { log, prUrl: view.url, headSha: view.headRefOid }), ledgerPath, runId }),
       // W1-T14235: a replayed decision re-publishes a code pass only when its recorded judgement was semantic.
       semanticJudgement: { planOnly: verdict.planOnly, reviewerOutcome: verdict.reviewerOutcome },
       claimLost: replayClaimLost,

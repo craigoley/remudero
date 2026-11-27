@@ -13538,7 +13538,7 @@ export interface PostReviewStatusGuardedOpts {
   /** Files the one cannot-evaluate escalation per head and returns its issue URL. Injected because escalate.ts's graph
    *  reaches this module; every terminal-posting caller binds tryEscalate to its own ledger, run and gateway. `issues`
    *  is this call's injected transport, when it has one. Unwired, no escalation is filed and the pending status stands. */
-  cannotEvaluateEscalation?: (escalation: CannotEvaluateEscalation, issues: ReviewIssueGateway | undefined) => string | null;
+  cannotEvaluateEscalation?: (escalation: CannotEvaluateEscalation, issues: ReviewIssueGateway | undefined) => string | null | Promise<string | null>;
   lockOpts?: AcquireReviewStatusLockOpts;
   /** W1-T15030: renews the token after a post GitHub answered with HTTP 401, before its one retry. Default
    *  {@link renewReviewPublisherToken} with `force`. */
@@ -14158,7 +14158,8 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts, held
       // (which already imports escalate.ts) rather than loaded here: a computed import() is a runtime-relative
       // specifier no child-entry bundle carries. Unwired, the escalation is skipped and the pending status stands.
       const escalate = opts.cannotEvaluateEscalation;
-      const issueUrl = escalate && escalate({
+      // W1-T15030: awaited, so an escalation that renews a refused token lands before this post returns.
+      const issueUrl = escalate && await escalate({
         class: "MANUAL",
         taskId: opts.taskId,
         runId: opts.runId,
@@ -14520,6 +14521,8 @@ export interface PostReviewPendingOpts {
   fetchStatus?: GhApiFetcher;
   /** Injected raw poster (tests) — forwarded to {@link postReviewStatusGuarded} unchanged. */
   post?: PostReviewStatusGuardedOpts["post"];
+  /** W1-T15030: renews the token after the claim post is refused with HTTP 401, before its one retry. */
+  renewToken?: PostReviewStatusGuardedOpts["renewToken"];
   readReviewStatusHistory?: ReviewStatusHistoryReader;
   commentDeps?: PostReviewCommentDeps;
   lockOpts?: AcquireReviewStatusLockOpts;
@@ -14720,6 +14723,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     reviewEngineRevision: opts.reviewEngineRevision,
     fetchLifecycle: opts.fetchLifecycle,
     post: opts.post,
+    ...(opts.renewToken === undefined ? {} : { renewToken: opts.renewToken }),
     lockOpts: opts.lockOpts,
   });
   if (result.posted) {

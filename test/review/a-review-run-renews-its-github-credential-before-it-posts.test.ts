@@ -7,8 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { failureRecordingPoster, reviewCommand, type ReviewCommandDeps, type ReviewCommandHost, runReview,
-  withdrawAfterPublication } from "#src/cli/commands/review.js";
+import { failureRecordingPoster, renewingIssueGateway, reviewCommand, type ReviewCommandDeps, type ReviewCommandHost, runReview,
+  withdrawAfterPublication, withdrawArmIfVerdictRefusesAsync } from "#src/cli/commands/review.js";
 import { disarmAutoMergeAsync } from "#src/lib/arm-auto-merge.js";
 import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
 import type { Config } from "#src/lib/config.js";
@@ -16,8 +16,11 @@ import { startInstallationTokenRefresh } from "#src/lib/github-app.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import type { Mount } from "#src/lib/mounts.js";
 import type { AcceptanceCriterion } from "#src/lib/plan.js";
-import { holdReviewRunLive, postReviewPending, postReviewStatusGuarded, refreshReviewPublisherToken, renewReviewPublisherToken,
-  reviewDecisionDigest, reviewOwnerOrphaned } from "#src/lib/review.js";
+import { holdReviewRunLive, postReviewPending, postReviewStatusGuarded, postUnreadTaskHoldGuarded, refreshReviewPublisherToken,
+  renewReviewPublisherToken, reviewDecisionDigest, reviewInputDigest, reviewOwnerOrphaned } from "#src/lib/review.js";
+import { tryEscalateAsync } from "#src/lib/escalate.js";
+import { readFileSync } from "node:fs";
+import { buildOpenPrViews } from "#src/run-task.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, orphanedOwnerRetryView, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import type { WorkerResult } from "#src/lib/worker.js";
@@ -537,4 +540,185 @@ test("W1-T15030 criterion 3: a review run called the way runTask calls it stays 
   assert.equal(reviewOwnerOrphaned("nested-run", HEAD, [{ run_id: "nested-run", step: "review.pending_posted", head_sha: HEAD,
     owner_pid: process.pid, ts: new Date().toISOString() }], { now: Date.now() + window }), false);
   outer();
+});
+
+/** W1-T15030 — THE RENEW-AND-RETRY CENSUS. Every GitHub write a review run can reach, by symbol:
+ *  status posts (all through postRenewingOnce in src/lib/review.ts):
+ *    - publishReviewStatusLocked's decision post: the terminal verdict (postReviewStatusGuarded)
+ *    - postReviewPending's claim post (also the start-failed pending, via postReviewStatusGuarded)
+ *    - publishSemanticHold, publishCappedHold, publishTaskHold, postUnreadTaskHoldGuarded: the hold posts
+ *    - postReviewStatusGuarded's conflicting-verdict hold
+ *    - drainReviewOutbox and the replay restore: they publish through postReviewStatusGuarded
+ *    - failureRecordingPoster: the raw poster each of those is handed as `post`
+ *  disarms (disarmAutoMergeAsync with a renewal, src/lib/arm-auto-merge.ts):
+ *    - withdrawArmIfVerdictRefusesAsync: the pre-post withdrawal
+ *    - withdrawAfterPublication: every withdrawal after publication, the replay's and the disputed-pass hold's
+ *  escalation posts (renewingIssueGateway, src/cli/commands/review.ts):
+ *    - holdDisputedPass, cannotEvaluateEscalation (run and replay), the managed-checkout install escalation
+ *  Each site is driven through its real entry point with 401-then-ok (lands after one renewal) and 401-then-401 (a
+ *  token_unrenewable refusal is recorded and nothing lands). A source census below fails when a site is added outside
+ *  these helpers. */
+type Drive = (refusals: number) => Promise<{ landed: boolean; renewals: number; unrenewable: number }>;
+
+function censusLedger(t: TestContext, name: string): string {
+  const dir = mkdtempSync(join(tmpdir(), `rmd-w1-t15030-census-${name}-`));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return join(dir, "ledger.ndjson");
+}
+const refusing = (refusals: number, onLand: () => void) => {
+  let calls = 0;
+  return () => { if (++calls <= refusals) UNAUTHORIZED(); onLand(); };
+};
+const unrenewableRows = (ledgerPath: string) =>
+  readLedgerLines(ledgerPath).filter((row) => row.step === "review.post_refused" && row.reason === "token_unrenewable").length;
+
+const statusSite = (t: TestContext, name: string, publish: (o: { ledgerPath: string; post: () => void;
+  renewToken: () => Promise<"renewed"> }) => Promise<unknown>): Drive => async (refusals) => {
+  const ledgerPath = censusLedger(t, `${name}-${refusals}`);
+  let landed = false;
+  let renewals = 0;
+  await publish({ ledgerPath, post: refusing(refusals, () => { landed = true; }), renewToken: async () => { renewals++; return "renewed"; } });
+  return { landed, renewals, unrenewable: unrenewableRows(ledgerPath) };
+};
+
+const GUARDED = { owner: "o", repo: "r", sha: HEAD, taskId: "W1-T15030", runId: "review-census", prUrl: PR_URL,
+  fetchLifecycle: () => ({ merged: false, closed: false }), readReviewStatusHistory: async () => ({ kind: "readable" as const, failures: [] }) };
+const PASS = { state: "success" as const, criteria: [], testTheater: false, summary: "pass", floorDegraded: false, capped: false,
+  keywordOnly: false, planOnly: false };
+
+test("W1-T15030 criterion 2: census — every status post, disarm and escalation renews once on 401, then is a named refusal", async (t) => {
+  const sites: Record<string, Drive> = {
+    "publishReviewStatusLocked decision post": statusSite(t, "decision", (o) => postReviewStatusGuarded({ ...GUARDED, ...o,
+      state: "failure", description: "fail", evidence: "executed" })),
+    "postReviewPending claim post": statusSite(t, "pending", (o) => postReviewPending({ ...GUARDED, ...o,
+      reviewInputDigest: "census-input", fetchStatus: () => ({ statuses: [] }) } as never)),
+    "publishSemanticHold": statusSite(t, "semantic", (o) => postReviewStatusGuarded({ ...GUARDED, ...o, state: "success",
+      verdict: PASS, description: "pass", evidence: "executed", semanticJudgement: { planOnly: false, reviewerOutcome: "error" },
+      fetchCurrentStatusEntry: () => undefined })),
+    "publishCappedHold": statusSite(t, "capped", (o) => postReviewStatusGuarded({ ...GUARDED, ...o, state: "success",
+      verdict: { ...PASS, capped: true }, description: "pass", evidence: "no_evidence",
+      semanticJudgement: { planOnly: false, reviewerOutcome: "success" } })),
+    "postUnreadTaskHoldGuarded": statusSite(t, "taskhold", (o) => postUnreadTaskHoldGuarded({ ...GUARDED, ...o, description: "d",
+      refusal: "the task's catalog is unread" })),
+    "postReviewStatusGuarded conflict hold": statusSite(t, "conflict", (o) => {
+      const digest = reviewDecisionDigest({ headSha: HEAD, diff: "d", report: "r", body: "b", acceptance: [], declaredFiles: [] });
+      appendLedger(o.ledgerPath, { run_id: "review-prior", task_id: "W1-T15030", step: "review.posted", pr_url: PR_URL, head_sha: HEAD,
+        state: "success", review_decision_digest: digest, reviewer_outcome: "reviewer_completed", evaluator_provenance: EVALUATOR("prior"),
+        decision_verdict: PASS });
+      return postReviewStatusGuarded({ ...GUARDED, ...o, state: "failure", evidence: "executed", reviewDecisionDigest: digest,
+        evaluatorProvenance: EVALUATOR("attempt") });
+    }),
+    "withdrawArmIfVerdictRefusesAsync pre-post disarm": async (refusals) => {
+      let renewals = 0;
+      const disarm = (url: string) => disarmAutoMergeAsync(url, { say: () => {}, isMerged: () => false,
+        disableAuto: async () => { if (renewals < refusals) UNAUTHORIZED(); } }, { renewToken: () => { renewals++; } });
+      const { outcome } = await withdrawArmIfVerdictRefusesAsync({ state: "failure", capped: false, planOnly: false },
+        { prUrl: PR_URL, taskId: "W1-T15030", headSha: HEAD, ledgerPath: "/unused", log: () => {} }, { disarm });
+      return { landed: outcome === "disarmed", renewals, unrenewable: outcome === "token_unrenewable" ? 1 : 0 };
+    },
+    "withdrawAfterPublication disarm": async (refusals) => {
+      const rows: Array<Record<string, unknown>> = [];
+      let renewals = 0;
+      const disarm = (url: string) => disarmAutoMergeAsync(url, { say: () => {}, isMerged: () => false,
+        disableAuto: async () => { if (renewals < refusals) UNAUTHORIZED(); } }, { renewToken: () => { renewals++; } });
+      const held = await withdrawAfterPublication({ state: "pending", capped: false, planOnly: false }, { prUrl: PR_URL, taskId: "W1-T15030",
+        headSha: HEAD, ledgerPath: "/unused", runId: "review-census", log: (step, extra = {}) => { rows.push({ ...extra, step }); } },
+        { disarm, claimLost: async () => undefined });
+      return { landed: held === undefined, renewals,
+        unrenewable: rows.filter((row) => row.step === "review.post_refused" && row.reason === "token_unrenewable").length };
+    },
+    "renewingIssueGateway escalation post": async (refusals) => {
+      const ledgerPath = censusLedger(t, `escalation-${refusals}`);
+      const rows: Array<Record<string, unknown>> = [];
+      let renewals = 0;
+      let filed = false;
+      const land = refusing(refusals, () => { filed = true; });
+      const gateway = renewingIssueGateway({ ensureLabel: () => true, listOpen: () => [], comment: () => {},
+        create: () => { land(); return "https://github.com/o/r/issues/1"; } },
+        { log: (step, extra = {}) => { rows.push({ ...extra, step }); }, renewToken: async () => { renewals++; } });
+      await tryEscalateAsync({ class: "MANUAL", taskId: "W1-T15030", runId: "review-census", headSha: HEAD, cause: "review",
+        summary: "s", detail: "d", options: [{ label: "a", detail: "b" }], recommendation: "a", consequence: "c" },
+        { issues: gateway, ledgerPath, runId: "review-census" });
+      return { landed: filed, renewals,
+        unrenewable: rows.filter((row) => row.step === "review.post_refused" && row.reason === "token_unrenewable").length };
+    },
+  };
+  for (const [site, drive] of Object.entries(sites)) {
+    const recovered = await drive(1);
+    assert.deepEqual(recovered, { landed: true, renewals: 1, unrenewable: 0 }, `${site}: one 401, one renewal, and the retry lands`);
+    const refused = await drive(2);
+    assert.deepEqual(refused, { landed: false, renewals: 1, unrenewable: 1 },
+      `${site}: a second 401 is one token_unrenewable refusal, and nothing lands`);
+  }
+
+  // The source census: a GitHub write added outside these helpers fails here.
+  const review = readFileSync(join(REPO_ROOT, "src/lib/review.ts"), "utf8");
+  const helper = review.slice(review.indexOf("async function postRenewingOnce"), review.indexOf("/** W1-T15030: GitHub refused the token"));
+  assert.equal([...review.matchAll(/\bawait post\(/g)].length, [...helper.matchAll(/\bawait post\(/g)].length + 1,
+    "every remudero-review status post in src/lib/review.ts is inside postRenewingOnce (the one other is postRepairLease's, which no review path calls)");
+  assert.equal([...review.matchAll(/\bpostRenewingOnce(?:<S>)?\(/g)].length, 3, "postRenewingOnce: its definition, the decision post and the conflict hold");
+  const cli = readFileSync(join(REPO_ROOT, "src/cli/commands/review.ts"), "utf8");
+  assert.deepEqual([...cli.matchAll(/\btryEscalate\(|\bghIssueGateway\(|\bdisarmAutoMerge\(prUrl/g)].map((m) => m[0]), [],
+    "no review escalation or disarm uses a sync gateway or the sync disarm");
+  const escalations = [...cli.matchAll(/tryEscalateAsync\(/g)].length;
+  const renewing = [...cli.matchAll(/issues: renewingIssueGateway\(/g)].length;
+  assert.equal(escalations, renewing, "every review escalation's gateway renews");
+  assert.equal([...cli.matchAll(/disarmAutoMergeAsync\(prUrl, realArmDepsAsync\(\), \{ renewToken \}\)/g)].length, 1,
+    "the one real disarm carries its renewal");
+  const sweep = readFileSync(join(REPO_ROOT, "src/lib/sweep.ts"), "utf8");
+  assert.equal(/\bpostReviewStatus\(/.test(sweep), false, "the sweep posts no review status of its own");
+});
+
+test("W1-T15030 criterion 2: a pending post refused twice is re-reviewed on the next pass, end to end", async (t) => {
+  // OBSERVED (review of 94ba7979a): two 401s on postReviewPending's POST wrote post_refused token_unrenewable with the
+  // input digest; tick-read-worker's reviewPostRefusedFor read it as durable, and 24h later the PR was a blocked-ambiguous
+  // escalation with 0 reviews. The fix is the one shared classifier, isRetryableReviewThrow.
+  const pass = async (durable: boolean) => {
+    const ledgerPath = censusLedger(t, durable ? "e2e-durable" : "e2e");
+    const sha = "e".repeat(40);
+    const body = "Remudero-Task: W1-T15030";
+    const prUrl = "https://github.com/o/r/pull/15032";
+    const digest = reviewInputDigest(sha, body);
+    const claim = await postReviewPending({ owner: "o", repo: "r", sha, taskId: "W1-T15030", prUrl, reviewInputDigest: digest,
+      runId: "review-PR15032-1", ledgerPath, fetchLifecycle: () => ({ merged: false, closed: false }),
+      fetchStatus: () => ({ statuses: [] }), renewToken: async () => "renewed", post: UNAUTHORIZED } as never);
+    assert.equal(claim.posted, false);
+    const refusal = readLedgerLines(ledgerPath).find((row) => row.step === "review.post_refused")!;
+    assert.deepEqual([refusal.reason, refusal.review_input_digest], ["token_unrenewable", digest], "the real row");
+    if (durable) {
+      const { ts: _ts, ...rest } = refusal;
+      appendLedger(ledgerPath, { ...rest, run_id: String(refusal.run_id), task_id: "W1-T15030", step: "review.post_refused",
+        reason: "a durable refusal" });
+    }
+    const updated = new Date(Date.now() - 60_000).toISOString();
+    const [view] = buildOpenPrViews("o", "r", ledgerPath, {
+      requiredContexts: () => ["ci-gate"],
+      fetch: (args) => {
+        const path = args.at(-1)!;
+        if (path.includes("state=open")) return [{ number: 15032, html_url: prUrl, head: { ref: "run-W1-T15030-1", sha },
+          updated_at: updated, body, auto_merge: null, state: "open" }];
+        if (path.includes("check-runs")) return { check_runs: [{ name: "ci-gate", status: "completed", conclusion: "success" }] };
+        if (path.endsWith("/status")) return { statuses: [] };
+        if (path.includes("/statuses?")) return [];
+        if (path.endsWith("/pulls/15032")) return { mergeable: true, mergeable_state: "clean" };
+        return [];
+      },
+    });
+    assert.ok(view);
+    let reviewed = 0;
+    const escalated: string[] = [];
+    await runSweep([view], {
+      ledgerPath, runId: "sweep-w1-t15030-e2e", now: () => Date.now(),
+      arm: () => {}, close: () => assert.fail("unexpected close"), dispatchFix: () => assert.fail("unexpected fix"),
+      escalate: (_pr, reason) => { escalated.push(String(reason)); }, postReview: () => { reviewed++; },
+      reviewerCodeRecovery: { loadedCodeSha: "fresh-code", isLoadedCodeAtOrAfter: () => true, freshTreeReviewAvailable: true,
+        probeFreshness: async () => ({ status: "fresh", codeSha: "fresh-code", originMainSha: "fresh-code", advance: "none" }) },
+    } as SweepDeps, DEFAULT_SWEEP_POLICY);
+    return { reviewed, escalated, view };
+  };
+  const retried = await pass(false);
+  assert.equal(retried.reviewed, 1, `THE CLAIM: the next pass re-reviews the refused input: ${JSON.stringify(retried.view)}`);
+  assert.deepEqual(retried.escalated, [], "no escalation");
+  const blocked = await pass(true);
+  assert.equal(blocked.reviewed, 0, "control: a durable refusal of the same input still blocks");
 });
