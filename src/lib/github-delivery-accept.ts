@@ -74,6 +74,8 @@ export interface GithubDeliveryChecks {
   checkRunCompleted(body: unknown): CheckRunCompletedInfo | undefined;
   /** True when a readable marker is already at `path`. */
   markerPending(path: string): boolean;
+  /** The durable companion marker for a closed pull request, if this delivery needs one. */
+  closedPullRequestWakePath(markerPath: string, record: GithubDeliveryMarker): string | undefined;
   /** W1-T14810: records a `workflow_run:completed` delivery beside the instance's marker, before the marker. */
   writeWorkflowRunCompleted(markerPath: string, record: { deliveryId: string; repository: string; receivedAtIso: string }): Promise<void>;
 }
@@ -206,6 +208,8 @@ export async function acceptGithubDelivery(rawBody: string, headers: IncomingHtt
     await checks.writeWorkflowRunCompleted(markerPath, { deliveryId, repository: owningRepository, receivedAtIso: record.receivedAtIso });
   }
   await deps.writeMarker(markerPath, record);
+  const closedWakePath = checks.closedPullRequestWakePath(markerPath, record);
+  if (closedWakePath) await deps.writeMarker(closedWakePath, record);
   await deps.dedup.record(deliveryId);
   if (deps.count && !armed) {
     deps.count("accepted_coalesced", event, action);
