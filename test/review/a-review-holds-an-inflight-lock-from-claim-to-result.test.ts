@@ -1,7 +1,9 @@
 // W1-T14947 — `rmd review` holds one in-flight lock under state/inflight/reviews from before its pending post until after
 // its terminal row, so a container recycle's drain can see it; the lock is never a task run (invariant one-lock-per-review).
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import * as reviewCommand from "#src/cli/commands/review.js";
@@ -25,8 +27,9 @@ function fixtureHost(head: string): reviewCommand.ReviewCommandHost {
   };
 }
 
-/** Drives the real reviewCommand with its publication ports faked; `reviewThrows` makes the judged review throw. */
-async function drive(t: TestContext, reviewThrows = false) {
+/** Drives the real reviewCommand with its publication ports faked; `reviewThrows` makes the judged review throw, and `seed`
+ *  writes into the reviews lock directory before the review starts. */
+async function drive(t: TestContext, reviewThrows = false, seed?: (reviewsDir: string) => void) {
   const fixture = gitRepo({ scope: t, kind: "review-inflight-lock" });
   const root = fixture.dir;
   writeFileSync(join(root, "changed.ts"), "export const changed = true;\n");
@@ -46,6 +49,7 @@ async function drive(t: TestContext, reviewThrows = false) {
   ], { kind: "review-inflight-lock" });
   const reviewsDir = join(root, "state", "inflight", REVIEW_INFLIGHT_DIR);
   const heldLocks = () => existsSync(reviewsDir) ? readdirSync(reviewsDir).filter((name) => name.endsWith(".lock")) : [];
+  seed?.(reviewsDir);
   const seen: Array<[string, number]> = [];
   const previousPath = process.env.PATH;
   process.env.PATH = `${shim.dir}:${previousPath ?? ""}`;
@@ -109,4 +113,36 @@ test("W1-T14947 a review lock is not a task run", (t) => {
   writeFileSync(join(dir, "W1-T1.lock"), JSON.stringify({ ...alive, run_id: "dispatch-run" }));
   assert.deepEqual(liveInflightRuns(dir, () => true).map((run) => run.taskId), ["W1-T1"],
     "positive control: a top-level task lock is still read");
+});
+
+/** A pid that this host just saw exit, so nothing owns it. */
+function deadPid(): number {
+  const ran = spawnSync(process.execPath, ["-e", ""]);
+  assert.ok(typeof ran.pid === "number" && ran.pid > 0, "the probe process ran");
+  return ran.pid;
+}
+
+test("W1-T14947 a review reaps a sibling review lock whose owner is gone", async (t) => {
+  const startedAt = new Date().toISOString();
+  const ran = await drive(t, false, (reviewsDir) => {
+    mkdirSync(reviewsDir, { recursive: true });
+    // A review killed past its finally, after a recycle refusal named its lock: its pid is gone on this host.
+    writeFileSync(join(reviewsDir, "killed-run.lock"), JSON.stringify({ pid: deadPid(), run_id: "killed-run", host: hostname(), startedAt }));
+    // A live sibling review (this process, started before its lock) and one another host wrote are left alone.
+    writeFileSync(join(reviewsDir, "live-run.lock"), JSON.stringify({ pid: process.pid, run_id: "live-run", host: hostname(), startedAt }));
+    writeFileSync(join(reviewsDir, "foreign-run.lock"), JSON.stringify({ pid: deadPid(), run_id: "foreign-run", host: "another-host", startedAt }));
+  });
+  assert.equal(ran.outcome, 0, String(ran.outcome));
+  assert.deepEqual(ran.seen.find(([step]) => step === "review.pending_posted"), ["review.pending_posted", 3],
+    "the dead lock is gone before the claim; the live and foreign siblings plus this review's own remain");
+  assert.deepEqual(ran.after.sort(), ["foreign-run.lock", "live-run.lock"], "only the lock whose owner is gone was reaped");
+});
+
+test("W1-T14947 an unreadable review lock directory is reported, never thrown", (t) => {
+  const dir = join(gitRepo({ scope: t, kind: "review-lock-unreadable" }).dir, "inflight");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, REVIEW_INFLIGHT_DIR), "a file where the directory belongs\n");
+  const swept = reviewCommand.reclaimDeadReviewLocks(dir);
+  assert.deepEqual(swept.reaped, []);
+  assert.match(swept.error ?? "", /ENOTDIR/, String(swept.error));
 });

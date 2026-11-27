@@ -61,7 +61,7 @@ import { step } from "../../lib/git-push.js";
 import { acquireDrainLock, type DrainLockHandle } from "../../lib/drain-lock.js";
 import { taskTargetsRepo } from "../../lib/drain.js";
 import { checkReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "../../lib/self-sync.js";
-import { acquireInflightLock } from "../../lib/inflight-lock.js";
+import { acquireInflightLock, sweepStaleInflightLocks } from "../../lib/inflight-lock.js";
 import { repoRoot, resolveOwnerRepo } from "../../lib/repo-location.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
 import { fetchPrDiff, prDiffSourceAsync } from "../../lib/pr-diff.js";
@@ -3030,6 +3030,9 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     throw e;
   }
   const ledgerPath = ledgerPathFor(config);
+  // W1-T14947: before anything else this run does, reap the review locks whose owner this container proves gone, so a
+  // recycle refusal that named one settles (see reclaimDeadReviewLocks).
+  if (!shadow) reclaimDeadReviewLocks(join(config.root, "state", "inflight"));
   const ledgerReadStartedAt = systemClock.now();
   let reviewLedger: ReturnType<typeof readLedgerLines>;
   try {
@@ -3755,6 +3758,27 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
  *  drain. Task dispatch and the orphan sweep read only the top-level `state/inflight/*.lock` files, so a review lock is never
  *  a task run (invariant one-lock-per-review). */
 export const REVIEW_INFLIGHT_DIR = "reviews";
+
+/** W1-T14947: remove each lock under `<inflightDir>/reviews` whose owner this host proves gone — its pid is dead, or now
+ *  names a process younger than the lock (isHolderStale) — and return the reaped ids. A review killed past its finally (a
+ *  drain that abandons it, a crash, a kill) leaves its lock behind. A recycle refusal may already name that lock as a
+ *  blocker, and the deployer settles a lock blocker only once the file is gone, while the held automatic recycle never
+ *  reruns deploy/recycle-container.sh, whose own reclaim runs only inside a recycle. So every review run reaps them first,
+ *  inside the container whose process table can answer. A lock another host wrote is judged exactly as the daemon's boot
+ *  sweep judges a top-level one. Never throws: an unreadable directory is returned as `error` and the review goes on. */
+export function reclaimDeadReviewLocks(
+  inflightDir: string, opts: Parameters<typeof sweepStaleInflightLocks>[1] = {},
+): { reaped: string[]; error?: string } {
+  try {
+    const { reaped } = sweepStaleInflightLocks(join(inflightDir, REVIEW_INFLIGHT_DIR), opts);
+    if (reaped.length > 0) console.log(`rmd review: reclaimed review lock(s) whose owner is gone: ${reaped.join(", ")}`);
+    return { reaped };
+  } catch (e) {
+    const error = String((e as Error)?.message ?? e);
+    console.error(`rmd review: review locks not swept (${error}); a dead one stays until a later run reaps it`);
+    return { reaped: [], error };
+  }
+}
 
 /** W1-T5998 — hold `runId` in {@link liveWorkerRunIds} for as long as `spawn` runs its worker. */
 export async function whileWorkerRunLive<T>(host: ReviewCommandHost, runId: string, spawn: () => Promise<T>, inflightDir?: string): Promise<T> {

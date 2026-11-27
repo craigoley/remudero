@@ -2,10 +2,13 @@
 // the target container, and ignores one whose owner is gone or that another container wrote. Drives the real script with a
 // fake `docker` on PATH.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { describe, test, type TestContext } from "node:test";
+import { reclaimDeadReviewLocks } from "#src/cli/commands/review.js";
+import { parseDrainBlockers, realDeployDeps } from "#src/lib/deployer.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -70,10 +73,11 @@ esac
 exit 0
 `;
 
-/** Runs one recycle whose state holds a review lock owned by pid 4242 on `lockHost`; the target container's hostname is
- *  `core-host`. Returns its exit code and output. */
+/** Runs one recycle whose state holds a review lock owned by `ownerPid` (default 4242) on `lockHost`; the target container's
+ *  hostname is `targetHost` (default `core-host`). Returns its exit code and output. */
 async function recycleWithReviewLock(
   t: TestContext, alivePids: string, lockHost = "core-host", pidStartAfterLockS?: number, removeLockOnProbe = false,
+  ownerPid = 4242, targetHost = "core-host",
 ): Promise<{ code: number | null; out: string; root: string }> {
   const owned = ownedFixtureDir(t, "recycle-review-lock");
   const root = owned.dir;
@@ -89,10 +93,10 @@ async function recycleWithReviewLock(
   writeFileSync(join(store, "containers/core-daemon/id"), "old-core-daemon\n");
   const lockedAtS = Math.floor(Date.now() / 1000);
   writeFileSync(join(root, "core/state/inflight/reviews/review-run-a.lock"),
-    JSON.stringify({ pid: 4242, run_id: "run-a", host: lockHost, startedAt: new Date(lockedAtS * 1000).toISOString() }));
+    JSON.stringify({ pid: ownerPid, run_id: "run-a", host: lockHost, startedAt: new Date(lockedAtS * 1000).toISOString() }));
   const env: NodeJS.ProcessEnv = {
     ...process.env, HOME: join(root, "home"), PATH: `${join(root, "bin")}:${process.env.PATH}`,
-    FAKE_STORE: store, FAKE_ALIVE_PIDS: alivePids, FAKE_HOSTNAME: "core-host",
+    FAKE_STORE: store, FAKE_ALIVE_PIDS: alivePids, FAKE_HOSTNAME: targetHost,
     FAKE_REMOVE_REVIEW_LOCK_ON_PROBE: removeLockOnProbe ? join(root, "core/state/inflight/reviews/review-run-a.lock") : "",
     FAKE_PID_START_EPOCH: pidStartAfterLockS === undefined ? "" : String(lockedAtS + pidStartAfterLockS), RMD_CLAUDE_DIR: join(root, "claude"),
     RMD_CODEX_DIR: join(root, "absent-codex"), RMD_CONTAINER_CONFIG_DIR: join(root, "absent-config"),
@@ -150,5 +154,30 @@ describe("test/deploy/a-recycle-drain-counts-in-flight-review-locks.test.ts", { 
     assert.match(raced.out, /no in-flight workers — safe to proceed/,
       `a review ending between the owner probe and the move does not abort recycling:\n${raced.out}`);
     assert.equal(raced.code, 0, `a vanished review lock is a settled blocker, not a shell failure:\n${raced.out}`);
+
+    // Owner gone AFTER the refusal: the held automatic recycle never reruns this script, so the in-container review run
+    // must reap the lock for the deployer's next tick to read its named blocker settled.
+    const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    t.after(() => { owner.kill("SIGKILL"); });
+    const ownerPid = owner.pid!;
+    const refused = await recycleWithReviewLock(t, String(ownerPid), hostname(), undefined, false, ownerPid, hostname());
+    assert.equal(refused.code, 1, `the live review refuses the recycle first:\n${refused.out}`);
+    const named = parseDrainBlockers(refused.out) ?? [];
+    assert.deepEqual(named.map((b) => [b.kind, b.taskId, b.runId]), [["lock", "reviews/review-run-a", "run-a"]], refused.out);
+    const record = { atMs: Date.now(), toHead: "c".repeat(40), blockers: named };
+    const deps = realDeployDeps({
+      installPath: refused.root, stateRoot: join(refused.root, "core"), daemonLabel: "com.remudero.daemon",
+      serveLabel: "com.remudero.serve", servePort: 4317, uid: 501, ledgerPath: join(refused.root, "core/state/ledger.ndjson"),
+      log: () => {}, sleep: () => {}, execFile: () => "",
+    });
+    writeFileSync(join(refused.root, "core/state/ledger.ndjson"), "");
+    owner.kill("SIGKILL");
+    await new Promise((resolve) => owner.once("exit", resolve));
+    assert.equal(spawnSync("kill", ["-0", String(ownerPid)]).status === 0, false, "the review's owner is gone");
+    assert.equal(deps.blockerSettled!(named[0]!, record), false,
+      "a dead owner alone settles nothing: the file remains and no settlement row exists");
+    const reaped = reclaimDeadReviewLocks(join(refused.root, "core/state/inflight"));
+    assert.deepEqual(reaped.reaped, ["review-run-a"], "the next review run in the container reaps the dead owner's lock");
+    assert.equal(deps.blockerSettled!(named[0]!, record), true, "the next deploy tick reads the refused review blocker settled");
   });
 });
