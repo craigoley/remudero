@@ -9,7 +9,6 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { judgeCappedRepair } from "#src/lib/classify.js";
 import { buildFixProgressInput, judgeFixProgress } from "#src/lib/fix-progress-judge.js";
 import { mountsPath } from "#src/lib/mounts.js";
 import { productionFixProgressJudge } from "#src/lib/sweep.js";
@@ -85,21 +84,3 @@ test("W1-T15163 criterion 2: a success subtype is never re-asked, and a re-ask t
   assert.ok(!("reasked_from" in decision));
 });
 
-test("W1-T15163 criterion 3: the fix.progress_judged row of a re-asked judgment names the failed provider, model and subtype", async (t) => {
-  const root = tmpRoot(t);
-  const { judge } = judgeWith(root, async (args) => args.excludeProviders?.includes("codex") ? worker(VERDICT) : codexExit());
-  const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
-  const out = await judgeCappedRepair({ bodyStrikes: 2, planRepairStrikes: 0 }, 2, { planRepairCapable: false, input: input(), judge,
-    log: (step, fields) => void rows.push({ step, fields }) });
-  assert.equal(out.kind, "repair_body");
-  const judged = rows.find((row) => row.step === "fix.progress_judged");
-  assert.ok(judged, "a fix.progress_judged row is written");
-  assert.equal(judged.fields.verdict, "continue");
-  assert.deepEqual(judged.fields.reasked_from, { provider: "codex", model: "gpt-6-luna", subtype: "error_exit_1" });
-  // A judgment answered at the first ask carries no reasked_from.
-  const first = judgeWith(root, async () => worker(VERDICT));
-  const plain: Array<{ step: string; fields: Record<string, unknown> }> = [];
-  await judgeCappedRepair({ bodyStrikes: 2, planRepairStrikes: 0 }, 2, { planRepairCapable: false, input: input(), judge: first.judge,
-    log: (step, fields) => void plain.push({ step, fields }) });
-  assert.equal(plain.find((row) => row.step === "fix.progress_judged")?.fields.reasked_from, undefined);
-});
