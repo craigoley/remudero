@@ -336,14 +336,29 @@ function credited(pr: Json): string[] {
   return [...new Set([...(branch ? [branch] : []), ...Array.from(pr.body.matchAll(/^Remudero-Task: (W[0-9]+-T[0-9]+)\r?$/gm), m => m[1]!)])]
     .filter(id => branch === id || creditsByAnchoredTrailer("MERGED", pr.headRefName as string, pr.body as string, id));
 }
+const runRefOwner = (ref: string) => ref.startsWith("refs/heads/") ? taskIdFromRunBranch(ref.slice(11)) : undefined;
+const ownedByOpenPull = (id: string, paths: readonly string[], open: Json[]) =>
+  open.some(pr => taskIdFromRunBranch(String(pr.headRefName)) === id || String(pr.body).split(/\r?\n/).includes(`Remudero-Task: ${id}`) || page(pr.files).nodes.some(file => paths.includes(String(file.path))));
+
 /** Whether `id` is owned: a dispatch claim or run branch names it, or an open pull request names it by its run branch or
  *  `Remudero-Task:` trailer, or edits one of `paths` (the record's own shard). An open pull request that only edits the
  *  code a record's `files:` lists does not own it (operator ruling 2026-11-26, decision card
  *  cmsg_01KfHU5QoLahDBtwgXxjyKDYNxapcGM6jACdh7UcsY2Z61): credit follows the trailer or run branch, and hot files always
  *  carry some open pull request, so that overlap pinned records on core for good. */
 export function taskOwned(id: string, paths: readonly string[], remote: Map<string, string>, open: Json[]): boolean {
-  if (remote.has(`refs/rmd-dispatch/${id}`) || [...remote.keys()].some(ref => ref.startsWith("refs/heads/") && taskIdFromRunBranch(ref.slice(11)) === id)) return true;
-  return open.some(pr => taskIdFromRunBranch(String(pr.headRefName)) === id || String(pr.body).split(/\r?\n/).includes(`Remudero-Task: ${id}`) || page(pr.files).nodes.some(file => paths.includes(String(file.path))));
+  if (remote.has(`refs/rmd-dispatch/${id}`)) return true;
+  for (const ref of remote.keys()) if (runRefOwner(ref) === id) return true;
+  return ownedByOpenPull(id, paths, open);
+}
+
+function indexedOwnership(remote: ReadonlyMap<string, string>) {
+  const runOwners = new Set<string>();
+  for (const ref of remote.keys()) {
+    const id = runRefOwner(ref);
+    if (id !== undefined) runOwners.add(id);
+  }
+  return (id: string, path: string, open: Json[]) =>
+    remote.has(`refs/rmd-dispatch/${id}`) || runOwners.has(id) || ownedByOpenPull(id, [path], open);
 }
 
 export interface PreviewState {
@@ -618,6 +633,24 @@ export async function citingFiles(root: string, commit: string, ids: readonly st
   return cited;
 }
 
+/** A lead is blocked by any refused namer it reaches other than itself. Propagate at most two distinct witnesses per
+ * record: even in a cycle, one of two must be someone other than the lead. */
+function leadsWithRefusedNamers(leadsByNamer: ReadonlyMap<string, readonly string[]>, refusedNamers: ReadonlySet<string>): Set<string> {
+  const witnesses = new Map<string, string[]>();
+  const blocked = new Set<string>();
+  for (const refused of refusedNamers) {
+    const queue = [refused];
+    for (const id of queue) {
+      const seen = witnesses.get(id) ?? witnesses.set(id, []).get(id)!;
+      if (seen.length === 2 || seen.includes(refused)) continue;
+      seen.push(refused);
+      if (id !== refused) blocked.add(id);
+      for (const lead of leadsByNamer.get(id) ?? []) queue.push(lead);
+    }
+  }
+  return blocked;
+}
+
 /** The selection the preview verb prints (W1-T13680 exports it for `rmd move-task`): pinned catalogs, ownership, the
  *  merge-credit search and a stable re-read. It throws {@link PreviewUnknown} on any unread or changed evidence.
  *  W1-T14345: it fills a batch of open tasks, oldest filing first, that the ops catalog has room for; a batch of one is
@@ -631,6 +664,7 @@ export async function selectPlanTaskMigration(
   if (ops.plan.tasks.some(t => pub.plan.byId.has(t.id) || t.depends_on.some(id => !ops.plan.byId.has(id) && !pub.plan.byId.has(id)))) return unknown("catalog_conflict");
   const judge = liveHeadJudge(o, { public: pub.paths, ops: ops.paths });
   const initial = await readState(o, publicRefs, opsRefs, { reader }), knownMerged = new Set(initial.recent.flatMap(credited));
+  const initiallyOwned = indexedOwnership(publicRefs);
   await judge(initial, []);
   // A positive search control is an actual known run PR, not an invented task or an age-based grant.
   const control = [...initial.recent].reverse().find(pr => taskIdFromRunBranch(String(pr.headRefName)) !== undefined);
@@ -672,7 +706,7 @@ export async function selectPlanTaskMigration(
     const orig = pub.originals.get(t.id)!;
     if (!isHistory(t) && knownMerged.has(t.id)) return "merged";
     if (t.repo !== o.publicRepo.split("/")[1]) return "target_not_bound";
-    if (taskOwned(t.id, [orig.path], publicRefs, initial.open)) return "owned";
+    if (initiallyOwned(t.id, orig.path, initial.open)) return "owned";
     if (!orig.single || !orig.shard) return "not_single_shard";
     if (alreadyMoved(orig)) return "already_moved";
     // W1-T14858: the ops gate judges a record as moved history by its status alone, so a retired record whose status is
@@ -681,6 +715,16 @@ export async function selectPlanTaskMigration(
     if (moveReservation(t.id, publicRefs, atBase) === undefined) return "reservation_absent";
     return undefined;
   };
+  const leadsByNamer = new Map<string, string[]>(), refusedNamers = new Set<string>();
+  for (const [id, tasks] of namers) {
+    for (const task of tasks) {
+      if (!leadsByNamer.has(task.id) && groupRefusal(task) !== undefined) refusedNamers.add(task.id);
+      (leadsByNamer.get(task.id) ?? leadsByNamer.set(task.id, []).get(task.id)!).push(id);
+    }
+  }
+  // A selected member already brings every namer reachable from it. A route to a permanent refusal therefore
+  // cannot disappear as the batch grows. Supersession still needs the current batch, as checked in groupOf.
+  const blockedLeads = leadsWithRefusedNamers(leadsByNamer, refusedNamers);
   /** The record's group, or undefined when any member cannot move or would leave a superseded_by unresolved in ops. */
   const groupOf = (lead: Task): Task[] | undefined => {
     const group = new Map<string, Task>([[lead.id, lead]]);
@@ -693,7 +737,7 @@ export async function selectPlanTaskMigration(
       }
     }
     const members = [...group.values()];
-    if (members.some(m => m !== lead && groupRefusal(m) !== undefined)) return undefined;
+    if (members.some(m => m !== lead && refusedNamers.has(m.id))) return undefined;
     const lands = (id: string) => group.has(id) || inBatch.has(id) || ops.plan.byId.has(id);
     if (members.some(m => m.superseded_by !== undefined && !lands(m.superseded_by))) return undefined;
     return members;
@@ -701,8 +745,13 @@ export async function selectPlanTaskMigration(
   for (const task of ordered) {
     if (inBatch.has(task.id)) continue;
     const original = pub.originals.get(task.id)!;
-    const reason = knownMerged.has(task.id) ? "merged" : task.repo !== o.publicRepo.split("/")[1] ? "target_not_bound" : taskOwned(task.id, [original.path], publicRefs, initial.open) ? "owned" :
-      named.has(task.id) && groupOf(task) === undefined ? "public_dependants" : !original.single || !original.shard ? "not_single_shard" : alreadyMoved(original) ? "already_moved" : undefined;
+    const ownershipRefusal = knownMerged.has(task.id) ? "merged" : task.repo !== o.publicRepo.split("/")[1] ? "target_not_bound" :
+      initiallyOwned(task.id, original.path, initial.open) ? "owned" : undefined;
+    if (ownershipRefusal) { refused.push({ id: task.id, reason: ownershipRefusal }); continue; }
+    // W1-T14825: an unnamed record is a group of one, selected exactly as before.
+    const group = blockedLeads.has(task.id) ? undefined : named.has(task.id) ? groupOf(task) : [task];
+    if (group === undefined) { refused.push({ id: task.id, reason: "public_dependants" }); continue; }
+    const reason = !original.single || !original.shard ? "not_single_shard" : alreadyMoved(original) ? "already_moved" : undefined;
     if (reason) { refused.push({ id: task.id, reason }); continue; }
     if (task.retirement !== undefined) {
       refused.push({ id: task.id, reason: "retired" });
@@ -716,8 +765,6 @@ export async function selectPlanTaskMigration(
       moveReservation(task.id, publicRefs, atBase) === undefined ? "reservation_absent" : undefined;
     if (unmovable) { refused.push({ id: task.id, reason: unmovable }); continue; }
     if (!control) return unknown("merge_credit_control_unreadable");
-    // W1-T14825: an unnamed record is a group of one, selected exactly as before.
-    const group = named.has(task.id) ? groupOf(task)! : [task];
     // W1-T14993: a member with no reservation ref resolves only through its own shard, so it moves only when its removal
     // (with the batch's) leaves no public citation of its id for task-id-existence to refuse.
     const leaving = new Set([...batch.map(m => String(m.sourcePath)), ...group.map(m => pub.originals.get(m.id)!.path)]);
@@ -760,13 +807,14 @@ export async function selectPlanTaskMigration(
   }
   // Independently re-read selected ownership, both source heads and each selected task's API credit before answering.
   const finalPublic = await refs(o.publicRoot, o.publicRepo), finalOps = await refs(o.opsRoot, o.opsRepo);
+  const finallyOwned = indexedOwnership(finalPublic);
   for (const member of batch.length > 0 ? batch : [undefined]) {
     const last = await readState(o, finalPublic, finalOps, { id: member ? String(member.id) : undefined, control, reader });
     stable(initial, last, carried); await judge(last, carried);
     if (member && control) {
       if (!historyIds.has(String(member.id)) && searchedMerged(last, String(member.id), control)) return unknown("candidate_credit_changed");
       const task = pub.plan.byId.get(String(member.id))!;
-      if (taskOwned(task.id, [String(member.sourcePath)], finalPublic, last.open)) return unknown("ownership_changed");
+      if (finallyOwned(task.id, String(member.sourcePath), last.open)) return unknown("ownership_changed");
     }
   }
   const candidate = batch[0];

@@ -6,11 +6,11 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { citingFiles } from "#src/lib/plan-task-migration.js";
-import { moveWorld, record, shard, type MoveWorld } from "#test/helpers/plan-move-world.js";
+import { citingFiles, type MigrationSelection } from "#src/lib/plan-task-migration.js";
+import { moveWorld, OPS, PUBLIC, record, shard, type MoveWorld } from "#test/helpers/plan-move-world.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 /** A retired record whose prose cites `cited`, with an open-shaped status as core's retired records carry. */
@@ -90,6 +90,70 @@ test("W1-T15047 criterion 2: a group with an unmovable citer stays public", asyn
   assert.equal(changeOf(s), added("W1-T7"), "THE CLAIM: a code citation keeps the whole group on core");
   const kept = taskIdExistence(s, s.main("public"));
   assert.equal(kept.status, 0, `the real check passes while the group stays: ${kept.out}`);
+});
+
+test("W1-T15047 refusal cycles: a lead is only blocked by a different unmovable member", async t => {
+  const citing = (id: string, cited: string) => record(id, `  rationale: "Follows ${cited}."\n`);
+  const malformed = (id: string, cited: string) => citing(id, cited).replace("  risk: low\n", "");
+  const w = moveWorld(t, {
+    "W1-T8": malformed("W1-T8", "W1-T9"), "W1-T9": citing("W1-T9", "W1-T8"),
+    "W1-T10": malformed("W1-T10", "W1-T11"), "W1-T11": malformed("W1-T11", "W1-T10"),
+  });
+  for (const id of ["W1-T8", "W1-T9", "W1-T10", "W1-T11"]) unreserve(w, id);
+  const result = await w.run(false);
+  assert.equal(result.out.step, "none", result.lines.join("\n"));
+  const refusals = result.out.refusals as MigrationSelection["refused"];
+  assert.deepEqual(Object.fromEntries(refusals.map(({ id, reason }) => [id, reason])), {
+    "W1-T8": "ops_gate_shape", "W1-T9": "public_dependants",
+    "W1-T10": "public_dependants", "W1-T11": "public_dependants",
+  });
+});
+
+test("W1-T15047 selection bound: overlapping prose groups with a fleet-sized ref set leave independent work movable", t => {
+  const w = moveWorld(t, {});
+  const chain = Array.from({ length: 3679 }, (_, i) => `W1-T${10000 + i}`);
+  const [cited, retired, done] = ["W1-T5001", "W1-T5002", "W1-T5003"] as const;
+  const checkout = w.pub.clone;
+  mkdirSync(join(checkout.dir, "plan/tasks.d"));
+  for (const [i, id] of chain.entries()) {
+    const prior = chain[i - 1];
+    writeFileSync(join(checkout.dir, shard(id)), record(id, prior ? `  rationale: "Follows ${prior}."\n` : ""));
+  }
+  writeFileSync(join(checkout.dir, shard(cited)), record(cited));
+  writeFileSync(join(checkout.dir, shard(retired)), RETIRED_CITING(retired, cited));
+  writeFileSync(join(checkout.dir, shard(done)), MERGED_CITING(done, retired).replace("status: merged", "status: done"));
+  checkout.git("add", "plan");
+  checkout.git("commit", "--quiet", "-m", "test: seed a plan-sized citation graph");
+  checkout.git("push", "--quiet", "origin", "main");
+  const publicCommit = w.main("public");
+  const owned = chain.at(-1)!;
+  const pullRefs = Array.from({ length: 21000 }, (_, i) => `refs/pull/${i + 1}/head`).sort();
+  // Pack the synthetic pull refs at fixture setup to avoid creating 21,000 loose ref files per run.
+  writeFileSync(join(w.pub.origin.dir, "packed-refs"), pullRefs.map(ref => `${publicCommit} ${ref}\n`).join(""));
+  w.pub.origin.git("update-ref", `refs/heads/run-${owned}-1795000000000`, publicCommit);
+  assert.equal(w.pub.origin.git("for-each-ref", "--format=%(refname)", "refs/pull").split("\n").length, pullRefs.length);
+
+  // Bound selection in a child so a synchronous traversal cannot delay the timeout.
+  const options = { publicRoot: checkout.dir, publicCommit, publicRepo: PUBLIC,
+    opsRoot: w.ops.clone.dir, opsCommit: w.main("ops"), opsRepo: OPS };
+  const start = performance.now();
+  const selected = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    import { readFileSync } from "node:fs";
+    import { selectPlanTaskMigration } from "#src/lib/plan-task-migration.js";
+    const { options, snapshot } = JSON.parse(readFileSync(0, "utf8"));
+    console.log(JSON.stringify(await selectPlanTaskMigration(options, async () => snapshot)));
+  `], { cwd: REPO_ROOT, env: { ...process.env, ...w.env }, input: JSON.stringify({ options, snapshot: w.answer("") }),
+    encoding: "utf8", timeout: 30_000 });
+  assert.ifError(selected.error);
+  assert.equal(selected.status, 0, selected.stderr);
+  t.diagnostic(`Selection took ${Math.round(performance.now() - start)} ms`);
+  const selection = JSON.parse(selected.stdout) as MigrationSelection;
+  assert.deepEqual(selection.batch.map(member => member.id), [cited, retired, done]);
+  assert.equal(selection.controls.candidateSearches, 3, "only the independently movable group spends merge-credit lookups");
+  const refused = new Map(selection.refused.map(({ id, reason }) => [id, reason]));
+  assert.equal(refused.size, chain.length);
+  assert.equal(refused.get(owned), "owned");
+  for (const id of chain.slice(0, -1)) assert.equal(refused.get(id), "public_dependants", id);
 });
 
 test("W1-T15047 citation scan: one token scan resolves many exact task ids", async t => {
