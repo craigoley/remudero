@@ -2761,6 +2761,9 @@ export function productionDispatchBreakJudge(opts: {
       scrubRiskJudgeText(JSON.stringify(input)).text,
     ].join("\n");
     const result = await (opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge"))({ ...args, prompt });
+    // W1-T14916: a retired daemon withheld this judge; it produced no ruling, so preserve that
+    // distinction for the caller instead of treating the empty transcript as an unavailable answer.
+    if (result.notStarted !== undefined) throw new WorkerNotStartedError(result.notStarted);
     if (result.subtype !== undefined && result.subtype !== "success") return undefined;
     return parseFixProgressVerdict(result.text);
   };

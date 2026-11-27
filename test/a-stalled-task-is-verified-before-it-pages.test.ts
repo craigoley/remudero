@@ -302,8 +302,14 @@ test("W1-T7742: a tripped breaker pages only when its judge rules escalate", asy
     assert.deepEqual(rulings, ["continue", "escalate", "unavailable", "unavailable"]);
 
     const markersBeforeWithheld = readLedgerLines(ledgerPath).filter((row) => row.step === "dispatch.circuit_broken.escalated").length;
-    await onCircuitBreakWithVerifier(gate, () => undefined, { ...base,
-      judge: async () => { throw new WorkerNotStartedError("admission-abandoned"); } })(breakerTask("W1-N"));
+    let retiredSpawnCalls = 0;
+    const retiredJudge = productionDispatchBreakJudge({ cwd: ".", settingsFile: "settings/worker.json",
+      mount: { model: "test-model", effort: "low", maxTurns: 1, contextBudget: 10000 }, spawn: async () => {
+        retiredSpawnCalls++;
+        return { notStarted: "admission-abandoned", subtype: "admission_abandoned", text: "" } as never;
+      } });
+    await onCircuitBreakWithVerifier(gate, () => undefined, { ...base, judge: retiredJudge })(breakerTask("W1-N"));
+    assert.equal(retiredSpawnCalls, 1, "the production judge adapter receives the retired worker result");
     assert.equal(pages.length, 3, "a retired daemon whose judge never started does not page the operator");
     assert.deepEqual(readLedgerLines(ledgerPath).filter((row) => row.step === DISPATCH_BREAKER_JUDGED_STEP)
       .map((row) => row.decision), [...rulings, "unavailable"], "the withheld judge remains an un-settled ruling for the successor");
@@ -334,6 +340,12 @@ test("W1-T7742: the production dispatch-break judge asks the risk mount with no 
   const failed = productionDispatchBreakJudge({ cwd: ".", settingsFile: "settings/worker.json",
     mount: { model: "m", effort: "low", maxTurns: 1, contextBudget: 1 }, spawn: async () => ({ text: "", subtype: "error_max_turns" }) as never });
   assert.equal(await failed(input), undefined);
+  const retired = productionDispatchBreakJudge({ cwd: ".", settingsFile: "settings/worker.json",
+    mount: { model: "m", effort: "low", maxTurns: 1, contextBudget: 1 }, spawn: async () => ({
+      notStarted: "admission-abandoned", subtype: "admission_abandoned", text: "",
+    }) as never });
+  await assert.rejects(retired(input), (error: unknown) => error instanceof WorkerNotStartedError &&
+    error.notStarted === "admission-abandoned", "the production adapter propagates a withheld spawn, not an absent verdict");
 });
 
 test("W1-T7742: the dispatch-break judge reads only the attempts since the streak last reset", () => {
