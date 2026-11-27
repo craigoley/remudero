@@ -1111,6 +1111,40 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
       if is_snapshot_name "${n}"; then printf '%s\n' "${n}"; fi
     done | sort
   }
+  # W1-T14396: the bytes one snapshot of <state> into <backups> needs. Every regular file the
+  # snapshot copies (snapshotState leaves out status.json, engines/worktrees and daemon-slots), minus
+  # each top-level ledger rotation the newest archive already holds at the same size (it is
+  # hard-linked, not copied), plus a margin of 5% and at least 64 MiB. Sizes come from `wc -c`,
+  # which reads the same on the host's GNU tools and on BSD.
+  state_snapshot_estimate_bytes() {
+    local state="$1" backups="$2" total linked=0 prev="" f name size prior_size margin
+    # An unreadable file is left out rather than failing the rung: the margin covers it.
+    total="$( { find "${state}" -type f ! -path "${state}/status.json" ! -path "${state}/engines/worktrees/*" \
+      ! -path "${state}/daemon-slots/*" -exec wc -c {} + 2>/dev/null || true; } \
+      | awk '$NF != "total" { s += $1 } END { printf "%d\n", s + 0 }')" || return 1
+    prev="$(list_snapshots "${backups}" | tail -n 1)"
+    if [ -n "${prev}" ]; then
+      for f in "${state}"/ledger.[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*.ndjson "${state}"/ledger.[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*.ndjson.gz; do
+        [ -f "${f}" ] || continue
+        name="${f##*/}"
+        [ -f "${backups}/${prev}/${name}" ] || continue
+        size="$(wc -c < "${f}" | tr -d ' ')" || continue
+        prior_size="$(wc -c < "${backups}/${prev}/${name}" | tr -d ' ')" || continue
+        [ "${size}" = "${prior_size}" ] && linked=$((linked + size))
+      done
+    fi
+    total=$((total - linked))
+    margin=$((total / 20))
+    [ "${margin}" -ge 67108864 ] || margin=67108864
+    printf '%d\n' "$((total + margin))"
+  }
+  # The free bytes of the file system that holds <dir>, from POSIX `df -Pk` (1024-byte blocks).
+  state_disk_free_bytes() {
+    local kb
+    kb="$(df -Pk -- "$1" 2>/dev/null | awk 'NR == 2 { print $4 }')" || return 1
+    case "${kb}" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%d\n' "$((kb * 1024))"
+  }
   # The roots, one per line, deduplicated. A docker that does not answer is a FAILURE, not "no
   # containers": falling back to the default would snapshot the decoy and report success.
   snap_roots=""
@@ -1153,6 +1187,23 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
     fi
     if ! mkdir -p "${snap_backups}"; then
       state_snapshot_fail "host-update: STATE SNAPSHOT FAILED — cannot create ${snap_backups}."
+      continue
+    fi
+    # W1-T14396 — FREE SPACE FIRST (invariant backup-never-fills-the-state-disk). A copy on a nearly full
+    # state disk filled /mnt/rmd on 2026-11-22, and every ledger write then failed. The estimate is the
+    # bytes snapshotState will copy (top-level rotations the newest archive holds at the same size are
+    # hard-linked, not copied) plus a margin. Too little free space writes nothing, expires nothing
+    # and fails the rung, so the existing archives stay and the alarm names both numbers.
+    if ! snap_need="$(state_snapshot_estimate_bytes "${snap_state}" "${snap_backups}")"; then
+      state_snapshot_fail "host-update: STATE SNAPSHOT FAILED — cannot estimate the size of ${snap_state}; nothing written."
+      continue
+    fi
+    if ! snap_free="$(state_disk_free_bytes "${snap_backups}")"; then
+      state_snapshot_fail "host-update: STATE SNAPSHOT FAILED — cannot read the free space of ${snap_backups}; nothing written."
+      continue
+    fi
+    if [ "${snap_free}" -lt "${snap_need}" ]; then
+      state_snapshot_fail "host-update: STATE SNAPSHOT FAILED — not enough free space: the snapshot of ${snap_state} needs about ${snap_need} bytes, ${snap_backups} has ${snap_free} free; nothing written, nothing expired."
       continue
     fi
     echo "host-update: state snapshot — ${snap_state} -> ${snap_backups} via ${STATE_SNAPSHOT_IMAGE}"

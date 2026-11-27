@@ -342,3 +342,76 @@ test(`${PROOF}: a failed backup without an escalation port remains eligible for 
     assert.equal(g.rows.filter((r) => r.step === "host_resource.state_backup_recovered").length, 0);
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
+
+const MIB = 1024 * 1024;
+const ARCHIVE_STAMPS = ["2026-10-03T12-00-00-000Z", "2026-10-04T12-00-00-000Z"];
+
+function seedArchives(root: string, rotation?: { name: string; bytes: number; priorBytes: number }) {
+  for (const stamp of ARCHIVE_STAMPS) {
+    const archive = join(root, "state-backups", `state-backup.${stamp}`);
+    mkdirSync(archive, { recursive: true });
+    writeFileSync(join(archive, "ledger.ndjson"), `{"night":"${stamp}"}\n`);
+  }
+  if (rotation) {
+    writeFileSync(join(root, "state", rotation.name), Buffer.alloc(rotation.bytes, 97));
+    const newest = join(root, "state-backups", `state-backup.${ARCHIVE_STAMPS[ARCHIVE_STAMPS.length - 1]}`);
+    writeFileSync(join(newest, rotation.name), Buffer.alloc(rotation.priorBytes, 97));
+  }
+}
+
+function stubFreeSpace(dir: string, freeKb: number) {
+  writeFileSync(join(dir, "bin", "df"), `#!/bin/sh
+echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'
+echo "/dev/fixture 1000000000 1 ${freeKb} 99% /fixture"
+`, { mode: 0o755 });
+}
+
+const archivesOf = (root: string) => readdirSync(join(root, "state-backups")).filter((n) => n.startsWith("state-backup.")).sort();
+
+test(`${PROOF}: W1-T14396 criterion 1: too little free space writes no archive, expires none and alarms with both numbers`, () => {
+  const f = fixture();
+  try {
+    seedArchives(f.root);
+    stubFreeSpace(f.dir, 1024);
+    const before = archivesOf(f.root);
+    const r = f.rung("ok", { RMD_STATE_BACKUP_KEEP: "1" });
+    assert.equal(r.status, 1, r.stderr);
+    assert.deepEqual(archivesOf(f.root), before, "no archive is written and none is expired");
+    const receipt = f.read();
+    assert.equal(receipt.result, "failed");
+    assert.equal(receipt.archives, "0");
+    const m = /not enough free space: .* needs about (\d+) bytes, .* has (\d+) free; nothing written, nothing expired/.exec(receipt.reason!);
+    assert.ok(m, `the alarm names the estimate and the free bytes: ${receipt.reason}`);
+    assert.equal(Number(m[2]), 1024 * 1024);
+    assert.ok(Number(m[1]) >= 64 * MIB, "the estimate carries the margin");
+    assert.match(parseHeartbeatPayload(f.beat()).backup_verdict!, /^FAILED: .*not enough free space/);
+    assert.equal(readFileSync(join(f.root, "state/ledger.ndjson"), "utf8"), '{"step":"run.start"}\n');
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test(`${PROOF}: W1-T14396 criterion 2: with enough free space the snapshot and its retention run as before`, () => {
+  const f = fixture();
+  try {
+    const rotation = { name: "ledger.2026-10-04T00-00-00Z.ndjson", bytes: 2 * MIB, priorBytes: 2 * MIB };
+    seedArchives(f.root, rotation);
+    // 65 MiB free: enough once the rotation the newest archive already holds is left out of the
+    // estimate (64 MiB margin plus the live ledger), not enough if it were counted.
+    stubFreeSpace(f.dir, 65 * 1024);
+    const r = f.rung("ok", { RMD_STATE_BACKUP_KEEP: "2" });
+    assert.equal(r.status, 0, r.stderr);
+    const after = archivesOf(f.root);
+    assert.deepEqual(after, [`state-backup.${ARCHIVE_STAMPS[1]}`, "state-backup.2026-10-05T12-00-00-000Z"], "the new archive lands and the oldest expires");
+    assert.equal(f.read().result, "ok");
+    assert.equal(f.read().archives, "1");
+    // The same rotation at a different size in the newest archive is copied, not linked, so it counts.
+    const g = fixture();
+    try {
+      seedArchives(g.root, { ...rotation, priorBytes: MIB });
+      stubFreeSpace(g.dir, 65 * 1024);
+      const refused = g.rung("ok", { RMD_STATE_BACKUP_KEEP: "2" });
+      assert.equal(refused.status, 1, refused.stderr);
+      assert.match(g.read().reason!, /not enough free space/);
+      assert.equal(archivesOf(g.root).length, ARCHIVE_STAMPS.length);
+    } finally { rmSync(g.dir, { recursive: true, force: true }); }
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
