@@ -25,7 +25,7 @@ import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 import { runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
 import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { lstat, readdir, rm } from "node:fs/promises";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import type { Config } from "./config.js";
 import { DEFAULT_WORKTREE_REAP_GRACE_MS, reviewWorktreeHoldState, worktreesDir, worktreeRemove, worktreeRemoveAsync } from "./worker.js";
@@ -149,7 +149,7 @@ export function sweepStrandedReviewWorktreesAsync(config: Config, log: (step: st
   opts: ReviewWorktreeSweepAsyncOptions = {}): Promise<ReviewWorktreeSweepSummary> {
   return runStepsAsync(strandedReviewWorktreeSteps(config, log, opts,
     { readHeadSha: defaultReadHeadShaAsync, readRemoteHeadSha: defaultReadRemoteHeadShaAsync, removeWorktree: worktreeRemoveAsync,
-      listRegisteredWorktrees: defaultListRegisteredWorktreesAsync, removeUnregisteredTree: (p) => rm(p, { recursive: true, force: true }),
+      listRegisteredWorktrees: defaultListRegisteredWorktrees, removeUnregisteredTree: (p) => rm(p, { recursive: true, force: true }),
       measureTreeBytes: treeBytesAsync }, true));
 }
 
@@ -393,25 +393,27 @@ function newestMtimeMs(path: string): number | undefined {
   }
 }
 
-function parseWorktreeList(out: string): string[] {
-  return out.split("\n").filter((l) => l.startsWith("worktree ")).map((l) => l.slice("worktree ".length).trim());
-}
-
+/** The clone's registered worktree paths, read from the admin directories git itself lists them from
+ *  (`<clone>/.git/worktrees/<id>/gitdir`), with no git process. `undefined` = unreadable. */
 function defaultListRegisteredWorktrees(repoDir: string): string[] | undefined {
+  const admin = join(repoDir, ".git", "worktrees");
+  let ids: string[];
   try {
-    return parseWorktreeList(hostWorktreeGit(repoDir, ["worktree", "list", "--porcelain"]));
+    ids = existsSync(admin) ? readdirSync(admin) : [];
   } catch (e) {
     console.error(`review-worktree-reclaim: could not list worktrees of ${repoDir} (${String((e as Error)?.message ?? e)})`);
     return undefined;
   }
-}
-
-async function defaultListRegisteredWorktreesAsync(repoDir: string): Promise<string[] | undefined> {
-  try { return parseWorktreeList(await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"])); }
-  catch (e) {
-    console.error(`review-worktree-reclaim: could not list worktrees of ${repoDir} (${String((e as Error)?.message ?? e)})`);
-    return undefined;
+  const paths = [repoDir];
+  for (const id of ids) {
+    try {
+      paths.push(dirname(readFileSync(join(admin, id, "gitdir"), "utf8").trim()));
+    } catch (e) {
+      console.error(`review-worktree-reclaim: could not read ${join(admin, id, "gitdir")} (${String((e as Error)?.message ?? e)})`);
+      return undefined;
+    }
   }
+  return paths;
 }
 
 /** Bytes under `path`, symlinks counted as links, never followed. */
