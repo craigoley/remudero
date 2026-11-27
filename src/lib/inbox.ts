@@ -1999,7 +1999,7 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
       "a dependency on a merged or done task is already satisfied, so leave it out of depends_on."] : []),
     "",
     "=== plan/tasks.yaml INDEX (id, title, status, type, depends_on — for depends_on grounding) ===",
-    ...(planIndex.shortlist ? ["This is a shortlist; Grep plan/tasks.yaml for any other dependency."] : []),
+    ...(planIndex.shortlist ? ["This is a shortlist; Grep plan/tasks.yaml and plan/tasks.d/ for any other dependency."] : []),
     planIndex.text,
     "",
     "=== TASK IDS — PLACEHOLDERS ONLY, never a real W1-Tnnn id (feedback#fb-1784766965325-c7b673) ===",

@@ -65,7 +65,7 @@ const SHORTLIST_PROPOSAL = {
 
 const projectedIds = (index: string): string[] => [...index.matchAll(/^- id: (\S+)$/gm)].map((m) => m[1]!);
 const INDEX_HEADER = "=== plan/tasks.yaml INDEX (id, title, status, type, depends_on — for depends_on grounding) ===\n";
-const SHORTLIST_LINE = "This is a shortlist; Grep plan/tasks.yaml for any other dependency.";
+const SHORTLIST_LINE = "This is a shortlist; Grep plan/tasks.yaml and plan/tasks.d/ for any other dependency.";
 
 function worker(): WorkerResult {
   return {
