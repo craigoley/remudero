@@ -4,14 +4,12 @@
 // 70 of the 141 task ids in the Waiting folder were ops-only.
 import assert from "node:assert/strict";
 import { rmSync, writeFileSync } from "node:fs";
-import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { updateProposalRegistry, type Proposal } from "#src/lib/inbox.js";
-import { buildPanelGraphRoutes, classifyAllProposalsMemo, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { askTaskPlan, buildInboxVerbActions, classifyAllProposalsMemo, type PanelGraphDeps } from "#src/lib/panel-graph.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import type { BoardCatalogContext } from "#src/lib/serve-plan-reload.js";
-import { createService } from "#src/lib/service.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 
@@ -35,7 +33,7 @@ function fixture(t: TestContext, proposals: Proposal[], catalog: Plan | undefine
   updateProposalRegistry(join(state, "inbox-proposals.json"), () => proposals);
   const ledgerPath = join(state, "ledger.ndjson");
   writeFileSync(ledgerPath, `${JSON.stringify({ step: "ratify.approved", task_id: OPS_RELEASED, released: "verify-human", run_id: "RELEASE-8" })}\n`);
-  const reads = { referent: 0, catalog: 0 };
+  const reads = { referent: 0, catalog: 0, plan: 0 };
   const approved: string[] = [];
   const context = (combined?: Plan): BoardCatalogContext => (combined
     ? Object.assign({ outcome: "ok" as const, observedAt: "2026-11-27T08:00:00.000Z", taskCount: 2 }, { plan: combined, opsIds: new Set<string>() })
@@ -44,7 +42,7 @@ function fixture(t: TestContext, proposals: Proposal[], catalog: Plan | undefine
     statusGithub: fakeGitHub(), github: { prView: () => null },
     ratify: { approve: (id) => { approved.push(id); }, reframe: () => undefined },
     inboxMainSha: () => "a".repeat(40),
-    readPlanSnapshot: () => corePlan,
+    readPlanSnapshot: () => { reads.plan++; return corePlan; },
     readPlanSource: () => ({ state: "loaded", generation: 1, identity: "ref:fixture", observedAt: "2026-11-27T08:00:00.000Z" }),
     ...(wired ? { inboxReferentPlan: () => { reads.referent++; return catalog; } } : {}),
     readInboxCatalog: async () => { reads.catalog++; return context(catalog); },
@@ -56,16 +54,9 @@ const states = (deps: PanelGraphDeps) =>
   new Map(classifyAllProposalsMemo(deps, () => corePlan).classifications.map(c => [c.proposalId, c]));
 
 async function approve(deps: PanelGraphDeps, proposalId: string): Promise<number> {
-  const server = createService({ tokens: { read: "read-token", write: "write-token" }, routes: buildPanelGraphRoutes(deps) });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  try {
-    const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/inbox/approve`, {
-      method: "POST", headers: { authorization: "Bearer write-token", "content-type": "application/json" },
-      body: JSON.stringify({ proposalId }),
-    });
-    await response.text();
-    return response.status;
-  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+  let status = 0;
+  await buildInboxVerbActions(deps).approve({ proposalId }, { origin: "fixture" }, code => { status = code; });
+  return status;
 }
 
 test("W1-T15105 criterion 1: an ask whose task is only in the ops catalog is judged on that task", (t) => {
@@ -82,6 +73,16 @@ test("W1-T15105 criterion 2: Approve judges an ops-catalog task's ask as the Inb
   assert.ok(status >= 200 && status < 300, `approve answered ${status}`);
   assert.equal(world.approved.length, 1, "the release is handed to the approve gateway");
   assert.equal(world.reads.catalog, 1, "the write read the catalog once");
+  assert.equal(world.reads.plan, 1, "approve classifies against the same public plan object it checked");
+});
+
+test("W1-T15105: Keep classifies an ops-catalog ask with the same task as the Inbox", async (t) => {
+  const world = fixture(t, [ask(PARKED_ASK)], combinedPlan, false);
+  let status = 0;
+  await buildInboxVerbActions(world.deps).keep({ proposalId: PARKED_ASK, kept: true }, { origin: "fixture" }, code => { status = code; });
+  assert.ok(status < 300, `keep answered ${status}`);
+  assert.equal(world.reads.catalog, 1, "keep reads the catalog once before saving the classification");
+  assert.equal(world.reads.plan, 1, "keep classifies against the same public plan object it checked");
 });
 
 test("W1-T15105 criterion 3: invariant:public-plan-otherwise — no ok catalog, or an ask naming a public task, is judged exactly as before", async (t) => {
@@ -101,6 +102,9 @@ test("W1-T15105 criterion 3: invariant:public-plan-otherwise — no ok catalog, 
   const opsNamed = fixture(t, [ask(PARKED_ASK)], combinedPlan);
   assert.deepEqual([...classifyAllProposalsMemo(opsNamed.deps, () => corePlan).projection.keys()], [PUBLIC],
     "the ops task never joins the Inbox's public projection");
+  const composed = askTaskPlan(corePlan, [ask(PARKED_ASK)], () => combinedPlan);
+  assert.equal(askTaskPlan(corePlan, [ask(PARKED_ASK)], () => combinedPlan), composed,
+    "unchanged public plan, combined catalog and named ids preserve the composed Plan identity");
   const publicApprove = fixture(t, [ask(PUBLIC_ASK)], combinedPlan, false);
   assert.ok((await approve(publicApprove.deps, PUBLIC_ASK)) < 300);
   assert.equal(publicApprove.reads.catalog, 0, "an approve naming a public task never reads the catalog");

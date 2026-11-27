@@ -2254,8 +2254,20 @@ export function askTaskPlan(plan: Plan, proposals: readonly Proposal[], readComb
   const combined = readCombined();
   const tasks = combined && combined !== plan ? [...named].flatMap(id => combined.byId.get(id) ?? []) : [];
   if (tasks.length === 0) return plan;
-  return { tasks: [...plan.tasks, ...tasks], byId: new Map([...plan.byId, ...tasks.map(task => [task.id, task] as const)]) };
+  const ids = [...new Set(tasks.map(task => task.id))].sort().join("\0");
+  let byCombined = askTaskPlanMemo.get(plan);
+  if (!byCombined) askTaskPlanMemo.set(plan, byCombined = new WeakMap());
+  let byIds = byCombined.get(combined!);
+  if (!byIds) byCombined.set(combined!, byIds = new Map());
+  const cached = byIds.get(ids);
+  if (cached) return cached;
+  const composed = { tasks: [...plan.tasks, ...tasks], byId: new Map([...plan.byId, ...tasks.map(task => [task.id, task] as const)]) };
+  byIds.set(ids, composed);
+  return composed;
 }
+
+// FragmentMemo keys parsed drafts by Plan identity. Keep the composed identity while every source input is stable.
+const askTaskPlanMemo = new WeakMap<Plan, WeakMap<Plan, Map<string, Plan>>>();
 
 /** W1-T15105: the terminal's {@link askTaskPlan}, read as serve's approve reads it. */
 export async function readAskTaskPlan(plan: Plan, proposals: readonly Proposal[], stateDir: string,
@@ -4439,12 +4451,8 @@ function inboxRegistryHas(deps: PanelGraphDeps, proposalId: string): boolean {
 }
 
 /** W1-T15105: approve judges an ops task's ask as the Inbox read did. */
-async function approveCatalogDeps(deps: PanelGraphDeps, proposalId: string): Promise<PanelGraphDeps> {
-  const taskId = deriveTaskReferent(proposalId);
-  if (deps.inboxReferentPlan || taskId === undefined) return deps;
-  // A plan read error surfaces as before: classifyAllProposals reads this plan the same way.
-  const publicPlan = approvePlanReader(deps)(deps.planPath);
-  if (publicPlan.byId.has(taskId)) return deps;
+async function askCatalogDeps(deps: PanelGraphDeps, publicPlan: Plan, proposal: Proposal): Promise<PanelGraphDeps> {
+  if (deps.inboxReferentPlan || missingAskTasks(publicPlan, [proposal]).size === 0) return deps;
   const read = deps.readInboxCatalog ?? ((pub: () => Plan | undefined) => readBoardCatalogs(pub, dirname(deps.ledgerPath)));
   const context = await read(() => publicPlan);
   const combined = context?.outcome === "ok" ? context.plan : undefined;
@@ -4477,7 +4485,11 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       // irreversible spawn, so it alone reads via loadPlanAtRef, "cannot be partial" (W1-T2220).
       // W1-T13605: like every other write, it classifies only the proposal it names. The full pass ran every
       // anchor's git grep on serve's main thread after a cold start: a 123 s loop stall on 2026-11-18.
-      const { proposals, classifications } = classifyAllProposals(await approveCatalogDeps(deps, input.proposalId), approvePlanReader(deps), input.proposalId);
+      const plan = approvePlanReader(deps)(deps.planPath);
+      const readProposals = inboxProposalReader(deps);
+      const proposal = readProposals().find(p => p.id === input.proposalId);
+      const classifiedDeps = proposal ? await askCatalogDeps(deps, plan, proposal) : deps;
+      const { proposals, classifications } = classifyAllProposals(classifiedDeps, () => plan, input.proposalId);
       if (!proposals.some((p) => p.id === input.proposalId)) {
         respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
         return;
@@ -4519,8 +4531,12 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       if (fields.kept !== undefined && typeof fields.kept !== "boolean") return { error: "kept must be a boolean" };
       if (fields.reason !== undefined && typeof fields.reason !== "string") return { error: "reason must be a string" };
       return { ...id, kept: fields.kept !== false, reason: fields.reason as string | undefined };
-    }, (input, actor, respond) => {
-      const classified = classifyInboxDecision(deps, input.proposalId);
+    }, async (input, actor, respond) => {
+      const plan = (deps.readPlanSnapshot ?? loadPlan)(deps.planPath);
+      const readProposals = inboxProposalReader(deps);
+      const proposalForPlan = readProposals().find(p => p.id === input.proposalId);
+      const classifiedDeps = proposalForPlan ? await askCatalogDeps(deps, plan, proposalForPlan) : deps;
+      const classified = classifyAllProposals(classifiedDeps, () => plan, input.proposalId);
       const proposal = classified.proposals.find(p => p.id === input.proposalId);
       if (!proposal) { respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` }); return; }
       const classification = classified.classifications.find(c => c.proposalId === input.proposalId);
