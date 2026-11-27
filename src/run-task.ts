@@ -19231,19 +19231,6 @@ export function readInlinePlanRecords(planPath: string): Array<{ taskId: string;
   return out;
 }
 
-/** Read `plan/tasks.d/*.yaml` as `{ taskId, path, text }`, skipping anything without an `- id:`. */
-function readPlanShards(dir: string): Array<{ taskId: string; path: string; text: string }> {
-  const out: Array<{ taskId: string; path: string; text: string }> = [];
-  for (const name of readdirSync(dir)) {
-    if (!name.endsWith(".yaml")) continue;
-    const path = join(dir, name);
-    const text = readFileSync(path, "utf8");
-    const id = text.match(/^- id: (\S+)/m)?.[1];
-    if (id) out.push({ taskId: id, path, text });
-  }
-  return out;
-}
-
 export function windowShortShards(
   shards: ReadonlyArray<{ taskId: string; text: string }>,
   credited: ReadonlySet<string>,
@@ -19297,7 +19284,7 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
   const reportWindowShort = () => {
     if (windowShort.length === 0) return;
     const names = windowShort.slice(0, 20).join(", ") + (windowShort.length > 20 ? ` (+${windowShort.length - 20} more)` : "");
-    console.error(`### rmd plan-reconcile: WINDOW-SHORT — ${windowShort.length} queued shard(s) are merged on origin/main but their merge subject and changed paths are outside the credit scan windows (subjects: last ${MERGE_SUBJECT_SCAN_LIMIT} commits, paths: last ${MERGED_PATHS_SCAN_LIMIT}) or carry no (#N), so they cannot be judged and were NOT flipped: ${names} — flip them by hand in a plan-only PR`);
+    console.error(`### rmd plan-reconcile: WINDOW-SHORT — ${windowShort.length} queued shard(s) are merged on origin/main but their merge commit carries no (#N) or its changed paths could not be read by sha, so they cannot be judged and were NOT flipped: ${names} — flip them by hand in a plan-only PR`);
     (deps.log ?? (() => {}))("plan.reconcile.window_short", { count: windowShort.length });
   };
   try {
@@ -19343,6 +19330,7 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
     mode: write ? "write" : "dry-run",
     rewritten: summary.rewritten.length,
     skipped: summary.skipped,
+    ...(summary.sharedShards?.length ? { shared_shards: summary.sharedShards } : {}),
     ...(inline && "queued" in inline ? { inline_queued: inline.queued, inline_creditable: inline.creditable.length } : {}),
   });
   console.log(renderPlanReconcile(summary, write, inline));
@@ -19612,6 +19600,8 @@ export function renderPlanReconcile(summary: ReconcileSummary, write: boolean, i
     `### rmd plan-reconcile${write ? " --write" : " (dry run — nothing written)"}\n` +
     `${summary.rewritten.length} shard(s) ${write ? "reconciled" : "would be reconciled"} to status: merged` +
     (skipped ? `\nskipped: ${skipped}` : "") +
+    // W1-T11183: a file holding several records is read but never rewritten; name its records so none is unaccounted.
+    (summary.sharedShards?.length ? `\nleft as they are (their file holds several records): ${summary.sharedShards.join(" ")}` : "") +
     (summary.rewritten.length > 0 && !write ? reviewHint : "") +
     (inline && "unreadable" in inline ? `\nplan/tasks.yaml: unreadable (${inline.unreadable}), its queued records were not counted` : "") +
     (inline && "queued" in inline && inline.queued > 0
@@ -45335,7 +45325,7 @@ function commandSyntax(name: string): string {
 // (test/run-task.test.ts, test/install-symlink-refusal.test.ts, plus this file's own
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
-import { reconcilePlan, reconcileShardStatus, revertedRequeues, type RevertedRequeue, type ReconcileSummary } from "./lib/plan-reconcile.js";
+import { readPlanShards, reconcilePlan, reconcileShardStatus, revertedRequeues, type RevertedRequeue, type ReconcileSummary } from "./lib/plan-reconcile.js";
 import { PLAN_RECONCILE_LANDING_BODY_BUDGET, PLAN_RECONCILE_LANDING_RECORD_LIMIT, takePlanReconcileBatch } from "./lib/plan-reconcile-batch.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
@@ -45354,7 +45344,7 @@ import {
   escalateRunChildContract, type RunChildContractEscalation, type RunChildModeDecision, type RunChildModeEvidence,
 } from "./lib/run-child-mode.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
-import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, MERGE_SUBJECT_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildBehindMainByPrAsync, buildCreditCandidates, buildEscalationReconcileCandidates, buildEscalationReconcileCandidatesAsync, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger, usesUntaskedReviewMetadata } from "./lib/tick-read-worker.js";
+import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildBehindMainByPrAsync, buildCreditCandidates, buildEscalationReconcileCandidates, buildEscalationReconcileCandidatesAsync, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger, usesUntaskedReviewMetadata } from "./lib/tick-read-worker.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
@@ -46668,7 +46658,6 @@ export {
   MAX_RETAINED_REMEDY_LINES,
   MAX_RETAINED_VERDICT_LINES,
   MERGED_PATHS_SCAN_LIMIT,
-  MERGE_SUBJECT_SCAN_LIMIT,
   RETAINED_POOL_HEADER,
   RETAINED_REMEDY_HEADER,
   RETAINED_RULE_SUITES_HEADER,

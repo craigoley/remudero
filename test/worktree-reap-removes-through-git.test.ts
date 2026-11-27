@@ -28,9 +28,6 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { planWorktreeRemoval, reapStaleWorktrees } from "#src/lib/worker.js";
-import { emptyHostProcessTable } from "#test/helpers/empty-process-table.js";
-
-emptyHostProcessTable(); // W1-T15026: the reapers here decide removals on an owned process table, not the host's
 
 const GIT_ENV = {
   ...process.env,
