@@ -414,7 +414,8 @@ import {
   type MainRunGapHistory,
 } from "./main-run-gaps.js";
 import { mutationVerdictRunIdsFromLedger, pullMutationVerdicts, readMutationVerdictZip } from "./mutation-verdict-pull.js";
-import { FOLD_DEBT_PULL_ERROR_STEP, foldDebtRunIdsFromLedger, landFoldDebt, pullFoldDebtEntries } from "./fold-debt-pull.js";
+import { readWorkflowRunCompleted, workflowRunCompletedPath } from "./github-event-wake.js";
+import { artifactListingDue, FOLD_DEBT_PULL_ERROR_STEP, foldDebtRunIdsFromLedger, landFoldDebt, pullFoldDebtEntries, type ArtifactListingKind, type ArtifactListingState } from "./fold-debt-pull.js";
 import {
   REFUSAL_AMENDMENT_MAX_AGE_MS,
   REFUSAL_AMENDMENT_STEP,
@@ -2487,6 +2488,9 @@ export async function readSessionOwnershipViaGit(
 /** W1-T2927: artifact ids already read; process-lifetime because effects are rebuilt every poll. */
 const settledMutationVerdictArtifacts = new Set<number>();
 const settledFoldDebtArtifacts = new Set<number>(); // W1-T7853, the same per-process settle
+/** W1-T14810: each instance's last artifact listing, by `<state root>\0<owner>/<repo>`; process-lifetime
+ *  like the sets above, so a restarted daemon lists once on its first sweep. */
+const artifactListings = new Map<string, ArtifactListingState>();
 /** W1-T6022: changed-file sources by `<owner>/<repo>@<head>:<path>`, process-lifetime like the set above. */
 const prFileSources = new Map<string, string>();
 
@@ -2566,6 +2570,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readFleetState",
   "pullMutationVerdicts",
   "pullFoldDebt",
+  "artifactListingDue", // W1-T14810
   "readStaleRedWorkflowRuns",
   "runStaleRedLocalRoute",
   "releaseStaleRed",
@@ -2900,6 +2905,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readFleetState"
   | "pullMutationVerdicts"
   | "pullFoldDebt"
+  | "artifactListingDue"
   | "readStaleRedWorkflowRuns"
   | "runStaleRedLocalRoute"
   | "releaseStaleRed"
@@ -3252,6 +3258,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // use everywhere else in this file (see e.g. sweepCommand's own `inflightDir`, above) — the fix
   // rung's per-(repo, branch) exclusive claim (dispatchFix, below) reuses this directory rather
   // than a second lock location.
+  /** W1-T14810: this poll's due listings, so a failed one can restore its stamp. */
+  const listingRollbacks = new Map<ArtifactListingKind, () => void>();
   const inflightDir = join(config.root, "state", "inflight");
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
   const openEscalationIssues = issuesImpl ?? ghIssueGatewayAsync(owner, repo);
@@ -4833,7 +4841,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         return await runPlanScopedFixRound({ pr: { ...pr, headRefName: live.head.ref, ciFailures }, task, worktreePath,
           title: live.title, body: live.body, runId, admission: config.contributorAdmission,
           conflict: pr.mergeState === "dirty",
-          lastRefusal: parseLedger(ledgerPath).findLast((l) => l.step === "sweep.plan_round.refused" &&
+          lastRefusal: parseLedger(await fs.promises.readFile(ledgerPath, "utf8").catch((error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return "";
+            throw error;
+          })).findLast((l) => l.step === "sweep.plan_round.refused" &&
             l.pr_number === pr.prNumber && l.head_sha === pr.headSha)?.reason,
           deps: roundEffects,
         });
@@ -6546,9 +6557,28 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         for (const u of unread) log("sweep.mutation_verdict_pull.error", { phase: "artifact", ...u });
         return rows;
       } catch (e) {
+        // W1-T14810: a failed listing restores its stamp, so the next sweep lists again.
+        listingRollbacks.get("mutation_verdict")?.();
         log("sweep.mutation_verdict_pull.error", { phase: "list", error: String((e as Error)?.message ?? e) });
         return [];
       }
+    },
+
+    // W1-T14810 — the two artifact listings wait for a completed workflow run, with a freshness floor.
+    artifactListingDue: (kind) => {
+      listingRollbacks.delete(kind);
+      const key = `${config.root}\0${owner}/${repo}`;
+      let state = artifactListings.get(key);
+      if (state === undefined) artifactListings.set(key, (state = new Map()));
+      const run = readWorkflowRunCompleted(workflowRunCompletedPath(config.root));
+      const runCompletedAtMs = run === undefined ? undefined : Date.parse(run.receivedAtIso);
+      const rollback = artifactListingDue(state, kind, {
+        nowMs: nowMsImpl(),
+        runCompletedAtMs: Number.isFinite(runCompletedAtMs) ? runCompletedAtMs : undefined,
+        recheckMs: POLICY_GITHUB_EVENT_WAKE.artifactRecheckMs,
+      });
+      if (rollback) listingRollbacks.set(kind, rollback);
+      return rollback !== undefined;
     },
 
     // W1-T7853 — fold debt a CI run filed, written into this checkout's plan/feedback and landed.
@@ -6568,6 +6598,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         };
         return await landFoldDebt(await pullFoldDebtEntries(input), input);
       } catch (e) {
+        listingRollbacks.get("fold_debt")?.(); // W1-T14810: as for the mutation-verdict listing above
         log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "list", error: String((e as Error)?.message ?? e) });
         return [];
       }
@@ -8037,7 +8068,8 @@ async function applyActionsIncidentHold(
   const cancelled = pr.cancelledRequiredChecks ?? [];
   const failures = pr.ciFailures ?? [];
   const timeout = classifyCiTimeoutNoVerdict(failures, pr.redRequiredChecks ?? [], cancelled.map((c) => c.name));
-  if (!pinnedJob && !timeout && (cancelled.length === 0 || failures.some((f) => !cancelled.some((c) => c.name === f.name)))) return undefined;
+  if (!pinnedJob && !timeout && (cancelled.length === 0 || failures.some(f =>
+    !cancelled.some(c => c.name === f.name || cancelledPostFor(f, c))))) return undefined;
   const incident = await readIncident();
   const decision = actionsIncidentHoldDecision(incident, hold, now);
   if (decision === "proceed") return undefined;
@@ -8789,7 +8821,7 @@ export interface SweepPolicy {
  *  default, never to unbounded spend, and the cost ceiling bounds RUNAWAY spend, not a budget.
  *  Several rows are COLLECTED from `plan/policy.yaml` rather than written as source literals, each a
  *  RELOCATION and never a retune. // Why: FROZEN AT IMPORT (W1-T331) — docs/forensics/sweep.md. */
-const { sweep: POLICY_SWEEP, sweepWallClockBoundMs: POLICY_SWEEP_WALL_CLOCK_BOUND_MS, fix: POLICY_FIX } = loadDefaultPolicy().values;
+const { sweep: POLICY_SWEEP, sweepWallClockBoundMs: POLICY_SWEEP_WALL_CLOCK_BOUND_MS, fix: POLICY_FIX, githubEventWake: POLICY_GITHUB_EVENT_WAKE } = loadDefaultPolicy().values;
 
 /** W1-T1049 — reads `plan/policy.yaml`'s `sweep.reviewLanes` row DIRECTLY, never through
  *  `policy.ts`'s schema, which is outside this task's declared files. Validated like every other
@@ -9652,7 +9684,7 @@ export function checksPendingSinceFromRollup(
  *  verdict rather than a bad one, so the job can be re-queued instead of a worker dispatched. */
 export interface CancelledRequiredCheck {
   name: string;
-  /** Failed posted gates whose exact head/run/attempt/job and own cancelled outcome bind to this producer. */
+  /** Red posted gates whose exact head/run/attempt/job and own cancelled outcome bind to this producer. */
   explainedFailures?: readonly { name: string; checkRunId: number }[];
   /** GitHub Actions job id, parsed by the real gateway from the rollup's URL or external id — the
    *  re-queue target is the JOB (design iv), never the workflow run. `undefined` when none could
@@ -9692,6 +9724,39 @@ export function cancelledRequiredCheckNames(
 
 const qualityGate = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): RollupCheckEntry[] => dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT && ([...(requiredCheckNames ?? [])].includes(c.name ?? "") || [...(requiredCheckNames ?? [])].includes(c.context ?? ""))));
 const rollupState = (c: RollupCheckEntry) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
+
+type PostedCancellation = NonNullable<CancelledRequiredCheck["explainedFailures"]>[number];
+
+function cancelledPostFor(failure: CiFailure, check: CancelledRequiredCheck): PostedCancellation | undefined {
+  if (failure.conclusion !== "CANCELLED" || failure.jobId !== check.jobId) return undefined;
+  return check.explainedFailures?.find(alias => alias.name === failure.name);
+}
+
+function confirmsPostedCancellation(check: CancelledRequiredCheck, latest: readonly RollupCheckEntry[]): boolean {
+  const aliases = check.explainedFailures;
+  if (aliases === undefined || aliases.length === 0) return true;
+  const producers = latest.filter(c => (c.name ?? c.context) === check.name && checkJobId(c) === check.jobId);
+  const producer = producers.length === 1 ? producers[0] : undefined;
+  return producer !== undefined && (producer.conclusion ?? producer.state ?? "").toUpperCase() === "CANCELLED" &&
+    (producer.status ?? "").toUpperCase() === "COMPLETED" && aliases.every(alias => {
+      const matches = latest.filter(c => (c.name ?? c.context) === alias.name && c.checkRunId === alias.checkRunId);
+      if (matches.length !== 1) return false;
+      const state = rollupState(matches[0]);
+      return state === "FAILURE" || state === "CANCELLED";
+    });
+}
+
+function postedCancellationExplainsRed(alias: PostedCancellation, latest: readonly RollupCheckEntry[]): boolean {
+  return !latest.some(c => (c.name ?? c.context) === alias.name && c.checkRunId &&
+    c.checkRunId !== alias.checkRunId && REQUIRED_CHECK_FAIL.has(rollupState(c)));
+}
+
+function producerCancellationExplainsRed(check: CancelledRequiredCheck, latest: readonly RollupCheckEntry[]): boolean {
+  const aliases = check.explainedFailures;
+  return aliases === undefined || aliases.length === 0 || !latest.some(c => (c.name ?? c.context) === check.name &&
+    REQUIRED_CHECK_FAIL.has(rollupState(c)) && rollupState(c) !== "CANCELLED");
+}
+
 export const redQualityGateNames = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): string[] => {
   const required = [...(requiredCheckNames ?? [])];
   const red = qualityGate(rollup, required).filter((c) => REQUIRED_CHECK_FAIL.has(rollupState(c))).map((c) => c.name ?? c.context ?? "unknown");
@@ -18466,6 +18531,9 @@ export interface SweepDeps {
   pullMutationVerdicts?: (recorded: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
   /** W1-T7853 — pulls the fold debt CI filed (see fold-debt-pull.ts); returns the rows to append. */
   pullFoldDebt?: (ingested: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
+  /** W1-T14810 — whether this full pass lists `kind`'s artifacts (see fold-debt-pull.ts's
+   *  `artifactListingDue`); a `true` stamps the listing. Omitted, every full pass lists, as before. */
+  artifactListingDue?: (kind: ArtifactListingKind) => boolean;
   /** W1-T2620 — RELEASE the one base-caused stand-down chosen this pass: never a loop, the same
    *  AT-MOST-ONCE shape the update-branch dep uses. THE LEAF IS THE ONE THAT EXISTS, never a second
    *  outward path. Omitted, the target still stands down with the ordinary sentence; a THROW is
@@ -20436,7 +20504,11 @@ function readFixRungEnd(lines: Array<Record<string, unknown>>, taskId: string | 
 
 /** W1-T10339 — WHAT A STAND-DOWN READ. Each `fix.stood_down` and `fix.needs_design` row names the head, the task-contract
  *  revision and (for a PR with no task trailer, whose BODY is the authoritative Acceptance) the body digest it worked on. */
-export interface FixRungInputs { headSha: string; contractRevision?: string; bodySha256?: string }
+export interface FixRungInputs {
+  headSha: string; contractRevision?: string; bodySha256?: string;
+  /** W1-T14871: the rollup state and red checks an empty-CI-evidence stand-down read; a hold releases once either moves. */
+  checksState?: string; redChecks?: readonly string[];
+}
 
 /** The non-conflict rung defers a dirty PR to the existing conflict repair route. */
 export const CONFLICT_REPAIR_HANDOFF_REASON = "merge state is dirty (mergeable === false or mergeable_state === \"dirty\") — a conflicted PR registers no new check runs, so a strike buys no information; standing down for the sweep's own conflicted disposition rather than retrying blindly";
@@ -20452,7 +20524,13 @@ export function fixRungInputFields(inputs: Partial<FixRungInputs>): Record<strin
     ...(inputs.headSha === undefined ? {} : { read_head_sha: inputs.headSha }),
     ...(inputs.contractRevision === undefined ? {} : { read_contract_revision: inputs.contractRevision }),
     ...(inputs.bodySha256 === undefined ? {} : { read_body_sha256: inputs.bodySha256 }),
+    ...(inputs.checksState === undefined ? {} : { read_checks_state: inputs.checksState }),
   };
+}
+
+/** W1-T14871: the red checks a stand-down read, as the sorted list its row records. */
+export function fixRungRedCheckFields(redChecks: readonly string[] | undefined): { read_red_checks?: string[] } {
+  return redChecks === undefined ? {} : { read_red_checks: [...new Set(redChecks)].sort() };
 }
 
 /** W1-T10339 — have the inputs a recorded row read moved? A row written before these fields existed has not recorded
@@ -20465,8 +20543,17 @@ export function fixRungInputsUnchanged(row: Record<string, unknown>, current: Fi
         row.reason.includes(", cause) is ALREADY OPEN and ")) return false;
   if (typeof row.read_contract_revision === "string" && current.contractRevision !== undefined &&
       row.read_contract_revision !== current.contractRevision) return false;
-  return !(typeof row.read_body_sha256 === "string" && current.bodySha256 !== undefined &&
-    row.read_body_sha256 !== current.bodySha256);
+  if (typeof row.read_body_sha256 === "string" && current.bodySha256 !== undefined &&
+    row.read_body_sha256 !== current.bodySha256) return false;
+  // W1-T14871: a stand-down taken while CI was still pending is released once it settles, and one that recorded its
+  // red checks is released when the red checks differ. A row without these fields keeps today's hold.
+  if (row.read_checks_state === "pending" && current.checksState !== undefined && current.checksState !== "pending") return false;
+  if (Array.isArray(row.read_red_checks) && current.redChecks !== undefined) {
+    const recorded = [...new Set(row.read_red_checks.map(String))].sort();
+    const now = [...new Set(current.redChecks)].sort();
+    if (recorded.length !== now.length || recorded.some((name, i) => name !== now[i])) return false;
+  }
+  return true;
 }
 
 /** W1-T10653 — WHEN DID THIS HEAD'S RUNG FIRST STAND DOWN ON AN ALREADY-OPEN ESCALATION, and has nothing dispatched since?
@@ -25220,7 +25307,7 @@ export async function runSweep(
   deps.markPrelude?.("fleet_state", false, fleetStateParts && { fleet_state_parts: fleetStateParts });
   if (endsForRestart("fleet_state")) return endedEarly();
   // Full passes only: one paced list per pass, deduped on the ledger's own run_ids.
-  if (deps.pullMutationVerdicts && deps.repairAdmissionSurface !== "light") {
+  if (deps.pullMutationVerdicts && deps.repairAdmissionSurface !== "light" && (deps.artifactListingDue?.("mutation_verdict") ?? true)) {
     try {
       const pulled = await deps.pullMutationVerdicts(mutationVerdictRunIdsFromLedger(ledgerLines));
       for (const row of pulled) appendLine(deps.ledgerPath, row as Parameters<typeof appendLine>[1]);
@@ -25232,7 +25319,7 @@ export async function runSweep(
   deps.markPrelude?.("mutation_verdicts");
   if (endsForRestart("mutation_verdicts")) return endedEarly();
   // W1-T7853: the same full passes, deduped on the workflow runs the ledger already settled.
-  if (deps.pullFoldDebt && deps.repairAdmissionSurface !== "light") {
+  if (deps.pullFoldDebt && deps.repairAdmissionSurface !== "light" && (deps.artifactListingDue?.("fold_debt") ?? true)) {
     try {
       for (const row of await deps.pullFoldDebt(foldDebtRunIdsFromLedger(ledgerLines))) {
         appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", ...row } as Parameters<typeof appendLine>[1]);
@@ -26617,10 +26704,7 @@ export async function runSweep(
       const cancelled = pr.cancelledRequiredChecks!.filter(c => fresh.has(c.name));
       const freshProducers = dedupeRollupByLatestAttempt(rollup ?? []);
       const explained = new Set(pr.cancelledRequiredChecks!.flatMap(c => c.explainedFailures ?? [])
-        .filter(alias => {
-          const matches = freshProducers.filter(c => (c.name ?? c.context) === alias.name);
-          return matches.every(latest => !latest.checkRunId || latest.checkRunId === alias.checkRunId || !REQUIRED_CHECK_FAIL.has(rollupState(latest)));
-        }).map(alias => alias.name));
+        .filter(alias => postedCancellationExplainsRed(alias, freshProducers)).map(alias => alias.name));
       const deterministicTimeouts = new Set<string>();
       const outcomes: string[] = [];
       let escalated = false;
@@ -26640,17 +26724,9 @@ export async function runSweep(
           continue;
         }
         if (deferred !== undefined) continue;
-        if (check.explainedFailures?.length) {
-          const producers = freshProducers.filter(latest => (latest.name ?? latest.context) === check.name && checkJobId(latest) === check.jobId);
-          const producer = producers.length === 1 ? producers[0] : undefined;
-          if (!producer || (producer.conclusion ?? producer.state ?? "").toUpperCase() !== "CANCELLED" ||
-              (producer.status ?? "").toUpperCase() !== "COMPLETED" || !check.explainedFailures.every(alias => {
-                const aliases = freshProducers.filter(latest => (latest.name ?? latest.context) === alias.name && latest.checkRunId === alias.checkRunId);
-                return aliases.length === 1 && rollupState(aliases[0]) === "FAILURE";
-              })) {
-            outcomes.push(`producer cancellation for "${check.name}" is no longer confirmed — awaiting fresh CI`);
-            continue;
-          }
+        if (!confirmsPostedCancellation(check, freshProducers)) {
+          outcomes.push(`producer cancellation for "${check.name}" is no longer confirmed — awaiting fresh CI`);
+          continue;
         }
         if (decision.requeue) {
           const result = await requeueCheckJob(deps, pr, check, checkDeferrals.get(key), rollup);
@@ -26671,10 +26747,7 @@ export async function runSweep(
       }
       // Only ci and ci-gate downstream of this cancelled shard are explained by cancellation.
       const genuine = [...fresh].filter(name => deterministicTimeouts.has(name) ||
-        (!explained.has(name) && !cancelled.some(c => c.name === name &&
-          !(c.explainedFailures?.length && dedupeRollupByLatestAttempt(rollup ?? []).some(latest =>
-            (latest.name ?? latest.context) === name && REQUIRED_CHECK_FAIL.has(rollupState(latest)) &&
-            rollupState(latest) !== "CANCELLED"))) && name !== "ci-gate" &&
+        (!explained.has(name) && !cancelled.some(c => c.name === name && producerCancellationExplainsRed(c, freshProducers)) && name !== "ci-gate" &&
           !(name === "ci" && pr.cancelledRequiredChecks!.some(c => /^ci-shard \(\d+\/\d+\)$/.test(c.name)))));
       if (genuine.length === 0) {
         infrastructureBlockerByPr.set(pr.prNumber, escalated ? "escalated" : "awaiting-ci");
@@ -27202,7 +27275,7 @@ export async function runSweep(
       }
       catch (error) { readable = false; deps.log?.("sweep.stand_down_hold.unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) }); }
       const held = readable ? fixSeedRead(ledgerLines, pr, deps.runId,
-        { headSha: pr.headSha, contractRevision, bodySha256: standDownBodySha }) : undefined;
+        { headSha: pr.headSha, contractRevision, bodySha256: standDownBodySha, checksState: pr.checksState, redChecks: pr.redRequiredChecks ?? [] }) : undefined;
       const conflictHold = held?.hold?.site === "rung.strike" && held.hold.reason === CONFLICT_REPAIR_HANDOFF_REASON;
       const conflictHandoff = disposition === "conflicted" && hasCapturedMergeConflictEvidence(pr.mergeConflict) && conflictHold;
       const heldUnderMain = conflictHold && held?.hold?.at !== undefined ? ledgerLines.find(row => row.step === "sweep.disposed" &&
@@ -28901,6 +28974,10 @@ export async function runSweep(
               // cancellations never spends a strike on nothing.
               if (cancelledChecks.length > 0) {
                 const outcomes: string[] = [];
+                const latest = dedupeRollupByLatestAttempt(ciGateRollup ?? []);
+                // Build fixes still receive legacy FAILURE posts. The snapshot selects the new CANCELLED path
+                // even if the fresh rollup has just cleared one of the gates.
+                const cancelledPosts = new Set(cancelledChecks.filter(check => pr.ciFailures?.some(f => cancelledPostFor(f, check))));
                 // W1-T8040: cancelled checks whose own log proves a deterministic ceiling timeout; they stay
                 // genuine failures for the ci-log fix path instead of earning a requeue.
                 const deterministicTimeouts = new Set<string>();
@@ -28928,6 +29005,10 @@ export async function runSweep(
                     outcomes.push(`not re-queued "${check.name}" (deterministic-timeout: ${timeoutSignature})`);
                     continue;
                   }
+                  if (cancelledPosts.has(check) && ciGateRollup?.length && !confirmsPostedCancellation(check, latest)) {
+                    outcomes.push(`producer cancellation for "${check.name}" is no longer confirmed — awaiting fresh CI`);
+                    continue;
+                  }
                   if (decision.requeue) {
                     // LEDGERED BEFORE THE CALL (inside `requeueCheckJob`). Not dry-run-guarded:
                     // reaching this line already proves `acted` was true, which `dryRun` forces false.
@@ -28947,8 +29028,22 @@ export async function runSweep(
                 // this pass is a cancellation, stand down rather than burning a strike on nothing.
                 // `acted` stays FALSE: claiming true would seed `prior.fixed`, dedupe the whole
                 // disposition away, and stop this logic observing the second cancellation.
+                const explained = new Set<CiFailure>();
+                const aggregators = new Set<string>();
+                for (const check of cancelledPosts) {
+                  if (deterministicTimeouts.has(check.name) || !producerCancellationExplainsRed(check, latest)) continue;
+                  aggregators.add(CI_GATE_CHECK_NAME);
+                  const matrix = CI_MATRIX_AGGREGATORS.find(({ constituent }) => constituent.test(check.name));
+                  if (matrix) aggregators.add(matrix.aggregator);
+                  for (const f of ciFailuresForFix) {
+                    const alias = cancelledPostFor(f, check);
+                    if (alias && postedCancellationExplainsRed(alias, latest)) explained.add(f);
+                  }
+                }
+                ciFailuresForFix = ciFailuresForFix.filter(f => !explained.has(f) && !aggregators.has(f.name));
                 const genuineFailures = ciFailuresForFix.filter((f) =>
-                  deterministicTimeouts.has(f.name) || !cancelledChecks.some((c) => c.name === f.name));
+                  deterministicTimeouts.has(f.name) || !cancelledChecks.some(c => c.name === f.name &&
+                    (!cancelledPosts.has(c) || (f.conclusion === "CANCELLED" && f.jobId === c.jobId && producerCancellationExplainsRed(c, latest)))));
                 if (genuineFailures.length === 0) {
                   acted = false;
                   const reason = `cancelled required check(s): ${outcomes.join("; ")}`;

@@ -178,6 +178,7 @@ import { asyncGit, checkServiceFreshness } from "./self-sync.js";
 import { boundGitCall, GATEWAY_FETCH_TIMEOUT_MS } from "./git-fetch-retry.js";
 import { reloadServePlan, touchesReloadablePlan, type PlanSourceHolder } from "./serve-plan-reload.js";
 import { publishThreadPlan } from "./thread-plan.js";
+import { serveOnlyAdvanceIn, serveOnlyVerdict, type ServeOnlyAdvanceReader } from "./serve-own-code.js";
 import { changedPathsSince, serveRestartRelevant, touchesPerRequestPath, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
@@ -1666,6 +1667,9 @@ export interface StaleCodeExitDeps {
    *  on every pass (37 ms on the host, 2026-11-18). */
   pinBootPlan?: boolean;
   requestHandoff?: (detail: Record<string, unknown>) => void;
+  /** W1-T14987: judges bootSha..target off the loop; its verdict rides the ask as `serveOnly`, which the supervisor reads
+   *  to waive its handoff spacing for a merge that changes only serve's own code. Absent, the ask is as before. */
+  serveOnlyAdvance?: ServeOnlyAdvanceReader;
   /** When this generation booted, the first anchor of {@link SERVE_HANDOFF_COALESCE_MS}; defaults to construction. */
   bootedAt?: number;
 }
@@ -1939,7 +1943,10 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
       }
       coalescing = undefined;
       log("serve.handoff_requested", decision);
-      return deps.requestHandoff(decision);
+      if (!deps.serveOnlyAdvance) return deps.requestHandoff(decision);
+      const ask = deps.requestHandoff;
+      void serveOnlyVerdict(deps.serveOnlyAdvance, deps.bootSha, checkout?.targetSha).then((serveOnly) => ask({ ...decision, serveOnly }));
+      return;
     }
     log("serve.stale_code_exit", decision);
     void drainThenExit();
@@ -3942,9 +3949,12 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
   });
   // W1-T14881: GitHub's own log of each webhook delivery serve answered, when serve takes webhooks at all.
   // W1-T14967: the log is the App's own webhook's, read with an App JWT.
-  const stopDeliveryLog = deps.githubEventWake?.secret
-    ? startGithubDeliveryLogPass({ stateDir: join(deps.fleetControlRoot, "state"), log: (step, fields) => deps.log?.(step, fields) })
-    : () => {};
+  // W1-T14979: the pass POSTs redeliveries, so only one process runs it: a supervised generation starts it on
+  // 'listening' (its promotion), as startLedgerWriters does, never while it is an unpromoted handoff standby.
+  let stopDeliveryLog: () => void = () => {};
+  const startDeliveryLog = (): void => {
+    stopDeliveryLog = startGithubDeliveryLogPass({ stateDir: join(deps.fleetControlRoot, "state"), log: (step, fields) => deps.log?.(step, fields) });
+  };
   // W1-T9370: each worker module's first start (bundle or .ts source) is ledgered as worker.entry_resolved.
   setWorkerEntryLog(deps.log);
   // W1-T10290: the plumbing carries the children's node flags to the read-model worker thread in its data; serve's own
@@ -3991,7 +4001,7 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
       return drained.then(() => {});
     },
     reloadPlan: (ref) => reloadServePlan(deps.board, serveRepoDir(), ref, { log: deps.log, onReloaded: (at, read) => publishThreadPlan({ path: deps.panelGraph.planPath, repoDir: serveRepoDir(), ref: at }, read, deps.log) }),
-    ...(deps.generation ? { requestHandoff: (detail: Record<string, unknown>) => deps.generation?.requestHandoff(detail) } : {}),
+    ...(deps.generation ? { requestHandoff: (detail: Record<string, unknown>) => deps.generation?.requestHandoff(detail), serveOnlyAdvance: serveOnlyAdvanceIn(serveRepoDir()) } : {}),
     ...deps.staleExitSeams,
   });
   // THE CLOCK PORT, never the legacy signature. clock-signature-census ratchets that shape per
@@ -4104,7 +4114,7 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
   server.on("close", prewarm.stop);
   if (keepWarm) server.once("listening", keepWarm.start);
   server.on("close", stopWakeSummary);
-  server.on("close", stopDeliveryLog);
+  server.on("close", () => stopDeliveryLog());
   // The demand window starts last, so a test seam that keeps one `every` tick drives serve.demand.
   server.once("listening", () => { stopRouteReads = routeReads.start(); const stops = [readDeadline.start(), demand.start()]; stopDemand = () => { for (const stop of stops) stop(); }; });
   server.on("close", () => { stopRouteReads(); stopDemand(); });
@@ -4163,6 +4173,10 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
   let stopLedgerWriters: (() => void) | undefined;
   if (deps.generation) server.setMaxListeners(server.getMaxListeners() + 1).once("listening", () => { stopLedgerWriters = startLedgerWriters(); });
   else stopLedgerWriters = startLedgerWriters();
+  if (deps.githubEventWake?.secret) {
+    if (deps.generation) server.setMaxListeners(server.getMaxListeners() + 1).once("listening", startDeliveryLog);
+    else startDeliveryLog();
+  }
   server.once("close", () => {
     try {
       stopLedgerWriters?.();
