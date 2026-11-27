@@ -1369,6 +1369,15 @@ export async function runReview(host: ReviewCommandHost, args: {
   /** W1-T12227: the path that admitted this review, named on `review.refused_after_finished_review`. */
   admission?: ReviewAdmission;
 }): Promise<ReviewRunResult> {
+  // W1-T15030: the run is held live in this process for its whole claimed span, whichever caller runs it (reviewCommand,
+  // runTask, the fix lane), so the orphan judge never reads a running review's silence as a dead owner.
+  const releaseLive = holdReviewRunLive(args.runId);
+  try {
+    return await claimedReviewSpan();
+  } finally {
+    releaseLive();
+  }
+  async function claimedReviewSpan(): Promise<ReviewRunResult> {
   const phases: Record<string, number> = { started: systemClock.now() };
   // W1-T11149: the phase reaches the CPU bound (setup, proofs) or the provider bound (judge, posting), in process or as a child.
   const reportPhase = (phase: string): void => (args.onPhase ?? reportReviewPhase)(phase);
@@ -2611,6 +2620,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   } finally {
     decisionClaim.release();
   }
+}
 }
 
 /**

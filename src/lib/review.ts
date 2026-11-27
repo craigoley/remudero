@@ -8126,6 +8126,26 @@ export async function renewReviewPublisherToken(opts: RenewReviewTokenOpts = {})
   return opts.force !== true && held.expiresAtMs > now ? "fresh" : "token_unrenewable";
 }
 
+/** W1-T15030: posts `status`, and on a 401 renews the token once and retries once. Undefined once a post lands; the
+ *  second 401's message when GitHub refused the renewed token too. Any other failure is thrown, as before. */
+async function postRenewingOnce<S>(post: (status: S) => Promise<void> | void, status: S,
+  renewToken: (() => Promise<ReviewTokenRenewal>) | undefined): Promise<string | undefined> {
+  try {
+    await post(status);
+    return undefined;
+  } catch (first) {
+    if (!ghUnauthorizedError(first)) throw first;
+  }
+  await (renewToken ?? (() => renewReviewPublisherToken({ force: true })))();
+  try {
+    await post(status);
+    return undefined;
+  } catch (second) {
+    if (!ghUnauthorizedError(second)) throw second;
+    return second instanceof Error ? second.message : String(second);
+  }
+}
+
 /** W1-T15030: GitHub refused the token a `gh` call presented. */
 export function ghUnauthorizedError(error: unknown): boolean {
   return /\bHTTP 401\b|Bad credentials/i.test(ghErrorText(error));
@@ -12895,12 +12915,19 @@ export const ORPHANED_REVIEW_OWNER_SILENCE_MS = 30 * 60_000;
 
 /** W1-T15030: the review runs alive in this process. A run in the daemon claims under the daemon's own live pid, so its
  *  pid alone cannot show that the run died. */
-const reviewRunsLiveHere = new Set<string>();
+const reviewRunsLiveHere = new Map<string, number>();
 
-/** Holds `runId` as live in this process until the returned release is called. */
+/** Holds `runId` as live in this process until the returned release is called. Holds nest (reviewCommand holds the
+ *  run, and runReview inside it holds it again): the run stays live until its last hold is released. */
 export function holdReviewRunLive(runId: string): () => void {
-  reviewRunsLiveHere.add(runId);
-  return () => { reviewRunsLiveHere.delete(runId); };
+  reviewRunsLiveHere.set(runId, (reviewRunsLiveHere.get(runId) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const left = (reviewRunsLiveHere.get(runId) ?? 1) - 1;
+    if (left > 0) reviewRunsLiveHere.set(runId, left); else reviewRunsLiveHere.delete(runId);
+  };
 }
 
 export interface ReviewOwnerOrphanedOpts {
@@ -14018,7 +14045,8 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts, held
           attempted_evaluator: opts.evaluatorProvenance ?? null,
         });
         try {
-          await post({
+          // W1-T15030: the conflict hold renews a refused token and retries once, as every other post does.
+          const unrenewable = await postRenewingOnce(post, {
             owner: opts.owner,
             repo: opts.repo,
             sha: opts.sha,
@@ -14030,7 +14058,16 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts, held
                     opts.reviewerCodeFreshness.codeSha,
                   )
                 : "remudero-review: conflicting verdicts for identical decision input — operator adjudication required",
-          });
+          }, opts.renewToken);
+          if (unrenewable !== undefined) {
+            appendLedger(opts.ledgerPath, {
+              run_id: opts.runId, task_id: opts.taskId, step: "review.post_refused", head_sha: opts.sha, attempted_state: "failure",
+              evidence: opts.evidence, reason: "token_unrenewable", error: unrenewable, review_decision_digest: opts.reviewDecisionDigest,
+              ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
+              ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
+            });
+            return { posted: false, conflict: true, effectiveState: "failure", reason: `token_unrenewable: ${unrenewable}` };
+          }
           return { posted: true, conflict: true, effectiveState: "failure", reason };
         } catch (error) {
           appendLedger(opts.ledgerPath, {
@@ -14076,17 +14113,9 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts, held
     }
     try {
       const status = { owner: opts.owner, repo: opts.repo, sha: opts.sha, state: opts.state, description: statusDescription };
-      try {
-        await post(status);
-      } catch (first) {
-        // W1-T15030: a refused token is renewed once and the post retried once.
-        if (!ghUnauthorizedError(first)) throw first;
-        await (opts.renewToken ?? (() => renewReviewPublisherToken({ force: true })))();
-        try {
-          await post(status);
-        } catch (second) {
-          if (!ghUnauthorizedError(second)) throw second;
-          const message = second instanceof Error ? second.message : String(second);
+      {
+        const message = await postRenewingOnce(post, status, opts.renewToken);
+        if (message !== undefined) {
           appendLedger(opts.ledgerPath, {
             run_id: opts.runId, task_id: opts.taskId, step: "review.post_refused", head_sha: opts.sha,
             attempted_state: opts.state, evidence: opts.evidence, reason: "token_unrenewable", error: message,

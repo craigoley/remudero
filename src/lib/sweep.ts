@@ -20103,6 +20103,9 @@ function priorActionsFromLedger(
                 : {}),
             });
           }
+        } else if (line.reason === "token_unrenewable") {
+          // W1-T15030: GitHub refused the run's token twice, which says nothing about the input: neither durable nor
+          // counted, so the next pass re-reviews it, as a review.post_failed is.
         } else if (!isReopenedClosedLifecycleRefusal(line.reason)) {
           // W1-T1213: the "PR is already closed" refusal is excluded here, never added to
           // `reviewRefused` — see that field's own doc for why reaching this fold at all

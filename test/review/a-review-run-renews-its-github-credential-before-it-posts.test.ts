@@ -17,7 +17,7 @@ import { appendLedger } from "#src/lib/ledger.js";
 import type { Mount } from "#src/lib/mounts.js";
 import type { AcceptanceCriterion } from "#src/lib/plan.js";
 import { holdReviewRunLive, postReviewPending, postReviewStatusGuarded, refreshReviewPublisherToken, renewReviewPublisherToken,
-  reviewOwnerOrphaned } from "#src/lib/review.js";
+  reviewDecisionDigest, reviewOwnerOrphaned } from "#src/lib/review.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, orphanedOwnerRetryView, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import type { WorkerResult } from "#src/lib/worker.js";
@@ -434,4 +434,107 @@ test("W1-T15030 criterion 4: a run that lost its claim posts no start-failed pen
   const lost = await run(true);
   assert.deepEqual(lost, [{ state: "pending", taker: "review-PR1-taker" }],
     "THE CLAIM: the start-failed pending carries the claim check, so the guarded post refuses it claim_lost");
+});
+
+const UNAUTHORIZED = () => { throw Object.assign(new Error("gh: Bad credentials (HTTP 401)"), { stderr: "HTTP 401" }); };
+
+test("W1-T15030 criterion 2: an input refused token_unrenewable is re-reviewed on the next pass", async (t) => {
+  // OBSERVED (review of 43c9ee208): the row carried review_input_digest, the sweep folded it into the durable
+  // reviewRefused, and that input was never reviewed again, 24 hours later. A 403 (review.post_failed) was.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t15030-refold-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const pass = async (reason: "token_unrenewable" | "other") => {
+    mkdirSync(join(dir, reason));
+    const ledgerPath = join(dir, reason, "ledger.ndjson");
+    const pr: OpenPrView = {
+      prNumber: 15031, prUrl: "https://github.com/o/r/pull/15031", taskId: "W1-T15030", headSha: "refused-head",
+      reviewInputDigest: "refused-input", reviewState: "none", checksState: "green", unmetCriteria: [], priorStrikes: 0,
+      autoMergeArmed: false, lastActivityAt: new Date().toISOString(),
+    };
+    // The real row: the guarded post refused twice with 401 writes it.
+    const posting = await postReviewStatusGuarded({ owner: "o", repo: "r", sha: pr.headSha, state: "pending", description: "d",
+      taskId: pr.taskId!, evidence: "no_evidence", ledgerPath, runId: "review-PR15031-1", prUrl: pr.prUrl,
+      reviewInputDigest: pr.reviewInputDigest, fetchLifecycle: () => ({ merged: false, closed: false }),
+      renewToken: async () => "renewed", post: UNAUTHORIZED });
+    assert.equal(posting.posted, false);
+    const row = readLedgerLines(ledgerPath).find((line) => line.step === "review.post_refused")!;
+    assert.equal(row.reason, "token_unrenewable");
+    assert.equal(row.review_input_digest, "refused-input", "the real row carries the input digest");
+    if (reason === "other") {
+      // Control: the same row with a durable reason stays refused.
+      const { ts: _ts, ...rest } = row;
+      appendLedger(ledgerPath, { ...rest, run_id: String(row.run_id), task_id: String(row.task_id), step: "review.post_refused",
+        reason: "a durable refusal" });
+    }
+    const posted: OpenPrView[] = [];
+    const deps: SweepDeps = {
+      ledgerPath, runId: "sweep-w1-t15030-refold", now: () => Date.now(),
+      arm: () => {}, close: () => assert.fail("unexpected close"), dispatchFix: () => assert.fail("unexpected fix"),
+      escalate: () => {}, postReview: (candidate) => { posted.push(candidate); },
+      reviewerCodeRecovery: { loadedCodeSha: "fresh-code", isLoadedCodeAtOrAfter: () => true, freshTreeReviewAvailable: true,
+        probeFreshness: async () => ({ status: "fresh", codeSha: "fresh-code", originMainSha: "fresh-code", advance: "none" }) },
+    };
+    await runSweep([pr], deps, DEFAULT_SWEEP_POLICY);
+    return posted.length;
+  };
+  assert.equal(await pass("token_unrenewable"), 1, "THE CLAIM: the next pass re-reviews the refused input");
+  assert.equal(await pass("other"), 0, "control: a durable refusal of the same input is not re-reviewed");
+});
+
+const EVALUATOR = (sessionId: string) => ({ provider: "codex", requestedModel: "m", servedModel: "m", effort: "high", sessionId });
+
+test("W1-T15030 criterion 2: the conflicting-verdict hold renews a refused token and retries once", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t15030-conflict-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const digest = reviewDecisionDigest({ headSha: HEAD, diff: "diff --git a/a.ts b/a.ts\n+export const a = 1;\n", report: "r",
+    body: "b", acceptance: [{ claim: "works", proof: "unit test: test/a.test.ts" }], declaredFiles: ["src/a.ts"] });
+  const conflict = async (refusals: number) => {
+    mkdirSync(join(dir, `conflict-${refusals}`));
+    const ledgerPath = join(dir, `conflict-${refusals}`, "ledger.ndjson");
+    appendLedger(ledgerPath, { run_id: "review-prior", task_id: "W1-T15030", step: "review.posted", pr_url: PR_URL, head_sha: HEAD,
+      state: "success", review_decision_digest: digest, reviewer_outcome: "reviewer_completed", evaluator_provenance: EVALUATOR("prior"),
+      decision_verdict: { state: "success", criteria: [], testTheater: false, summary: "s", floorDegraded: false, capped: false,
+        keywordOnly: false, planOnly: false } });
+    let calls = 0;
+    let renewals = 0;
+    const result = await postReviewStatusGuarded({ owner: "o", repo: "r", sha: HEAD, state: "failure", taskId: "W1-T15030",
+      evidence: "executed", ledgerPath, runId: "review-attempt", prUrl: PR_URL, reviewDecisionDigest: digest,
+      evaluatorProvenance: EVALUATOR("attempt"),
+      readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }), fetchLifecycle: () => ({ merged: false, closed: false }),
+      renewToken: async () => { renewals++; return "renewed"; },
+      post: () => { if (++calls <= refusals) UNAUTHORIZED(); } });
+    return { result, calls, renewals, rows: readLedgerLines(ledgerPath) };
+  };
+  const recovered = await conflict(1);
+  assert.equal(recovered.result.conflict, true, JSON.stringify(recovered.result));
+  assert.equal(recovered.result.posted, true, "THE CLAIM: one 401, one renewal, and the retried conflict hold lands");
+  assert.deepEqual([recovered.calls, recovered.renewals], [2, 1]);
+  const refused = await conflict(2);
+  assert.equal(refused.result.posted, false);
+  assert.equal(refused.rows.filter((row) => row.step === "review.post_refused" && row.reason === "token_unrenewable").length, 1,
+    "a second 401 is a named refusal");
+});
+
+test("W1-T15030 criterion 3: a review run called the way runTask calls it stays live past the orphan window", async (t) => {
+  // OBSERVED (review of 43c9ee208): only reviewCommand held its run live, so a runTask or fix-lane review claimed under the
+  // daemon's pid read as orphaned after 30 silent minutes, and a live run was taken over at 31.
+  const runId = "review-PR1-run-task";
+  let duringRun: boolean | undefined;
+  const window = 31 * 60_000;
+  const run = await reviewFailing(t, { token: "fresh-token", runId, midRun: (ledgerPath) => {
+    appendLedger(ledgerPath, { run_id: runId, task_id: "W1-T15030", step: "review.pending_posted", pr_url: PR_URL, head_sha: HEAD,
+      owner_pid: process.pid, owner_started_at: new Date().toISOString() });
+    duringRun = reviewOwnerOrphaned(runId, HEAD, readLedgerLines(ledgerPath), { now: Date.now() + window });
+  } });
+  assert.equal(run.verdict.state, "failure");
+  assert.equal(duringRun, false, "THE CLAIM: the live run is held live inside runReview itself, so it is not orphaned");
+  // Control: once the run has returned, the same silence is an orphan.
+  const lines = run.rows.filter((row) => row.step === "review.pending_posted");
+  assert.equal(reviewOwnerOrphaned(runId, HEAD, lines, { now: Date.now() + window }), true);
+  // Nested holds: an outer hold (reviewCommand's) outlives an inner one's release.
+  const outer = holdReviewRunLive("nested-run");
+  holdReviewRunLive("nested-run")();
+  assert.equal(reviewOwnerOrphaned("nested-run", HEAD, [{ run_id: "nested-run", step: "review.pending_posted", head_sha: HEAD,
+    owner_pid: process.pid, ts: new Date().toISOString() }], { now: Date.now() + window }), false);
+  outer();
 });
