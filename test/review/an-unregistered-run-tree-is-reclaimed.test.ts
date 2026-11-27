@@ -108,15 +108,20 @@ test("W1-T14928 a hand-cut directory is never considered", (t) => {
   const u = universe(t);
   const handCut = ["hand-review-7-1000", "wt-T1", "run-W1-T9020-1795000000000"];
   const paths = handCut.map((name) => cutTree(u, name, { orphan: true }));
+  // The same sweep reclaims an unregistered run tree beside them, so the scan ran and passed them over.
+  const runTree = cutTree(u, "run-W1-T9021-1795000000000-source", { orphan: true });
+  const looked: string[] = [];
   const { log, rows } = rowsOf();
 
   const summary = sweepStrandedReviewWorktrees(u.config, log, {
     clock: fixedClock(NOW_MS),
-    listRegisteredWorktrees: () => assert.fail("a hand-cut directory is never looked up"),
+    listRegisteredWorktrees: (repoDir) => { looked.push(repoDir); return [repoDir]; },
   });
 
-  assert.deepEqual(summary.reclaimed, []);
+  assert.deepEqual(summary.reclaimed, ["run-W1-T9021-1795000000000-source"]);
+  assert.equal(existsSync(runTree), false);
+  assert.equal(looked.length, 1, "only the run tree is looked up");
   assert.deepEqual(summary.kept, []);
-  assert.equal(rows.length, 0);
+  assert.deepEqual(rows.map((r) => r.path), [runTree]);
   for (const p of paths) assert.equal(existsSync(join(p, "payload.txt")), true);
 });
