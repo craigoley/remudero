@@ -2223,28 +2223,46 @@ export function projectInboxPlan(deps: Pick<PanelGraphDeps, "ledgerPath" | "stat
   return { projection, boardReferents, ...opsAskTasks(referentDeps, plan, projection, statusDeps, readProposals) };
 }
 
-/** W1-T15105: asks are judged on the ops tasks they name; the public plan and projection stay as they were. */
+/** W1-T15105: asks are judged on the ops tasks they name; the public plan and projection are kept. */
 function opsAskTasks(deps: Pick<PanelGraphDeps, "inboxReferentPlan">, plan: Plan, projection: Map<string, StatusProjection>,
   statusDeps: Parameters<typeof projectPlan>[1], readProposals?: () => readonly Proposal[]): { askPlan: Plan; askProjection: Map<string, StatusProjection> } {
   const unchanged = { askPlan: plan, askProjection: projection };
-  if (!deps.inboxReferentPlan || !readProposals) return unchanged;
-  const named = new Set<string>();
-  for (const proposal of readProposals()) {
-    const id = deriveTaskReferent(proposal.id) ?? mechanicalAskPurpose(proposal)?.taskId;
-    if (id !== undefined && !plan.byId.has(id)) named.add(id);
-  }
-  if (named.size === 0) return unchanged;
-  const combined = deps.inboxReferentPlan(plan);
-  if (!combined || combined === plan) return unchanged;
-  const tasks = [...named].flatMap(id => combined.byId.get(id) ?? []);
-  if (tasks.length === 0) return unchanged;
+  const referentPlan = deps.inboxReferentPlan;
+  if (!referentPlan || !readProposals) return unchanged;
+  const askPlan = askTaskPlan(plan, readProposals(), () => referentPlan(plan));
+  if (askPlan === plan) return unchanged;
+  const tasks = askPlan.tasks.slice(plan.tasks.length);
   const rows = projectPlan({ tasks, byId: new Map(tasks.map(task => [task.id, task])) }, {
     ...statusDeps, skipTasklessEscalations: true, skipUncreditedBuildWarning: true,
   });
-  return {
-    askPlan: { tasks: [...plan.tasks, ...tasks], byId: new Map([...plan.byId, ...tasks.map(task => [task.id, task] as const)]) },
-    askProjection: new Map([...projection, ...rows]),
-  };
+  return { askPlan, askProjection: new Map([...projection, ...rows]) };
+}
+
+function missingAskTasks(plan: Plan, proposals: readonly Proposal[]): Set<string> {
+  const named = new Set<string>();
+  for (const proposal of proposals) {
+    const id = deriveTaskReferent(proposal.id) ?? mechanicalAskPurpose(proposal)?.taskId;
+    if (id !== undefined && !plan.byId.has(id)) named.add(id);
+  }
+  return named;
+}
+
+/** W1-T15105: `plan` plus the tasks the asks name that only `readCombined` holds, else `plan`. */
+export function askTaskPlan(plan: Plan, proposals: readonly Proposal[], readCombined: () => Plan | undefined): Plan {
+  const named = missingAskTasks(plan, proposals);
+  if (named.size === 0) return plan;
+  const combined = readCombined();
+  const tasks = combined && combined !== plan ? [...named].flatMap(id => combined.byId.get(id) ?? []) : [];
+  if (tasks.length === 0) return plan;
+  return { tasks: [...plan.tasks, ...tasks], byId: new Map([...plan.byId, ...tasks.map(task => [task.id, task] as const)]) };
+}
+
+/** W1-T15105: the terminal's {@link askTaskPlan}, read as serve's approve reads it. */
+export async function readAskTaskPlan(plan: Plan, proposals: readonly Proposal[], stateDir: string,
+  read: NonNullable<PanelGraphDeps["readInboxCatalog"]> = (pub) => readBoardCatalogs(pub, stateDir)): Promise<Plan> {
+  if (missingAskTasks(plan, proposals).size === 0) return plan;
+  const context = await read(() => plan);
+  return askTaskPlan(plan, proposals, () => context?.outcome === "ok" ? context.plan : undefined);
 }
 
 /** Ops-only rows can verify their own board referent and stay local to this pass (W1-T12211). */
@@ -4424,7 +4442,7 @@ function inboxRegistryHas(deps: PanelGraphDeps, proposalId: string): boolean {
 async function approveCatalogDeps(deps: PanelGraphDeps, proposalId: string): Promise<PanelGraphDeps> {
   const taskId = deriveTaskReferent(proposalId);
   if (deps.inboxReferentPlan || taskId === undefined) return deps;
-  // A plan read error surfaces as before: classifyAllProposals reads the same plan with the same reader.
+  // A plan read error surfaces as before: classifyAllProposals reads this plan the same way.
   const publicPlan = approvePlanReader(deps)(deps.planPath);
   if (publicPlan.byId.has(taskId)) return deps;
   const read = deps.readInboxCatalog ?? ((pub: () => Plan | undefined) => readBoardCatalogs(pub, dirname(deps.ledgerPath)));

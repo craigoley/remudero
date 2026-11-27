@@ -19,7 +19,9 @@ import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { writeDaemonTargetRecord } from "#src/lib/repo-location.js";
 import { approveInChild, productionStuckStatePorts, opsRecordDigest, publicRecordDigest, runStuckStateGardener } from "#src/lib/stuck-state-gardener.js";
-import { approveCommand, approveParkedTask, namesATask, stripRepoRootFlag } from "#src/run-task.js";
+import { approveCommand, approveParkedTask, inboxCommand, namesATask, stripRepoRootFlag } from "#src/run-task.js";
+import { readBoardCatalogs } from "#src/lib/serve-plan-reload.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -935,4 +937,41 @@ test("W1-T13785 criterion 2: the public loader still normalizes scalar dependenc
       assert.equal(host.durableRecords()[PUBLIC_ID]?.pin, pinBeforeThisTask(record), label);
     }
   }
+});
+
+// W1-T15105: serve's Inbox judges an ask for an ops-catalog task on that task, and its Approve spawns `rmd approve <ask>`,
+// so the terminal verbs judge it the same way, from the same catalog read.
+const writeAsk = (host: ReturnType<typeof hostWithSecondCatalog>, id: string) =>
+  writeFileSync(join(host.stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [{ id, summary: `Release ${OPS_ID}`, evidenceAnchors: [] }] }));
+const rowsOf = (host: ReturnType<typeof hostWithSecondCatalog>) => host.rawLines().map(line => JSON.parse(line) as Record<string, unknown>);
+
+test("W1-T15105 criterion 1: an ask whose task is only in the ops catalog is judged on that task — by `rmd inbox` too", async t => {
+  const host = hostWithSecondCatalog(t), said = everythingSaid(t);
+  const ask = `verify-human:${OPS_ID}`;
+  writeAsk(host, ask);
+  const argv = [...process.argv];
+  process.argv.push("--repo-root", host.root);
+  try {
+    const judged = async () => {
+      assert.equal(await inboxCommand(["--dry-run"], { config: host.config, github: fakeGitHub(),
+        readInboxCatalog: pub => readBoardCatalogs(pub, host.stateDir, host.api) }), 0, said.join("\n"));
+      return rowsOf(host).filter(row => row.step === "inbox.classified" && row.proposal_id === ask).at(-1);
+    };
+    const parked = await judged();
+    assert.equal(parked?.state, "ready", `the parked ops task's ask is its release: ${JSON.stringify(parked?.reasons)}`);
+    appendLedger(ledgerPathFor(host.config), { run_id: "RELEASE-1", task_id: OPS_ID, step: RELEASE_LEDGER_STEP, released: "verify-human" });
+    assert.equal((await judged())?.state, "retired", "an ask for a released ops task leaves the Inbox");
+  } finally {
+    process.argv.splice(0, process.argv.length, ...argv);
+  }
+});
+
+test("W1-T15105 criterion 2: Approve judges an ops-catalog task's ask as the Inbox that offered it did — the `rmd approve <ask>` serve spawns releases it", async t => {
+  const host = hostWithSecondCatalog(t), said = everythingSaid(t);
+  const ask = `verify-human:${OPS_ID}`;
+  writeAsk(host, ask);
+  assert.equal(await approveCommand([ask], { config: host.config, planPath: host.planPath, taskLookup: { api: host.api } }), 0, said.join("\n"));
+  assert.equal(host.releaseRows(OPS_ID).length, 1, "the ask's ops task is released");
+  assert.ok(rowsOf(host).some(row => row.step === "ratify.approved" && row.task_id === ask && row.release_task_id === OPS_ID),
+    "and the ask itself is recorded approved");
 });

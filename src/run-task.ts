@@ -429,7 +429,7 @@ import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type Kn
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
 import { KNOWLEDGE_MEASURED_STEP } from "./lib/knowledge-gaps.js";
-import { buildInboxVerbActions, inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
+import { buildInboxVerbActions, inboxThreadStorePath, ratifyCliGateway, readAskTaskPlan, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
 import { realThreadDecider, type ThreadDecisionContext } from "./lib/inbox-responder.js";
 import { realRecommendationWriter } from "./lib/inbox-recommendation.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
@@ -945,7 +945,7 @@ import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
 import { inboxVerbCommand, inboxVerbHelp, type InboxVerbActions, type InboxVerbName } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
-import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
+import { adoptPlanSource, planSourceFailed, planSourceLoaded, readBoardCatalogs, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
 import { planFilesIdentity } from "./lib/thread-plan.js";
 import {
   buildReadyServeServer,
@@ -38771,7 +38771,8 @@ export async function improvementActionCommand(rest: string[], deps: Partial<typ
   return "kind" in result && ["completed", "waiting"].includes(result.state) ? 0 : 1;
 }
 
-export async function inboxCommand(rest: string[], deps: { config?: Config; github?: GitHub; draftBatch?: typeof draftProposalBatch } = {}): Promise<number> {
+export async function inboxCommand(rest: string[], deps: { config?: Config; github?: GitHub; draftBatch?: typeof draftProposalBatch;
+  readInboxCatalog?: PanelGraphDeps["readInboxCatalog"] } = {}): Promise<number> {
   const badArg = unknownArgError("inbox", rest, [], ["--dry-run"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -38822,7 +38823,9 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   }
 
   const deriveDeps: DeriveDeps = { ledgerPath, github: deps.github ?? buildBatchedGithub(owner, repo) };
-  const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
+  // W1-T15105: an ask for an ops-catalog task is judged on that task, as serve's Inbox judges it.
+  const askPlan = await readAskTaskPlan(plan, proposals, dirname(ledgerPath), deps.readInboxCatalog);
+  const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(askPlan, deriveDeps);
   const openProposalIds = new Set(proposals.map((p) => p.id));
   // W1-T190: re-derive "already ratified" from the ledger on every `rmd inbox` pass, never
   // from the registry's own state — a proposal ratify.approved already fired for is reported
@@ -38832,14 +38835,14 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   const classifications = proposals.map((p) =>
     classifyProposal(p, drafts[p.id], {
       retirement: lifecycleContext,
-      plan,
+      plan: askPlan,
       isMerged,
       depsUnobservable,
       grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
       openProposalIds,
       isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
       isDeclined: declinedWithReceipts(ledgerLinesForRatify, join(config.root, "state")),
-      isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLinesForRatify),
+      isReleasedHumanTask: releasedHumanTaskPredicate(askPlan, ledgerLinesForRatify),
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
@@ -40390,6 +40393,8 @@ export async function approveCommand(
     reviewedImprovement?: { goalDigest: string; draftDigest: string };
     /** W1-T13386: how the release path reads the ops catalog (default: the host's own transport). */
     taskLookup?: TaskLookupOptions;
+    /** W1-T15105: how an ask's ops-catalog task is read (default: the board catalog read serve's approve uses). */
+    readInboxCatalog?: PanelGraphDeps["readInboxCatalog"];
   } = {},
 ): Promise<number> {
   const proposalId = rest[0];
@@ -40478,10 +40483,14 @@ export async function approveCommand(
   }
 
   const config = deps.config ?? loadConfig();
-  const plan = loadPlan(planPath);
   const inboxRoot = deps.inboxRoot ?? config.root;
   const ledgerPath = deps.inboxLedgerPath ?? ledgerPathFor(config);
   const registryPath = join(inboxRoot, "state", "inbox-proposals.json");
+  // W1-T15105: serve's Approve spawns this path, so it judges an ops-catalog task's ask as serve did.
+  const named = parseProposalRegistry(readFileIfExists(registryPath)).filter(p => p.id === proposalId);
+  const catalogState = dirname(ledgerPathFor(config));
+  const plan = await readAskTaskPlan(loadPlan(planPath), named, catalogState,
+    deps.readInboxCatalog ?? ((pub) => readBoardCatalogs(pub, catalogState, deps.taskLookup?.api)));
   const { owner, repo } = proposalPlan.target ?? resolveOwnerRepo();
   const registryIntent = selectedRegistryIntentForConfig(config);
 
@@ -40498,7 +40507,7 @@ export async function approveCommand(
 
   if (classification.state === "ready" && classification.releaseTaskId) {
     const code = await approveCommand([classification.releaseTaskId], deps);
-    if (code === 0 && releasedTaskIds(readLedgerRawLines(ledgerPath), loadPlan(planPath)).has(classification.releaseTaskId)) {
+    if (code === 0 && releasedTaskIds(readLedgerRawLines(ledgerPath), plan).has(classification.releaseTaskId)) {
       appendLedger(ledgerPath, { run_id: `APPROVE-${proposalId}`, task_id: proposalId,
         step: "ratify.approved", release_task_id: classification.releaseTaskId });
       approveNoteChain(rest, proposalId, config, deps);
