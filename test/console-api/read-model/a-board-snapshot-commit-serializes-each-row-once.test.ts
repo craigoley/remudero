@@ -61,7 +61,7 @@ test("board snapshot commit: the bytes equal a fresh cache's for the same state,
   const written = readFileSync(boardSnapshotPath(warm, "o", "r"));
   assert.ok(written.includes('"title":"retitled"'), "positive control: the changed row was written");
   assert.deepEqual(written, readFileSync(boardSnapshotPath(cold, "o", "r")));
-  assert.deepEqual(createBoardSnapshotCache(warm, "o", "r", { clock }).issueSeed()?.get(507)?.title, "retitled");
+  assert.deepEqual(createBoardSnapshotCache(warm, "o", "r", { clock }).issueSeed()?.get("https://github.com/o/r/issues/507")?.title, "retitled");
 });
 
 test("board snapshot commit: each record is stringified once, and one changed issue row costs only its own line", (t) => {

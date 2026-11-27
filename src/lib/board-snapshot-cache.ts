@@ -128,9 +128,9 @@ const defaultIo: BoardSnapshotIo = {
   },
 };
 
-function sameVersions<T extends { number: number; updatedAt: string; createdAt?: string; mergedAt?: string; authorLogin?: string; authorType?: string }>(current: ReadonlyMap<number, T> | undefined, rows: readonly T[]): boolean {
+function sameVersions<K, T extends { updatedAt: string; createdAt?: string; mergedAt?: string; authorLogin?: string; authorType?: string }>(current: ReadonlyMap<K, T> | undefined, rows: readonly T[], keyOf: (row: T) => K): boolean {
   return current?.size === rows.length && rows.every((row) => {
-    const held = current.get(row.number);
+    const held = current.get(keyOf(row));
     return held?.updatedAt === row.updatedAt && held.createdAt === row.createdAt && held.mergedAt === row.mergedAt && held.authorLogin === row.authorLogin && held.authorType === row.authorType;
   });
 }
@@ -282,7 +282,13 @@ function sameFlatRow(a: object, b: object): boolean {
 }
 
 type DiskRow = ClosedDiskRow | BoardIssueRest;
-type RowLines = Map<number, { row: DiskRow; line: Buffer }>;
+/** A closed PR row's key is its number; an issue row's is its URL (W1-T14998: escalation issues come from more than one
+ *  repository, and equal numbers in two repositories are two issues). */
+type RowKey = number | string;
+type RowLines = Map<RowKey, { row: DiskRow; line: Buffer }>;
+const prKey = (row: { number: number }): number => row.number;
+const issueKey = (row: { url: string }): string => row.url;
+const diskKey = (channel: keyof SnapshotRows, row: DiskRow): RowKey => channel === "issues" ? (row as BoardIssueRest).url : row.number;
 
 export function boardSnapshotPath(root: string, owner: string, repo: string): string {
   const repository = `${owner}/${repo}`;
@@ -502,7 +508,7 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     let header: SnapshotHeader | undefined;
     let footer: SnapshotFooter | undefined;
     const closed = new Map<number, BoardPrRest>();
-    const issues = new Map<number, BoardIssueRest>();
+    const issues = new Map<string, BoardIssueRest>();
     let sawFooter = false;
 
     const consume = (raw: Buffer): void => {
@@ -538,9 +544,9 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
         if (!header.channels.issues.complete || !isIssueRow(record.row, maxStringBytes)) {
           throw new SnapshotRefusal("invalid_row");
         }
-        if (issues.has(record.row.number)) throw new SnapshotRefusal("duplicate_row");
-        issues.set(record.row.number, { ...record.row });
-        loadedLines.issues.set(record.row.number, { row: record.row, line: lineCopy(raw) });
+        if (issues.has(record.row.url)) throw new SnapshotRefusal("duplicate_row");
+        issues.set(record.row.url, { ...record.row });
+        loadedLines.issues.set(record.row.url, { row: record.row, line: lineCopy(raw) });
       } else {
         throw new SnapshotRefusal("invalid_row");
       }
@@ -689,7 +695,7 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     }
   };
 
-  // W1-T11266: each row's serialized line from the last commit, keyed by PR or issue number. Serve rewrote the
+  // W1-T11266: each row's serialized line from the last commit, keyed by PR number or issue URL. Serve rewrote the
   // 43 MB file about 23 times an hour and stringified every row twice per rewrite, including the channel that did
   // not change. A row whose disk form is unchanged reuses its line; the bytes written are the same.
   const rowLines: Record<keyof SnapshotRows, RowLines> = loadedLines;
@@ -702,9 +708,10 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
   // A write that failed: the next commit retries it, even an unchanged one, so the file cannot stay behind memory.
   let failed: typeof queued;
   const rowLine = (channel: keyof SnapshotRows, disk: DiskRow, next: RowLines): Buffer => {
-    const held = rowLines[channel].get(disk.number);
+    const key = diskKey(channel, disk);
+    const held = rowLines[channel].get(key);
     const line = held && sameFlatRow(held.row, disk) ? held.line : lineBuffer({ type: channel, row: disk }, maxLineBytes);
-    next.set(disk.number, { row: disk, line });
+    next.set(key, { row: disk, line });
     return line;
   };
 
@@ -751,9 +758,9 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
   };
 
   const commit = (channel: keyof SnapshotRows, rows: readonly (BoardPrRest | BoardIssueRest)[]): boolean => {
-    let nextRows: Map<number, BoardPrRest> | Map<number, BoardIssueRest>;
+    let nextRows: Map<number, BoardPrRest> | Map<string, BoardIssueRest>;
     // W1-T13665: what the checks below learned, so the lines pass neither re-derives nor re-compares a row.
-    const kept = new Set<number>();
+    const kept = new Set<RowKey>();
     const changed = new Map<number, ClosedDiskRow>();
     try {
       const retained = channel === "closed" ? state.issues : state.closed;
@@ -772,11 +779,11 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
       } else {
         const issues = rows as readonly BoardIssueRest[];
         for (const row of issues) {
-          const held = rowLines.issues.get(row.number);
-          if (held && sameFlatRow(held.row, row)) { kept.add(row.number); continue; }
+          const held = rowLines.issues.get(row.url);
+          if (held && sameFlatRow(held.row, row)) { kept.add(row.url); continue; }
           if (!isIssueRow(row, maxStringBytes)) throw new SnapshotRefusal("invalid_row");
         }
-        nextRows = new Map(issues.map((row) => [row.number, { ...row }]));
+        nextRows = new Map(issues.map((row) => [row.url, { ...row }]));
       }
       if (nextRows.size !== rows.length) throw new SnapshotRefusal("duplicate_row");
     } catch (error) {
@@ -785,7 +792,7 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
       return false;
     }
 
-    if (channel === "closed" ? sameVersions(state.closed, rows as readonly BoardPrRest[]) : sameVersions(state.issues, rows as readonly BoardIssueRest[])) {
+    if (channel === "closed" ? sameVersions(state.closed, rows as readonly BoardPrRest[], prKey) : sameVersions(state.issues, rows as readonly BoardIssueRest[], issueKey)) {
       if (failed && !writing && queued === undefined) {
         queued = failed;
         failed = undefined;
@@ -803,7 +810,7 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     const nextState: SnapshotState =
       channel === "closed"
         ? { ...state, closed: nextRows as Map<number, BoardPrRest>, closedObservedAt: clock.iso() }
-        : { ...state, issues: nextRows as Map<number, BoardIssueRest> };
+        : { ...state, issues: nextRows as Map<string, BoardIssueRest> };
     const header: SnapshotHeader = {
       type: "board-snapshot",
       schema: SNAPSHOT_SCHEMA,
@@ -825,19 +832,19 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     const lines: Buffer[] = [];
     const nextLines: Record<keyof SnapshotRows, RowLines> = { closed: new Map(), issues: new Map() };
     /** The held line of a row known unchanged: one this commit checked, or one of a channel it does not touch. */
-    const carriedLine = (lineChannel: keyof SnapshotRows, number: number, rowsOf: ReadonlyMap<number, unknown> | undefined,
+    const carriedLine = (lineChannel: keyof SnapshotRows, key: RowKey, rowsOf: ReadonlyMap<RowKey, unknown> | undefined,
       next: RowLines): Buffer | undefined => {
-      const known = lineChannel === channel ? kept.has(number) : rowsOf !== undefined && rowsOf === linesState[lineChannel];
-      const held = known ? rowLines[lineChannel].get(number) : undefined;
+      const known = lineChannel === channel ? kept.has(key) : rowsOf !== undefined && rowsOf === linesState[lineChannel];
+      const held = known ? rowLines[lineChannel].get(key) : undefined;
       if (held === undefined) return undefined;
-      next.set(number, held);
+      next.set(key, held);
       return held.line;
     };
     const records = function* (): Generator<() => Buffer> {
       yield () => lineBuffer(header, maxLineBytes);
       for (const row of nextState.closed?.values() ?? []) yield () => carriedLine("closed", row.number, nextState.closed, nextLines.closed) ??
         rowLine("closed", changed.get(row.number) ?? closedForDisk(row), nextLines.closed);
-      for (const row of nextState.issues?.values() ?? []) yield () => carriedLine("issues", row.number, nextState.issues, nextLines.issues) ??
+      for (const row of nextState.issues?.values() ?? []) yield () => carriedLine("issues", row.url, nextState.issues, nextLines.issues) ??
         rowLine("issues", row, nextLines.issues);
       yield () => lineBuffer(footer, maxLineBytes);
     };
@@ -975,7 +982,7 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
       return state.closed ? new Map([...state.closed].map(([number, row]) => [number, { ...row }])) : undefined;
     },
     issueSeed() {
-      return state.issues ? new Map([...state.issues].map(([number, row]) => [number, { ...row }])) : undefined;
+      return state.issues ? new Map([...state.issues].map(([url, row]) => [url, { ...row }])) : undefined;
     },
     commitClosed(rows) {
       return commit("closed", rows);
@@ -1031,7 +1038,8 @@ export interface BoardSnapshotIo {
 export interface BoardSnapshotCache {
   recordClosedAttempt?(outcome: { ok: boolean; truncated?: boolean; persisted?: boolean }): void;
   closedSeed(): Map<number, BoardPrRest> | undefined;
-  issueSeed(): Map<number, BoardIssueRest> | undefined;
+  /** W1-T14998: keyed by issue URL — the rows span every repository escalations are filed in. */
+  issueSeed(): Map<string, BoardIssueRest> | undefined;
   commitClosed(rows: readonly BoardPrRest[]): boolean;
   commitIssues(rows: readonly BoardIssueRest[]): boolean;
   commitOpen?(rows: readonly BoardPrRest[], fetchedAtMs: number): boolean;
@@ -1041,7 +1049,7 @@ export interface BoardSnapshotCache {
 export interface SharedBoardSnapshotRows {
   readonly closed?: ReadonlyMap<number, BoardPrRest>;
   readonly closedObservedAt?: string;
-  readonly issues?: ReadonlyMap<number, BoardIssueRest>;
+  readonly issues?: ReadonlyMap<string, BoardIssueRest>;
 }
 
 /** One parse per file identity (inode, mtime, size; no mtime, no reuse), shared read-only by every caller in the thread (E33).
@@ -1177,5 +1185,5 @@ interface ObservationRecord {
 interface SnapshotState {
   closed?: Map<number, BoardPrRest>;
   closedObservedAt?: string;
-  issues?: Map<number, BoardIssueRest>;
+  issues?: Map<string, BoardIssueRest>;
 }

@@ -217,8 +217,8 @@ test("W1-T13332 criterion 3: seeds answer the committed rows at once, while the 
   await writer.waitForCall(1);
   assert.equal(writer.calls.length, 1);
   const seed = cache.issueSeed();
-  assert.deepEqual([...(seed?.keys() ?? [])], [1, 2, 3], "the committed rows, before the file exists");
-  assert.equal(seed?.get(2)?.title, "needs human 2 seeded");
+  assert.deepEqual([...(seed?.values() ?? [])].map((row) => row.number), [1, 2, 3], "the committed rows, before the file exists");
+  assert.equal(seed?.get("https://github.com/o/r/issues/2")?.title, "needs human 2 seeded");
   writer.calls[0]!.release();
   await writer.calls[0]!.done;
 });

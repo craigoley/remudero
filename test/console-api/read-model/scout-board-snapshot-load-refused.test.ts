@@ -43,7 +43,7 @@ test("W1-T13104: board_snapshot.load_refused no longer recurs", (t) => {
   assert.deepEqual(committed, [false, false]);
   for (const cache of [writer, reader]) {
     assert.deepEqual(cache.closedSeed(), new Map([[closed.number, closed]]));
-    assert.deepEqual(cache.issueSeed(), new Map([[issue.number, issue]]));
+    assert.deepEqual(cache.issueSeed(), new Map([[issue.url, issue]]));
   }
 });
 

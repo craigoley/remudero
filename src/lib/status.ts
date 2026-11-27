@@ -4925,14 +4925,8 @@ export function fetchEscalationIssuesRest(owner: string, repo: string, fetch: Pa
   return { rows, calls, mode: delta ? "delta" : "full", truncated };
 }
 
-/** W1-T14998 — the rows of the code repository's own issues: the only ones its board snapshot cache, keyed by issue
- *  number, can hold without one repository's issue overwriting another's. */
-function codeRepositoryIssues(owner: string, repo: string, rows: readonly BoardIssueRest[]): BoardIssueRest[] {
-  const code = `${owner}/${repo}`.toLowerCase();
-  return rows.filter((r) => issueUrlRepository(r.url)?.toLowerCase() === code);
-}
-
-const issueSeedRows = (seed: ReadonlyMap<number, BoardIssueRest> | undefined): BoardIssueRest[] | undefined => seed ? [...seed.values()] : undefined;
+/** W1-T14998: the snapshot holds every escalation repository's issues, keyed by URL so equal numbers do not collide. */
+const issueSeedRows = (seed: ReadonlyMap<string, BoardIssueRest> | undefined): BoardIssueRest[] | undefined => seed ? [...seed.values()] : undefined;
 
 const BOARD_PREWARM_WORKER_KIND = "remudero-board-prewarm-walk" as const;
 
@@ -5338,7 +5332,7 @@ export function buildBatchedGithub(
       // Reassigned only on a SUCCESSFUL return, exactly like `knownBoardPrs` — a throw skips this line, so a
       // transient failure leaves the previous complete snapshot intact and the NEXT call is still a cheap delta.
       knownIssues = fetched.rows;
-      if (!fetched.truncated) snapshotCache?.commitIssues(codeRepositoryIssues(owner, repo, fetched.rows));
+      if (!fetched.truncated) snapshotCache?.commitIssues(fetched.rows);
       log("board_gateway.issue_fetch_bytes", {
         bytes,
         restCalls: fetched.calls,
@@ -5748,7 +5742,7 @@ export function buildBatchedGithub(
       return;
     }
     knownIssues = outcome.rows;
-    if (!outcome.truncated) snapshotCache?.commitIssues(codeRepositoryIssues(owner, repo, outcome.rows));
+    if (!outcome.truncated) snapshotCache?.commitIssues(outcome.rows);
     const all: BatchedIssue[] = outcome.rows.map((r) => ({ number: r.number, url: r.url, state: r.state, title: r.title }));
     issueCache = { at: now(), byUrl: new Map(all.map((i) => [i.url, i])), byNum: new Map(all.map((i) => [String(i.number), i])) };
     lastIssueFetchFailed = false;

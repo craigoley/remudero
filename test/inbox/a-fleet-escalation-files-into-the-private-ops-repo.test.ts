@@ -27,7 +27,8 @@ import { escalationReplySubmissionKey, recordEscalationIntakeOutcome } from "#sr
 import { appendThreadMessage, appendThreadReplyOnce, deriveThreadId } from "#src/lib/inbox-thread.js";
 import type { FeedbackEntry } from "#src/lib/feedback.js";
 import { terminalRulePr } from "#src/lib/issue-revalidation-garden.js";
-import { fetchEscalationIssuesRest, ghGateway } from "#src/lib/status.js";
+import { buildBatchedGithub, fetchEscalationIssuesRest, ghGateway } from "#src/lib/status.js";
+import { createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
 
 const CODE = { owner: "craigoley", repo: "remudero" };
 const OPS = "craigoley/remudero-ops";
@@ -283,7 +284,7 @@ test("W1-T14998 criterion 1: a fleet escalation opens its issue in the private o
     "the intake publication is still a pull request on the code repository");
 });
 
-test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery closes it, judged and read against its own repository", async () => {
+test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery closes it, judged and read against its own repository", async (t) => {
   // The garden's terminal-PR close: a clarification escalation filed in ops still names its PR on the code repository.
   const code = `${CODE.owner}/${CODE.repo}`;
   const issue = { url: `https://github.com/${OPS}/issues/9`, title: "[MANUAL] W1-T14945",
@@ -315,4 +316,19 @@ test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery close
   assert.deepEqual(fetched.rows.map((r) => `${r.url} ${r.state}`).sort(), [`https://github.com/${OPS}/issues/1 open`, `https://github.com/${OPS}/issues/2 open`,
     `https://github.com/${code}/issues/1 closed`, `https://github.com/${code}/issues/3 open`], "each issue once, from its own repository");
   assert.deepEqual([fetched.mode, fetched.calls, fetched.truncated], ["delta", 2, false]);
+  // The board's persisted snapshot keeps every escalation repository's issues, keyed by URL: ops #1 and code #1 both
+  // survive a restart, so a cold board still answers an ops escalation's state.
+  const snapshotRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14998-snapshot-`));
+  t.after(() => rmSync(snapshotRoot, { recursive: true, force: true }));
+  const persisted = withEnv(OPS, () => {
+    const gateway = buildBatchedGithub(CODE.owner, CODE.repo, { commitTrailerIndex: () => new Map(), ttlMs: 60_000, pacer: { wait() {}, recordResult() {} },
+      snapshotCache: createBoardSnapshotCache(snapshotRoot, CODE.owner, CODE.repo),
+      exec: (args) => JSON.stringify(args[1]!.startsWith(`repos/${OPS}/issues?`) ? [row(OPS, 1, opsOld)]
+        : args[1]!.startsWith(`repos/${code}/issues?`) ? [{ ...row(code, 1, codeOld), state: "closed" }] : []) });
+    return [gateway.issueByUrl?.(`https://github.com/${OPS}/issues/1`)?.state, gateway.issueByUrl?.(`https://github.com/${code}/issues/1`)?.state];
+  });
+  assert.deepEqual(persisted, ["open", "closed"], "control: the live board read both repositories' issue #1");
+  const seed = createBoardSnapshotCache(snapshotRoot, CODE.owner, CODE.repo).issueSeed();
+  assert.deepEqual([...(seed?.values() ?? [])].map((r) => `${r.url} ${r.state}`).sort(),
+    [`https://github.com/${OPS}/issues/1 open`, `https://github.com/${code}/issues/1 closed`], "the restarted board's seed holds both");
 });
