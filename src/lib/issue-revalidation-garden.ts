@@ -31,7 +31,7 @@ import { loadConfig, type Config, type WorkerProviderId } from "./config.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import {
-  escalationBodyInLegacyOrder, escalationHeadSha, escalationIssueRepository, ghIssueGatewayAsync, prReferentFromIssueText, splitConcatenatedJsonPages,
+  escalationBodyInLegacyOrder, escalationHeadSha, escalationIssueRepository, ghIssueGatewayAsync, pooledIssueIsCodeRepositorys, prReferentFromIssueText, splitConcatenatedJsonPages,
   type AsyncIssueGateway,
 } from "./escalate.js";
 import { feedbackCaptured, stageFeedbackCapture } from "./feedback.js";
@@ -1297,7 +1297,11 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
     clock,
     log: opts.log,
     listOpenIssues: async () => {
-      listed = parseOpenIssuesRest(await readText(openIssuesRestArgs(issueOwner, issueRepo)));
+      // W1-T14998: the escalation repository is a pool other code repositories file in; this garden judges (and closes)
+      // only the issues that record this code repository and name none of another's PRs.
+      const pooled = `${issueOwner}/${issueRepo}`.toLowerCase() !== repoArg.toLowerCase();
+      listed = parseOpenIssuesRest(await readText(openIssuesRestArgs(issueOwner, issueRepo)))
+        .filter((issue) => !pooled || pooledIssueIsCodeRepositorys(issue, repoArg));
       stepRows = undefined;
       commits = undefined;
       shardList = undefined;

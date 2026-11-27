@@ -26,7 +26,7 @@ import { ledgerPathFor } from "./ledger-path.js";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
-import { escalationTaskId, issueUrlRepository, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText, escalationHeadSha } from "./escalate.js";
+import { escalationTaskId, issueUrlRepository, pooledIssueIsCodeRepositorys, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText, escalationHeadSha } from "./escalate.js";
 import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, classifyChangesRequested, pullReviewsRestArgs, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation, combinedStatusRestArgs, openPrsRestArgs, MERGE_STATE_HYDRATION_CAP, SCANNER_BLOCKER_HYDRATION_CAP, REVIEW_QUEUE_HOLD_READ_CAP, CODEQL_HEAD_ALERT_HYDRATION_CAP, WORKFLOW_RUN_HYDRATION_CAP, type MergeStateObservation, createHeadReadGate, recordHeadReadCounts, type HeadReadGate } from "./open-prs-rest.js";
 import { peekChangedHeads, pruneAcknowledgedChangedHeads } from "./github-event-wake.js";
 import { readDrainLock } from "./drain-lock.js";
@@ -3684,7 +3684,15 @@ export function buildEscalationReconcileCandidates(
     mergedPathsByPr: readMergedPathsByPr(evidenceRoot, MERGED_PATHS_SCAN_LIMIT, mergeLog),
   };
   const candidates: EscalationReconcileCandidate[] = [];
+  const codeRepository = `${owner}/${repo}`;
   for (const issue of open) {
+    // W1-T14998: an issue filed in a shared escalation pool (another repository than this code repository) is this
+    // reconciler's only when it records this code repository and names no other's PR: its task id and PR number are
+    // resolved HERE, so another repository's PR-<n> would otherwise be closed by this repository's PR #<n>.
+    if (!pooledIssueIsCodeRepositorys(issue, codeRepository)) {
+      log?.("sweep.escalation_reconcile.other_repository", { issue_url: issue.url, code_repository: codeRepository });
+      continue;
+    }
     const taskId = escalationTaskId(issue.body);
     if (!taskId) {
       intake.droppedNoTaskTrailer++;

@@ -2345,7 +2345,7 @@ export function ghIssueGateway(
   const run =
     opts.exec ??
     ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
-  const gateway = issueGatewaySteps(route.repository, run, runStepsSync) as IssueGateway;
+  const gateway = scopedToCodeRepository(issueGatewaySteps(route.repository, run, runStepsSync), route.repository, `${owner}/${repo}`) as IssueGateway;
   gatewayRepository.set(gateway, route.repository);
   if (opts.exec === undefined) asyncIssueTwins.set(gateway, ghIssueGatewayAsync(owner, repo, { destination: () => route }));
   return gateway;
@@ -2360,7 +2360,8 @@ export function ghIssueGatewayAsync(
 ): AsyncIssueGateway {
   const route = escalationIssueRoute(opts);
   if (route.outcome === "unfiled") return unfiledIssueGateway(route.reason);
-  const gateway = issueGatewaySteps(route.repository, opts.exec ?? ((args: string[]) => ghTextAsync(args)), runStepsAsync);
+  const gateway = scopedToCodeRepository(issueGatewaySteps(route.repository, opts.exec ?? ((args: string[]) => ghTextAsync(args)), runStepsAsync),
+    route.repository, `${owner}/${repo}`);
   gatewayRepository.set(gateway, route.repository);
   return gateway;
 }
@@ -2432,6 +2433,81 @@ export function escalationIssueRepositories(owner: string, repo: string,
 /** W1-T14998 — the `<owner>/<name>` an issue URL names, or undefined when it is not a GitHub issue URL. */
 export function issueUrlRepository(url: string): string | undefined {
   return /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/\d+\/?$/.exec(url.trim())?.[1];
+}
+
+/** W1-T14998 — the `**Code-Repository:** <owner>/<name>` machine field a routed gateway writes on each issue it files,
+ *  naming the code repository the escalation is about. One escalation repository is a pool every routed daemon (core,
+ *  site, console, `rmd review --repo`) files in, so this field is what keeps one repository's listing, dedup and
+ *  close off another's issues. */
+export const CODE_REPOSITORY_LINE_RE = /^\*\*Code-Repository:\*\*\s*(\S+)\s*$/m;
+
+/** W1-T14998 — the code repository an issue body records, read from its machine fields, or undefined. */
+export function escalationCodeRepository(body: string | undefined): string | undefined {
+  return CODE_REPOSITORY_LINE_RE.exec(normalizeCandidateBody(escalationBodyInLegacyOrder(body) ?? ""))?.[1];
+}
+
+/** W1-T14998 — the `<owner>/<name>` of the PR referent {@link prReferentFromIssueText} reads (the first `/pull/<n>`),
+ *  when that referent is a full GitHub URL; undefined for no referent or a bare path. */
+export function prReferentRepositoryFromIssueText(text: string | undefined): string | undefined {
+  return /(?:github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?\/pull\/\d+/.exec(escalationBodyInLegacyOrder(text) ?? "")?.[1];
+}
+
+/** W1-T14998 — whether an issue in a shared escalation pool is `codeRepository`'s: the code repository it records, or,
+ *  with none recorded, the repository of the PR it names. An issue recording or naming neither is kept, as before. */
+export function issueIsCodeRepositorys(issue: Pick<OpenIssue, "title" | "body">, codeRepository: string): boolean {
+  const named = escalationCodeRepository(issue.body)
+    ?? (prReferentFromIssueText(issue.body) !== undefined ? prReferentRepositoryFromIssueText(issue.body) : prReferentRepositoryFromIssueText(issue.title));
+  return named === undefined || named.toLowerCase() === codeRepository.toLowerCase();
+}
+
+/** W1-T14998 — whether a consumer that resolves an issue's task or PR number on `codeRepository` and may CLOSE it (the
+ *  escalation reconciler, the revalidation garden) may judge `issue`. An issue living in the code repository itself is
+ *  judged as before. One living elsewhere (the shared escalation pool) must record this code repository, and the PR it
+ *  names, in its body or title, must not be another repository's: an unattributable pooled issue is left open. */
+export function pooledIssueIsCodeRepositorys(issue: Pick<OpenIssue, "url" | "title" | "body">, codeRepository: string): boolean {
+  const lives = issueUrlRepository(issue.url);
+  const same = (named: string | undefined) => named === undefined || named.toLowerCase() === codeRepository.toLowerCase();
+  if (lives === undefined || lives.toLowerCase() === codeRepository.toLowerCase()) return true;
+  const recorded = escalationCodeRepository(issue.body);
+  return recorded !== undefined && same(recorded)
+    && same(prReferentRepositoryFromIssueText(issue.body)) && same(prReferentRepositoryFromIssueText(issue.title));
+}
+
+/** W1-T14998 — `body` with its code repository recorded first in its machine fields, so it is the one
+ *  {@link escalationCodeRepository} reads even when the detail quotes another such line. A body already read as this
+ *  repository's, or one the field would push past GitHub's body limit, is returned unchanged (that issue is then
+ *  judged by its PR URL). */
+export function withCodeRepositoryField(body: string, codeRepository: string): string {
+  if (escalationCodeRepository(body)?.toLowerCase() === codeRepository.toLowerCase()) return body;
+  const line = `**Code-Repository:** ${codeRepository}`;
+  // Right after the `**Host:**` line: the Class/Task/Host run and a fields block opening on `**Class:**` are what the
+  // body's layout readers recognise. A body with no Host line (a hand-rendered one) takes it as its first line.
+  const stamped = editEscalationMachineFields(body, (fields) => {
+    const host = /^\*\*Host:\*\*.*$/m.exec(fields);
+    if (!host) return `${line}\n${fields}`;
+    const crlf = host[0].endsWith("\r");
+    const end = host.index + host[0].length - (crlf ? 1 : 0);
+    return `${fields.slice(0, end)}${crlf ? "\r\n" : "\n"}${line}${fields.slice(end)}`;
+  });
+  return stamped.length <= GITHUB_ISSUE_BODY_LIMIT ? stamped : body;
+}
+
+/** W1-T14998 — a gateway filing in `route` for `codeRepository`. When those differ, the route is a pool other code
+ *  repositories file in too: each issue this gateway creates (or rewrites) records its code repository, and its open
+ *  listing — which dedup, the main-health rung and the reconcilers close from — holds only that repository's issues. */
+function scopedToCodeRepository(gateway: AsyncIssueGateway, route: string, codeRepository: string): AsyncIssueGateway {
+  if (route.toLowerCase() === codeRepository.toLowerCase()) return gateway;
+  const own = (open: OpenIssue[]) => open.filter((issue) => issueIsCodeRepositorys(issue, codeRepository));
+  const { create, listOpen, editBody } = gateway;
+  return {
+    ...gateway,
+    create: (title, body, labels) => create(title, withCodeRepositoryField(body, codeRepository), labels),
+    ...(listOpen ? { listOpen: (label: string) => {
+      const open = listOpen(label);
+      return open instanceof Promise ? open.then(own) : own(open);
+    } } : {}),
+    ...(editBody ? { editBody: (url: string, body: string) => editBody(url, withCodeRepositoryField(body, codeRepository)) } : {}),
+  };
 }
 
 /** W1-T14998 — the repository a gateway files in, or undefined for a fake gateway or one that files nowhere. */
@@ -2532,8 +2608,9 @@ export function ghIssueGatewayGraphql(
       return url;
     },
   };
-  gatewayRepository.set(gateway, repoArg);
-  return gateway;
+  const scoped = scopedToCodeRepository(gateway, repoArg, `${codeOwner}/${codeRepo}`);
+  gatewayRepository.set(scoped, repoArg);
+  return scoped;
 }
 
 function issueGatewaySteps(
