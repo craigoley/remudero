@@ -15,6 +15,12 @@
  * TMPDIR: a predictable name in a shared temp dir is CodeQL's js/insecure-temporary-file. With nowhere writable at all,
  * the plain check runs.
  *
+ * ONE CHECK PER WORKTREE AT A TIME (W1-T15169). A second check of the same tree waits for the first, on an exclusive
+ * lock beside the buildinfo ({@link acquireInflightLock}), then runs warm against what the first wrote. A holder whose
+ * pid is gone or reused is stale and taken over, so a dead first run cannot wedge it. Other trees never wait on it.
+ * OBSERVED 2026-11-27 16:24Z: two tsc runs on one fix-round worktree (4.0 and 2.5 GB) ran 25+ minutes side by side on
+ * one buildinfo, each admitted on memory headroom alone, while the container sat over its memory.high.
+ *
  * SAME RESULT AS PLAIN TSC. The diagnostics and the exit code are tsc's own; a buildinfo only changes what is rebuilt,
  * and tsc discards any cached entry whose hash, options or version differ. Extra argv is passed through to tsc.
  */
@@ -22,6 +28,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
+import { systemClock } from "./clock.js";
+import { acquireInflightLock, InflightLockError, type InflightLockHandle, type InflightLockInfo } from "./inflight-lock.js";
 import { appendProducerLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { discoverLiveLedgerRoot } from "./live-write-guard.js";
@@ -66,6 +74,44 @@ export interface TypecheckRunOptions {
   /** Options for the default slot acquisition; a check names its peak, {@link typecheckPeakBytes}, unless these do. */
   testSlot?: TestSlotOptions;
   log?: (line: string) => void;
+  /** Seams for the per-worktree lock (W1-T15169); the defaults probe the real pid table and sleep for real. */
+  worktreeLock?: WorktreeLockOptions;
+}
+
+export interface WorktreeLockOptions {
+  pollMs?: number;
+  sleep?: (ms: number) => void;
+  isPidAlive?: (pid: number) => boolean;
+  getProcessStartTime?: (pid: number) => number | null;
+}
+
+/** How often a check waiting on its worktree's lock looks again. */
+const WORKTREE_LOCK_POLL_MS = 1_000;
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Hold the lock beside `buildInfo` (`<buildInfo>.lock`), waiting while a live check of the same tree holds it. A stale
+ * holder is reclaimed by {@link acquireInflightLock}. A wait ends in one typecheck.waited_for_worktree line.
+ */
+function holdWorktreeTypecheck(buildInfo: string, opts: WorktreeLockOptions = {}, log: (line: string) => void): InflightLockHandle {
+  const started = systemClock.now();
+  let holder: InflightLockInfo | undefined;
+  for (;;) {
+    try {
+      const handle = acquireInflightLock(dirname(buildInfo), basename(buildInfo), {
+        run_id: NPM_TYPECHECK_SLOT_LABEL, isPidAlive: opts.isPidAlive, getProcessStartTime: opts.getProcessStartTime,
+      });
+      if (holder !== undefined) log(JSON.stringify({ step: "typecheck.waited_for_worktree", holderPid: holder.pid, waitedMs: systemClock.now() - started }));
+      return handle;
+    } catch (error) {
+      if (!(error instanceof InflightLockError)) throw error;
+      holder = error.holder;
+      (opts.sleep ?? sleepSync)(opts.pollMs ?? WORKTREE_LOCK_POLL_MS);
+    }
+  }
 }
 
 const inheritSpawn: TypecheckRunSpawn = (file, args, cwd, env) => {
@@ -127,12 +173,25 @@ export interface PreparedTypecheck {
   where: "git-dir" | "worktree" | "plain";
 }
 
+type BuildInfoSite = { where: "git-dir" | "worktree"; buildInfo: string } | { where: "plain"; buildInfo?: undefined };
+
+/** Where `root`'s buildinfo lives, before any seeding: its git dir when writable, else the worktree root, else none. */
+function buildInfoSite(root: string, canWrite: (dir: string) => boolean): BuildInfoSite {
+  const own = worktreeBuildInfoPath(root);
+  if (own !== undefined && canWrite(dirname(own))) return { where: "git-dir", buildInfo: own };
+  return canWrite(root) ? { where: "worktree", buildInfo: join(root, WORKTREE_BUILDINFO_NAME) } : { where: "plain" };
+}
+
 /** The argv for `root`'s check: its git dir's buildinfo when writable, else one in the worktree root, else plain. */
 export function prepareTypecheckRun(root: string, canWrite: (dir: string) => boolean = dirIsWritable): PreparedTypecheck {
+  return prepareAtSite(root, buildInfoSite(root, canWrite));
+}
+
+function prepareAtSite(root: string, site: BuildInfoSite): PreparedTypecheck {
+  if (site.where === "git-dir") return { ...prepareWorktreeTypecheck(root), where: "git-dir" };
+  if (site.where === "plain") return { args: typecheckArgs(undefined), seed: "no-seed", where: "plain" };
   const own = worktreeBuildInfoPath(root);
-  if (own !== undefined && canWrite(dirname(own))) return { ...prepareWorktreeTypecheck(root), where: "git-dir" };
-  if (!canWrite(root)) return { args: typecheckArgs(undefined), seed: "no-seed", where: "plain" };
-  const buildInfo = join(root, WORKTREE_BUILDINFO_NAME);
+  const buildInfo = site.buildInfo;
   const from = own !== undefined && existsSync(own) ? { root, buildInfo: own } : canonicalBuildInfo(root);
   const seed = from === undefined ? (existsSync(buildInfo) ? "kept" : "no-seed")
     : seedBuildInfo(from, { root, buildInfo }, installedTypescriptVersion(root));
@@ -141,9 +200,21 @@ export function prepareTypecheckRun(root: string, canWrite: (dir: string) => boo
 
 /** Run the incremental full typecheck of the checkout at `root`, warm or cold, inside an admission sized by its peak. */
 export function runTypecheck(root: string, extraArgs: readonly string[] = [], opts: TypecheckRunOptions = {}): number {
-  const prepared = prepareTypecheckRun(root, opts.canWrite);
-  const cold = !hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(root));
+  const site = buildInfoSite(root, opts.canWrite ?? dirIsWritable);
   const log = opts.log ?? ((line: string) => process.stderr.write(line + "\n"));
+  // W1-T15169: taken before seeding, the warm/cold read and the admission, so a second check reads the first's buildinfo.
+  const worktree = site.buildInfo === undefined ? undefined : holdWorktreeTypecheck(site.buildInfo, opts.worktreeLock, log);
+  try {
+    return runHeldTypecheck(root, prepareAtSite(root, site), extraArgs, opts, log);
+  } finally {
+    worktree?.release();
+  }
+}
+
+function runHeldTypecheck(
+  root: string, prepared: PreparedTypecheck, extraArgs: readonly string[], opts: TypecheckRunOptions, log: (line: string) => void,
+): number {
+  const cold = !hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(root));
   const peak = typecheckAdmissionPeak(root, !cold);
   let slot: TestSlotLease | undefined;
   try {

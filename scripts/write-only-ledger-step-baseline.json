@@ -1475,6 +1475,7 @@
     "host_memory.shared": "W1-T14903: an audit row of the one host memory snapshot both lanes cut from; the widths act on the snapshot itself, and nothing decides on the row.",
     "ci_judge.skipped": "PR-unfiled ci-judge reuse: an audit row that a full floor was posted without a model call; the posted status carries the verdict, and nothing decides on the row.",
     "ci_judge.reused": "PR-unfiled ci-judge reuse: an audit row that a prior verdict was reposted for an unchanged patch id; the verdicts file carries the state, and nothing decides on the row.",
-    "ci_judge.verdicts_unreadable": "PR-unfiled ci-judge reuse: a diagnostic that the verdicts file could not be read, so the pass judged afresh; it is rewritten on the same pass, and nothing re-reads the row."
+    "ci_judge.verdicts_unreadable": "PR-unfiled ci-judge reuse: a diagnostic that the verdicts file could not be read, so the pass judged afresh; it is rewritten on the same pass, and nothing re-reads the row.",
+    "typecheck.waited_for_worktree": "W1-T15169: a stderr line that one npm run typecheck waited for another of the same worktree, naming the holder pid and the wait; the lock itself decides, and nothing reads the line."
   }
 }
