@@ -9,7 +9,7 @@ import { CHECK_PROOF_EXIT, checkProofChildArgv } from "#src/lib/check-proof.js";
 import { landingIdentity, landPlanReconcileShards, planReconcileLanding, type LandFeedbackResult, type LandingRepository, type PlanReconcileLand } from "#src/lib/feedback-landing.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { buildPlanReconcileCadenceInput, planReconcileCadence, type PlanReconcileLint } from "#src/lib/measurement-cadence.js";
-import { readPlanShards, sharedFlipMark } from "#src/lib/plan-reconcile.js";
+import { SHARED_FLIP_MARK_RE, readPlanShards, reconcileRecordStatus, sharedFlipMark } from "#src/lib/plan-reconcile.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
@@ -175,3 +175,13 @@ for (const credited of [["W1-T9959"], ["W1-T9959", "W1-T9960"]]) {
     assert.equal(checkProofAt(w.origin.dir, w.main, proof!, w.main, `${kind}-base`), CHECK_PROOF_EXIT.fail, "positive control: at main the proof fails");
   });
 }
+
+test("W1-T15048: a marked flip reads as merged again, and only the reconciler's own mark is read past", () => {
+  assert.equal(SHARED_FLIP_MARK_RE.test(`  status: merged${sharedFlipMark("W1-T5")}`), true, "the mark after a merged status is the reconciler's");
+  assert.equal(SHARED_FLIP_MARK_RE.test(`  status: queued${sharedFlipMark("W1-T5")}`), false, "a mark on a queued line is not read past");
+  assert.equal(SHARED_FLIP_MARK_RE.test("  status: merged # someone's own note"), false, "another comment is not the mark");
+  const flipped = reconcileRecordStatus(record("W1-T4", "merged") + record("W1-T5", "queued"), "W1-T5", () => true).text!;
+  assert.match(flipped, /^ {2}status: merged # plan reconcile: W1-T5 credited$/m);
+  assert.equal(reconcileRecordStatus(flipped, "W1-T5", () => true).skipped, "status-not-queued", "a marked record reads merged, so it is never flipped twice");
+  assert.equal(reconcileRecordStatus(record("W1-T4", "merged") + record("W1-T5", "queued") + "", "W1-T6", () => true).skipped, "no-status-field", "an id the file does not hold is left alone");
+});

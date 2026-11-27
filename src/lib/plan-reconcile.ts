@@ -162,7 +162,7 @@ export function reconcileRecordStatus(
 
 /** W1-T15048: the end-of-line mark a shared file's flip writes on its record's status line. */
 export const sharedFlipMark = (taskId: string): string => ` # plan reconcile: ${taskId} credited`;
-const SHARED_FLIP_MARK_RE = /(?<=^ {2}status: merged) # plan reconcile: \S+ credited$/m;
+export const SHARED_FLIP_MARK_RE = /(?<=^ {2}status: merged) # plan reconcile: \S+ credited$/m;
 
 /** W1-T15048: every record of one file flipped onto that file's text, in record order. Undefined when none flips. */
 export function composeRecordStatuses(
