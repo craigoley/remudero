@@ -9,6 +9,13 @@ on:
 permissions:
   contents: read
 
+# W1-T15177: a push and a body edit seconds apart start two runs on one head. The newer cancels the
+# older, as ci.yml and ci-gate.yml already do, so the two never race one 10-minute bound and ci-gate's
+# latest-run-per-name rule reads the run that matters.
+concurrency:
+  group: proof-discrimination-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   proof-discrimination:
     name: proof-discrimination
