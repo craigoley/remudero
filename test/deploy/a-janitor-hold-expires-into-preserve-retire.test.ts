@@ -161,6 +161,77 @@ test("W1-T14971 criterion 1: a bare repository something outside depends on is k
   assert.match(r.stdout, new RegExp(`KEEP ${linked}: .*lends files to symlinks`));
 });
 
+test("W1-T14971 criterion 1: borrowers in protected and home .claude worktrees keep a bare repository", () => {
+  const fx = fixture();
+  const { main } = repos(fx);
+  const lent = bareUnit(fx, main, "protected-borrowed.Ll1111");
+  const protectedRoot = join(fx.root, "protected-worktrees");
+  const protectedCheckout = join(protectedRoot, "checkout");
+  const claudeCheckout = join(fx.home, "agent", ".claude", "worktrees", "borrower");
+  mkdirSync(protectedRoot, { recursive: true });
+  mkdirSync(join(claudeCheckout, ".."), { recursive: true });
+  git(fx.root, "clone", "--quiet", "--shared", lent, protectedCheckout);
+  git(fx.root, "clone", "--quiet", "--shared", lent, claudeCheckout);
+  age(lent, 10 * DAY_HOURS);
+
+  const r = run(fx, scratchOnly(fx, { RMD_CLEANUP_PROTECTED_WORKTREE_ROOTS: protectedRoot }));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(lent), true, r.stdout);
+  assert.match(r.stdout, new RegExp(`KEEP ${lent}: .*lends objects to`));
+  assert.deepEqual(preserved(fx, lent), []);
+  assert.equal(git(protectedCheckout, "rev-parse", "HEAD").trim(), git(main, "rev-parse", "HEAD").trim());
+  assert.equal(git(claudeCheckout, "rev-parse", "HEAD").trim(), git(main, "rev-parse", "HEAD").trim());
+});
+
+test("W1-T14971 criteria 1-3: a node_modules symlink into any held unit keeps it", () => {
+  const fx = fixture();
+  const { main } = repos(fx);
+  const bare = bareUnit(fx, main, "node-modules-bare.Mm1111");
+  const broken = brokenUnit(fx, main, "node-modules-broken.Nn1111").unit;
+  const seed = seedUnit(fx, "node-modules-seed.Oo1111");
+  const live = join(fx.root, "live-checkout");
+  mkdirSync(join(live, "node_modules"), { recursive: true });
+  for (const [name, target] of [["bare", bare], ["broken", join(broken, "repo")], ["seed", join(seed, "seeds", "store", "pkg")]]) {
+    symlinkSync(target, join(live, "node_modules", name));
+  }
+  for (const p of [bare, broken, seed]) age(p, 10 * DAY_HOURS);
+
+  const r = run(fx, scratchOnly(fx, { RMD_CLEANUP_LIVE_CHECKOUTS: live, RMD_CLEANUP_PRESERVE_ROOTS: "" }));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  for (const p of [bare, broken, seed]) {
+    assert.equal(existsSync(p), true, `${p} stays:\n${r.stdout}`);
+    assert.match(r.stdout, new RegExp(`KEEP ${p}: .*(?:seed store used by|held unit linked from) ${join(live, "node_modules")}`));
+    assert.deepEqual(preserved(fx, p), []);
+  }
+});
+
+test("W1-T14971 criteria 1-3: a unit containing a linked worktree of a live checkout keeps its unsaved files", () => {
+  const fx = fixture();
+  const { main } = repos(fx);
+  const bare = bareUnit(fx, main, "nested-worktree-bare.Pp1111");
+  const broken = brokenUnit(fx, main, "nested-worktree-broken.Qq1111").unit;
+  const seed = seedUnit(fx, "nested-worktree-seed.Rr1111");
+  const units = [bare, broken, seed];
+  for (const [index, unit] of units.entries()) {
+    const tree = join(unit, "embedded-worktree");
+    git(main, "worktree", "add", "-b", `held-${index}`, tree, "main");
+    writeFileSync(join(tree, "unsaved.txt"), "keep this work\n");
+  }
+  for (const unit of units) age(unit, 10 * DAY_HOURS);
+
+  const r = run(fx, scratchOnly(fx, { RMD_CLEANUP_PRESERVE_ROOTS: "" }));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  for (const [index, unit] of units.entries()) {
+    const tree = join(unit, "embedded-worktree");
+    assert.equal(existsSync(unit), true, `${unit} stays:\n${r.stdout}`);
+    assert.equal(readFileSync(join(tree, "unsaved.txt"), "utf8"), "keep this work\n");
+    assert.match(r.stdout, new RegExp(`KEEP ${unit}: .*contains linked worktree`));
+    assert.deepEqual(preserved(fx, unit), []);
+    // The live repository remains able to see the linked registration.
+    assert.ok(git(main, "worktree", "list", "--porcelain").includes(`worktree ${tree}`), `worktree ${index} remains registered`);
+  }
+});
+
 test("W1-T14971 criterion 1: an idle bare repository with no refs or a shallow history is tarred whole, then removed", () => {
   const fx = fixture();
   const { main } = repos(fx);

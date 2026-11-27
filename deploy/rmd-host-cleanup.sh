@@ -1314,10 +1314,11 @@ snapshot_alternates() {
 "
       done <<< "$lines"
     done <<< "$files"
-  done < <(printf '%s\n%s\n%s\n%s\n%s\n' "$SCRATCH_ROOTS" "$SCRATCH_PARENTS" "$WORKTREE_ROOTS" "$LIVE_CHECKOUTS" "$TMP_ROOTS" | tr ':' '\n'
+  done < <({ printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$SCRATCH_ROOTS" "$SCRATCH_PARENTS" "$WORKTREE_ROOTS" "$LIVE_CHECKOUTS" "$PROTECTED_WORKTREE_ROOTS" "$TMP_ROOTS" | tr ':' '\n'
              # the preserve-then-retire phase judges these too, so their borrowers count (full pass only)
              [ "$ONLY_TMP" = 1 ] || printf '%s\n' "$PRESERVE_ROOTS" | tr ':' '\n'
-             state_units)
+             for root in "$CLEAN_HOME"/*/.claude/worktrees; do [ -d "$root" ] && printf '%s\n' "$root"; done
+             state_units; })
 }
 # Sets SCRATCH_REASON and fails when unit $1 must stay: it borrows from a store that is gone, or a
 # borrower outside it still names it. A borrower removed earlier in this pass no longer holds it.
@@ -1365,16 +1366,28 @@ held_outside_borrowers() {
   return 0
 }
 held_unit_hosts_nothing() {
-  local p="$1" reg target
+  local p="$1" pp reg target file gitdir registrations gitfiles
+  pp="$(cd -P -- "$p" 2>/dev/null && pwd -P)" || pp="$p"
+  scan_find "$p" -path '*/worktrees/*/gitdir' -type f -print || { SCRATCH_REASON="linked worktree scan failed (unknown)"; return 1; }
+  registrations="$SCAN_OUT"
   while IFS= read -r reg; do
     [ -n "$reg" ] || continue
     target="$(head -n 1 -- "$reg" 2>/dev/null)" || { SCRATCH_REASON="linked worktree registration unreadable ($reg)"; return 1; }
     target="${target%/.git}"
     case "$target" in "$p"/*) ;; *) SCRATCH_REASON="hosts linked worktree ${target:-$reg} outside the unit"; return 1 ;; esac
-  done < <(find "$p" -path '*/worktrees/*/gitdir' -type f 2>/dev/null)
+  done <<< "$registrations"
+  gitfiles="$(find "$p" -type f -name .git -print 2>/dev/null)" || { SCRATCH_REASON="linked worktree scan failed (unknown)"; return 1; }
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    IFS= read -r target < "$file" || { SCRATCH_REASON="linked worktree pointer unreadable ($file)"; return 1; }
+    case "$target" in "gitdir: "*) gitdir="${target#gitdir: }" ;; *) continue ;; esac
+    case "$gitdir" in /*) ;; *) gitdir="${file%/*}/$gitdir" ;; esac
+    gitdir="$(normalize_path "$gitdir")"
+    case "$gitdir" in "$p"/*|"$pp"/*) ;; *) SCRATCH_REASON="contains linked worktree ${file%/.git} outside its repository"; return 1 ;; esac
+  done <<< "$gitfiles"
   return 0
 }
-# W1-T14971: a seed store's consumers link into it from inside their node_modules (per package, Linux readonly links),
+# W1-T14971: consumers can link into any held unit from inside node_modules (per package, Linux readonly links),
 # which snapshot_links prunes. One extra walk of every janitor root, node_modules included, collects those links.
 HELD_SEED_LINKS=""; HELD_SEED_LINKS_OK=1
 held_seed_links() {
@@ -1395,14 +1408,19 @@ held_seed_links() {
                      "$AGENT_SCRATCH" "$PROTECTED_WORKTREE_ROOTS" "$STATE_PARENTS" | tr ':' '\n'
              for root in "$CLEAN_HOME"/*/.claude/worktrees; do [ -d "$root" ] && printf '%s\n' "$root"; done; } | awk 'NF && !seen[$0]++')
 }
-held_seed_unreferenced() {   # fails with SCRATCH_REASON when a link outside unit $1 points into it, or the walk failed
-  local p="$1" pp link target
-  [ "$HELD_SEED_LINKS_OK" = 1 ] || { SCRATCH_REASON="seed consumer scan failed (unknown)"; return 1; }
+held_unit_unreferenced() {   # fails with SCRATCH_REASON when a link outside unit $1 points into it, or the walk failed
+  local p="$1" kind="$2" pp link target
+  [ "$HELD_SEED_LINKS_OK" = 1 ] || { SCRATCH_REASON="linked consumer scan failed (unknown)"; return 1; }
   pp="$(cd -P -- "$p" 2>/dev/null && pwd -P)" || pp="$p"
   while IFS='	' read -r link target; do
     [ -n "$link" ] || continue
     case "$link" in "$p"/*|"$pp"/*) continue ;; esac
-    case "$target" in "$p"|"$p"/*|"$pp"|"$pp"/*) SCRATCH_REASON="seed store used by $link"; return 1 ;; esac
+    case "$target" in
+      "$p"|"$p"/*|"$pp"|"$pp"/*)
+        if [ "$kind" = seed ]; then SCRATCH_REASON="seed store used by $link"
+        else SCRATCH_REASON="held unit linked from $link"; fi
+        return 1 ;;
+    esac
   done <<< "$HELD_SEED_LINKS"
   return 0
 }
@@ -1430,7 +1448,7 @@ retire_held_scratch_unit() {
   [ "$HELD_LINKS_TAKEN" = 1 ] || { snapshot_links; held_seed_links; HELD_LINKS_TAKEN=1; }
   if ! link_lender_check "$p"; then log "KEEP $p: $why; $SCRATCH_REASON"; return; fi
   if ! held_unit_hosts_nothing "$p"; then log "KEEP $p: $why; $SCRATCH_REASON"; return; fi
-  if [ "$kind" = seed ] && ! held_seed_unreferenced "$p"; then log "KEEP $p: $why; $SCRATCH_REASON"; return; fi
+  if ! held_unit_unreferenced "$p" "$kind"; then log "KEEP $p: $why; $SCRATCH_REASON"; return; fi
   if [ -L "$PRESERVE_ROOT" ]; then log "KEEP $p: $why; preserve root $PRESERVE_ROOT is a symbolic link"; return; fi
   name="${p#/}"; name="${name//\//__}@$PRESERVE_STAMP"; final="$PRESERVE_ROOT/$name.held"
   if [ "$DRY_RUN" = 1 ]; then
