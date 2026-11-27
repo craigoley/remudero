@@ -55,7 +55,7 @@ test("W1-T13197 criterion 1: an act pass retires a verify-human ask whose task m
   assert.equal(f.classification(ASKS.merged)?.state, "not_ready", "positive control: the shipped task's ask starts as a needs-triage row");
   assert.match(f.classification(ASKS.merged)?.reasons[0]?.detail ?? "", /terminal task facts/);
   const result = await f.run("act");
-  assert.equal("retired" in result && result.retired, INBOX_GARDENER_LIMITS.retirements);
+  assert.equal("retired" in result && result.retired, 1, "the one shipped, unprotected ask");
   const retire = f.entries().events.find(e => e.receipt.kind === "retire")!;
   assert.equal(retire.receipt.scope.proposalId, ASKS.merged);
   assert.equal(retire.receipt.scope.taskId, MERGED);
@@ -115,5 +115,5 @@ test("W1-T13197 criterion 4: a retired finished-task ask is restored by the exis
   await f.run("act");
   assert.equal(f.entries().events.filter(e => e.receipt.kind === "retire" && e.receipt.scope.proposalId === ASKS.merged).length, 1, "a restore is never undone by the gardener");
   assert.equal(retirementAsk({ id: "proof-debt:W1-T1300", summary: "", evidenceAnchors: [] }), undefined, "an unstamped proof-debt id gains no purpose");
-  assert.deepEqual(INBOX_GARDENER_LIMITS, { candidates: 8, proofReads: 4, judges: 1, retirements: 1, ledgerCatchUpMs: 300_000, ledgerChunkBytes: 64 * 1024 });
+  assert.deepEqual(INBOX_GARDENER_LIMITS, { ledgerCatchUpMs: 300_000, ledgerChunkBytes: 64 * 1024 }, "W1-T14978: no per-pass count bound");
 });

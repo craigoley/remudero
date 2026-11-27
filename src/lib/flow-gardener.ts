@@ -651,6 +651,7 @@ export function renderFlowFollowUp(stat: FlowStageStat, taskId: string, populati
       statement: `a ${stat.cls} PR is merged, held or refused on the same conditions as before; the remedy changes ${stat.unit === "minutes" ? "how long the stage takes" : `how many ${stat.stage} a PR needs`}, not what is decided.`,
       claim: `a ${stat.cls} PR${surface} that was held or refused before the change is still held or refused after it, and one that merged still merges`,
       proof: `grep: test("the ${stat.cls} ${stat.stage} stage keeps its outcomes" in ${testPath}`,
+      guard: true, // W1-T14924: preserves today's merge, hold and refuse decisions
     }] },
     note: `Filed by the flow gardener (W1-T5904). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The gardener does not re-file this stage while this task is open.`,
     rationale: [
@@ -1054,6 +1055,7 @@ function openRepairFiling(repair: FlowOpenRepairAges): FlowFiling | undefined {
           statement: "an open PR with green checks and no conflict is handled exactly as before; the remedy only shortens the wait of a red or conflicting PR.",
           claim: "an open PR with green checks and no conflict gets the same handling after the change as before it",
           proof: `grep: test("open green prs are handled as before" in ${testPath}`,
+          guard: true, // W1-T14924: preserves today's handling of green PRs
         }] },
         note: "Filed by the flow gardener (W1-T12547). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The gardener does not file this wait again while this task is open.",
         rationale: [

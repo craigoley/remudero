@@ -286,6 +286,7 @@ export function hotFileShardYaml(price: HotFilePrice, taskId: string): string {
       statement: `the restructuring changes how ${price.file} is edited and merged, not what it holds: everything it holds today is still there for its readers.`,
       claim: `everything ${price.file} holds before the restructuring is still available to its readers, with the same content, after it`,
       proof: `grep: test("${taskId}: the restructured file keeps its existing content" in ${testPath}`,
+      guard: true, // W1-T14924: preserves what the file holds today
     }] },
     note: `Filed by the hot-file gardener (W1-T4803). BEFORE: ${price.file} cost ${price.minutes} recency-weighted PR minute(s) across ${price.rounds} conflict round(s) on ${price.prs} pull request(s)${inferredNote}. Remedy: ${HOT_FILE_REMEDY_TEXT[remedy]}. The gardener measures the same file again once this lands and credits or debits the ${remedy} class by whether it stopped conflicting. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person.`,
   });

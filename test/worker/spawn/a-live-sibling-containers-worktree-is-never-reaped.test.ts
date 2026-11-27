@@ -40,6 +40,7 @@ function reap(root: string, activityAgeMs: number) {
     now: () => NOW,
     newestActivity: () => ({ mtimeMs: NOW - activityAgeMs, complete: true }),
     branchIsLiveUpstream: () => false,
+    cwdCensus: () => ({ state: "clear", scanned: 0 }), // W1-T15026: injected like the rest, never the host's `/proc`
   });
 }
 
