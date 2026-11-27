@@ -110,7 +110,21 @@ export function machineShardHeaderLines(files: readonly string[], cost?: number,
 }
 
 /** One behaviour a drafted remedy must keep: its `INVARIANT <slug>:` design line and the one claim that proves it. */
-export interface MachineShardInvariant { slug: string; statement: string; claim: string; proof: string }
+export interface MachineShardInvariant {
+  slug: string; statement: string; claim: string; proof: string;
+  /** W1-T14924: the invariant preserves behaviour that already holds, so its proof passes at the merge base by design
+   *  and its acceptance entry renders `kind: guard`. Set only on preservation invariants, never on new behaviour. */
+  guard?: boolean;
+}
+
+/** One rendered acceptance entry: a claim, its proof, and `kind: guard` for a preservation invariant. */
+export interface MachineShardCriterion { claim: string; proof: string; kind?: "guard" }
+
+/** The YAML lines one acceptance entry renders as, shared by every machine-shard renderer. */
+export function machineShardCriterionLines(c: { claim: string; proof?: string; kind?: unknown }): string[] {
+  return [`    - claim: ${JSON.stringify(c.claim)}`, `      proof: ${JSON.stringify(c.proof ?? "")}`,
+    ...(c.kind === "guard" ? ["      kind: guard"] : [])];
+}
 
 /** W1-T12833: what a template says its remedy must keep working, or the specific reason it keeps nothing. */
 export type MachineShardInvariants = { declared: readonly MachineShardInvariant[] } | { none: string };
@@ -129,8 +143,9 @@ export function machineShardDesign(design: string | undefined, invariants: Machi
 }
 
 /** The one `invariant:<slug>` acceptance entry each declared invariant maps to. */
-export function machineShardInvariantClaims(invariants: MachineShardInvariants): { claim: string; proof: string }[] {
-  return declaredOf(invariants).map((i) => ({ claim: `invariant:${i.slug} — ${i.claim}`, proof: i.proof }));
+export function machineShardInvariantClaims(invariants: MachineShardInvariants): MachineShardCriterion[] {
+  return declaredOf(invariants).map((i) => ({ claim: `invariant:${i.slug} — ${i.claim}`, proof: i.proof,
+    ...(i.guard === true ? { kind: "guard" as const } : {}) }));
 }
 
 /** W1-T13035: one record's lint as its own plan pull request meets it. A machine filing is always a NEW plan-only
@@ -197,7 +212,7 @@ export function renderMachineShard(spec: MachineShardSpec): { text: string; refu
     ...spec.files.map((f) => `    - ${f}`),
     ...(design === "" ? [] : [`  design: ${q(design)}`]),
     "  acceptance:",
-    ...[...spec.acceptance, ...machineShardInvariantClaims(spec.invariants)].flatMap((c) => [`    - claim: ${q(c.claim)}`, `      proof: ${q(c.proof)}`]),
+    ...[...spec.acceptance, ...machineShardInvariantClaims(spec.invariants)].flatMap(machineShardCriterionLines),
     ...(spec.note === undefined ? [] : [`  note: ${q(spec.note)}`]),
     ...(rationale === undefined ? [] : [`  rationale: ${rationaleStyle}`, ...rationale.map((line) => (line === "" ? "" : `    ${line}`))]),
     "",

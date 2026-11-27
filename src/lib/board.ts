@@ -156,6 +156,8 @@ interface BoardComputeOptions {
   /** Capture clean projections for memoization; BoardRow joins (lastActivityAt, liveSpendUsd)
    *  must be re-derived each pass, never carried. */
   captureProjections?: (byId: ReadonlyMap<string, StatusProjection>) => void;
+  /** The now view projects its private catalog with this pass's ledger and captured open batch. */
+  projectCatalog?: (deps: BoardDeps, catalog: BoardCatalogContext) => Map<string, StatusProjection>;
   /** W1-T14410: called after each part (project, rows, sections, queue), so a caller can time the parts. */
   lap?: (part: string) => void;
 }
@@ -408,7 +410,9 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
   };
   const catalog = options.catalog === undefined ? serveBoardCatalogs(deps) : options.catalog ?? undefined;
   const plan = catalog?.plan ?? deps.plan;
-  const byId = projectPlan(plan, effectiveDeps);
+  const byId = catalog && options.projectCatalog
+    ? options.projectCatalog(effectiveDeps, catalog)
+    : projectPlan(plan, effectiveDeps);
   options.captureProjections?.(byId);
   options.lap?.("project");
   const lastActivity = lastActivityByTask(lines);
