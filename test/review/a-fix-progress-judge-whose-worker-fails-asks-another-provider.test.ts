@@ -93,6 +93,17 @@ test("W1-T15163 criterion 2: a success subtype is never re-asked, and a re-ask t
   assert.equal(afterThrow.verdict, "continue");
   assert.equal("judge_skipped" in afterThrow ? afterThrow.judge_skipped : undefined, "unparseable-twice");
   assert.equal(thrownReask.spawned.length, 4);
+  // When both attempts throw, retain the original unavailable behavior instead of running an unjudged round.
+  const bothThrow = judgeWith(root, async (args, n) => {
+    if (n === 1) {
+      args.onSelectionAssignment?.({ selected: { provider: "codex", model: "gpt-6-luna" } } as Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0]);
+    }
+    throw new Error(`provider attempt ${n} failed before result`);
+  });
+  const unavailable = await judgeFixProgress(input(), bothThrow.judge, { reask: true });
+  assert.equal(unavailable.verdict, "unavailable");
+  assert.equal(bothThrow.spawned.length, 2);
+  assert.deepEqual(bothThrow.spawned[1]!.excludeProviders, ["codex"]);
   const pass = judgeWith(root, async () => codexExit());
   const decision = await judgeFixProgress(input(), pass.judge, { reask: true });
   assert.equal(decision.verdict, "continue");

@@ -2726,12 +2726,14 @@ export function productionFixProgressJudge(opts: {
 async function askFixProgressJudgeOnce(spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>, args: SpawnWorkerArgs):
   Promise<{ result: WorkerResult; reaskedFrom?: FixProgressReaskedFrom } | undefined> {
   let first: WorkerResult | undefined;
+  let firstThrew = false;
   let assigned: { provider: string; model: string } | undefined;
   const firstArgs: SpawnWorkerArgs = { ...args, onSelectionAssignment: (assignment) => {
     assigned = { provider: assignment.selected.provider, model: assignment.selected.model };
     args.onSelectionAssignment?.(assignment);
   } };
   try { first = await spawn(firstArgs); } catch {
+    firstThrew = true;
     first = undefined; // a throw before a result is an attempt that ended without one: it is re-asked below
   }
   if (first !== undefined && (first.subtype === undefined || first.subtype === "success")) return { result: first };
@@ -2741,7 +2743,10 @@ async function askFixProgressJudgeOnce(spawn: (args: SpawnWorkerArgs) => Promise
   const exclude = provider === undefined ? args.excludeProviders : [...new Set([...(args.excludeProviders ?? []), provider])];
   let result: WorkerResult;
   try { result = await spawn({ ...args, ...(exclude === undefined || exclude.length === 0 ? {} : { excludeProviders: exclude }) }); }
-  catch { return undefined; } // no answer: preserve the caller's existing unparseable/re-ask path
+  catch (error) {
+    if (firstThrew) throw error;
+    return undefined; // a returned failure followed by a throw preserves the caller's unparseable/re-ask path
+  }
   return { result, reaskedFrom };
 }
 
