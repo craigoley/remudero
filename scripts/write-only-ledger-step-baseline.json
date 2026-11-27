@@ -1472,6 +1472,7 @@
     "github.delivery": "W1-T14881: GitHub's own record of each webhook delivery's status and duration; it is the evidence for webhook timeouts, and only its own pass reads it back (W1-T14979, to redeliver failed ones).",
     "github.delivery.read_failed": "W1-T14881: a diagnostic that a delivery-log pass could not read a page; the next pass rereads from the same cursor, so nothing re-reads the row.",
     "github.delivery.redelivered": "W1-T14979: the record that a failed delivery was redelivered once; only its own pass reads it back, to never redeliver twice.",
-    "escalation.not_filed": "W1-T14998: a host with no private escalation repository records that the escalation was not filed; the operator reads the ledger, and nothing re-reads the row."
+    "escalation.not_filed": "W1-T14998: a host with no private escalation repository records that the escalation was not filed; the operator reads the ledger, and nothing re-reads the row.",
+    "host_memory.shared": "W1-T14903: an audit row of the one host memory snapshot both lanes cut from; the widths act on the snapshot itself, and nothing decides on the row."
   }
 }
