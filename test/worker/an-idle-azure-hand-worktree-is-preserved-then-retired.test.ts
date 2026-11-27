@@ -7,8 +7,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import { age, fixture, git, repos, run, type Fixture } from "#test/helpers/host-cleanup-fixture.js";
 
@@ -18,8 +18,7 @@ const handOnly = (root: string, extra: Record<string, string> = {}) => ({
   RMD_CLEANUP_TMP_ROOTS: "", ...extra,
 });
 
-function copies(fx: Fixture, wt: string): string[] {
-  const root = join(fx.root, "preserved");
+function copies(fx: Fixture, wt: string, root = join(fx.root, "preserved")): string[] {
   if (!existsSync(root)) return [];
   const stem = wt.replace(/^\//, "").replace(/\//g, "__") + "@";
   return readdirSync(root).filter(n => n.startsWith(stem)).map(n => join(root, n));
@@ -157,6 +156,117 @@ test("W1-T14400 criterion 2: invariant:nothing-unsaved-is-removed — a watched 
   assert.equal(existsSync(wt), true, "the worktree stays when the preserve disk is beyond its watched mark");
   assert.match(r.stdout, new RegExp(`KEEP ${wt}: uncommitted changes; preserve root .* past its watched mark`));
   assert.deepEqual(copies(fx, wt), [], "no copy is started when the watched mark already fails");
+});
+
+/** A dirty linked worktree at `<handRoot>/<name>`, not yet aged. */
+function dirtyTreeUnder(fx: Fixture, main: string, handRoot: string, name: string): string {
+  mkdirSync(handRoot, { recursive: true });
+  const wt = join(handRoot, name);
+  git(main, "worktree", "add", "--quiet", "-b", `hand/${name}`, wt, "main");
+  writeFileSync(join(wt, "README"), `${name} dirty\n`);
+  return wt;
+}
+
+test("W1-T14400 criterion 2: a keep marker on, above or inside an idle hand worktree holds it, and a lapsed one does not", () => {
+  const fx = fixture();
+  const { main } = repos(fx);
+  const held = (name: string, markerAt: (wt: string, handRoot: string) => string, text: string) => {
+    const handRoot = join(fx.root, `above-${name}`, "hand");
+    const wt = dirtyTreeUnder(fx, main, handRoot, name);
+    const marker = markerAt(wt, handRoot);
+    mkdirSync(dirname(marker), { recursive: true });
+    writeFileSync(marker, text);
+    age(wt, 10 * DAY_HOURS);
+    return { handRoot, wt, marker };
+  };
+  const until = "keep-until: 2099-01-01\n";
+  const kept = [
+    held("scratch-on-tree", wt => join(wt, ".rmd-scratch-keep"), until),
+    held("scratch-undated", wt => join(wt, ".rmd-scratch-keep"), "operator hold\n"),
+    held("janitor-on-tree", wt => join(wt, ".rmd-janitor-keep"), ""),
+    held("scratch-on-root", (_wt, handRoot) => join(handRoot, ".rmd-scratch-keep"), until),
+    held("janitor-on-root", (_wt, handRoot) => join(handRoot, ".rmd-janitor-keep"), ""),
+    held("scratch-above-root", (_wt, handRoot) => join(handRoot, "..", ".rmd-scratch-keep"), until),
+    held("scratch-inside", wt => join(wt, "deep", "er", ".rmd-scratch-keep"), until),
+    held("janitor-inside", wt => join(wt, "deep", "er", ".rmd-janitor-keep"), ""),
+  ];
+  const lapsed = held("scratch-lapsed", wt => join(wt, ".rmd-scratch-keep"), "keep-until: 2000-01-01\n");
+
+  const r = run(fx, handOnly([...kept, lapsed].map(t => t.handRoot).join(":")));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  for (const { wt, marker } of kept) {
+    assert.equal(existsSync(wt), true, `${wt} stays for ${marker}:\n${r.stdout}`);
+    assert.ok(r.stdout.includes(`KEEP ${wt}: uncommitted changes; keep marker `), `${wt} names its hold:\n${r.stdout}`);
+    assert.doesNotMatch(r.stdout, new RegExp(`REMOVE ${wt}[: ]`));
+    assert.deepEqual(copies(fx, wt), [], `no copy is started for held ${wt}`);
+  }
+  assert.equal(existsSync(lapsed.wt), false, `a lapsed marker holds nothing:\n${r.stdout}`);
+  assert.ok(copies(fx, lapsed.wt)[0], "the lapsed-marker worktree is saved first");
+});
+
+test("W1-T14400 criterion 2: a keep marker placed on the hand root during the save holds the worktree before removal", () => {
+  const fx = fixture();
+  const { main } = repos(fx);
+  const handRoot = join(fx.root, "hand-late");
+  const wt = dirtyTreeUnder(fx, main, handRoot, "late-marker");
+  age(wt, 10 * DAY_HOURS);
+  // The first open-file probe taken after a finished copy exists writes the marker, then answers as before.
+  const marker = join(handRoot, ".rmd-janitor-keep");
+  const lsof = join(fx.root, "bin", "lsof-late-marker");
+  writeFileSync(lsof, `#!/usr/bin/env bash\nfor m in "${join(fx.root, "preserved")}"/*/MANIFEST.txt; do [ -e "$m" ] && : > "${marker}"; done\nexec "${fx.env.RMD_CLEANUP_LSOF}" "$@"\n`);
+  chmodSync(lsof, 0o755);
+
+  const r = run(fx, handOnly(handRoot, { RMD_CLEANUP_LSOF: lsof }));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(wt), true, r.stdout);
+  assert.ok(r.stdout.includes(`KEEP ${wt}: keep marker ${marker} before retire (copy kept: `), r.stdout);
+  assert.ok(copies(fx, wt)[0], "the copy was written before the marker appeared");
+});
+
+test("W1-T14400 criterion 2: with no preserve root set the copy lands on the state disk, and expires there", () => {
+  const fx = fixture();
+  const { wt, root } = heldHandTree(fx, "wt-state-disk");
+  age(wt, 10 * DAY_HOURS);
+  const state = join(fx.root, "state-disk");
+  const disk = join(fx.root, "scratch-disk");
+  for (const d of [state, disk]) mkdirSync(d);
+  const env = handOnly(root, { RMD_CLEANUP_PRESERVE_ROOT: "", RMD_CLEANUP_STATE_DISK: state, RMD_SCRATCH_ROOT: disk });
+
+  const r = run(fx, env);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(wt), false, r.stdout);
+  const [copy] = copies(fx, wt, join(state, "host", "preserved-worktrees"));
+  assert.ok(copy, `the copy is on the state disk:\n${r.stdout}`);
+  assert.equal(existsSync(join(copy, "uncommitted.patch")), true);
+  assert.equal(existsSync(join(copy, "unpublished.bundle")), true);
+  assert.deepEqual(copies(fx, wt, join(disk, "host-cleanup-preserved")), [], "nothing is saved to the scratch disk");
+
+  age(copy, 10 * DAY_HOURS);
+  const later = run(fx, env);
+  assert.equal(later.status, 0, later.stderr + later.stdout);
+  assert.equal(existsSync(copy), false, `the state-disk copy follows the retention:\n${later.stdout}`);
+});
+
+test("W1-T14400 criterion 2: a state disk past its watched mark holds retirement, whatever the scratch disk has free", () => {
+  const fx = fixture();
+  const { wt, root } = heldHandTree(fx, "wt-state-full");
+  age(wt, 10 * DAY_HOURS);
+  const state = join(fx.root, "state-disk");
+  const disk = join(fx.root, "scratch-disk");
+  for (const d of [state, disk]) mkdirSync(d);
+  const df = join(fx.root, "bin", "df-by-disk");
+  writeFileSync(df, `#!/usr/bin/env bash\ncase "$1" in "${state}"*) dev=/dev/state pct=95 ;; *) dev=/dev/other pct=50 ;; esac\necho 'Filesystem 1024-blocks Used Available Capacity Mounted on'\necho "$dev 1000000 500000 500000 $pct% /"\n`);
+  chmodSync(df, 0o755);
+
+  const r = run(fx, handOnly(root, {
+    RMD_CLEANUP_PRESERVE_ROOT: "", RMD_CLEANUP_STATE_DISK: state, RMD_SCRATCH_ROOT: disk,
+    RMD_CLEANUP_DF: df, RMD_CLEANUP_WATCH_FS: `${state}:85 ${disk}:90`,
+  }));
+  assert.equal(r.status, 1, r.stderr + r.stdout);
+  assert.equal(existsSync(wt), true, r.stdout);
+  const held = join(state, "host", "preserved-worktrees");
+  assert.ok(r.stdout.includes(`KEEP ${wt}: uncommitted changes; preserve root ${held} is past its watched mark`), r.stdout);
+  assert.deepEqual(copies(fx, wt, held), []);
 });
 
 test("W1-T14400 criterion 2: preserve-retire keeps nested repositories, bundles and implicit agent worktrees", () => {

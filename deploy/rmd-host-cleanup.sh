@@ -74,6 +74,8 @@
 #   RMD_CLEANUP_STATE_DISK, RMD_SCRATCH_ROOT  the data disks (/mnt/rmd, /mnt/scratch); setting the first selects the host layout
 #   RMD_CLEANUP_{RETAIN_DAYS,RETAIN_ROOTS,PRESERVE_ROOTS,PRESERVE_ROOT,MAX_UNTRACKED_MB,PUBLISHED_REMOTES,DUMP_ROOTS,
 #     DUMP_RESUMABLE_ROOTS,DUMP_MIN_MB,DUMP_RETAIN_DAYS}  the 2026-10-23 phases; their defaults are set below
+#                               (held hand worktrees save to <state disk>/host/preserved-worktrees unless
+#                               PRESERVE_ROOT is set, W1-T14400)
 #   RMD_CLEANUP_ROOT_FS         the filesystem being protected (default /)
 #   RMD_CLEANUP_DF              command taking a path and printing `df -Pk`-shaped output for the
 #                               filesystem holding it (default `df -Pk`)
@@ -222,6 +224,9 @@ RETAIN_DAYS="${RMD_CLEANUP_RETAIN_DAYS:-7}"
 # is preserved, then retired, once it has been idle this many days.
 HELD_WORKTREE_DAYS="${RMD_CLEANUP_HELD_WORKTREE_DAYS:-$RETAIN_DAYS}"
 PRESERVE_ROOT="${RMD_CLEANUP_PRESERVE_ROOT:-$SCRATCH_DISK/host-cleanup-preserved}"
+# Held-worktree copies go to the state disk: a deallocate wipes the scratch disk, and the hand tree they came from
+# may live on a persistent one. An explicit RMD_CLEANUP_PRESERVE_ROOT moves both kinds of copy.
+HELD_PRESERVE_ROOT="${RMD_CLEANUP_PRESERVE_ROOT:-$STATE_DISK/host/preserved-worktrees}"
 MAX_UNTRACKED_MB="${RMD_CLEANUP_MAX_UNTRACKED_MB:-50}"
 DUMP_MIN_MB="${RMD_CLEANUP_DUMP_MIN_MB:-5}"
 DUMP_RETAIN_DAYS="${RMD_CLEANUP_DUMP_RETAIN_DAYS:-14}"
@@ -739,15 +744,44 @@ prune_held_worktree() {
     rm -f -- "$root_time"
   done
 }
+# W1-T14400: a keep declaration holds a worktree from retirement when it is on the worktree, on any folder above it
+# (its hand root included) or anywhere inside it, as on the Mac. `.rmd-janitor-keep` holds in any form;
+# `.rmd-scratch-keep` holds while keep_marker says it is in force. Status 0 holds and sets KEEP_DECLARED; a scan that
+# fails holds too.
+KEEP_DECLARED=""
+keep_declared() {
+  local wt="$1" dir="$1" found marker
+  while [ -n "$dir" ]; do
+    marker="$dir/.rmd-janitor-keep"
+    if [ -e "$marker" ] || [ -L "$marker" ]; then KEEP_DECLARED="$marker"; return 0; fi
+    if keep_marker "$dir"; then KEEP_DECLARED="$dir/.rmd-scratch-keep"; return 0; fi
+    case "$dir" in */*) dir="${dir%/*}" ;; *) break ;; esac
+  done
+  if ! found="$(find "$wt" -mindepth 2 \( -name .rmd-janitor-keep -o -name .rmd-scratch-keep \) -print 2>/dev/null)"; then
+    KEEP_DECLARED="unknown (marker scan failed)"; return 0
+  fi
+  while IFS= read -r marker; do
+    [ -n "$marker" ] || continue
+    case "$marker" in
+      */.rmd-janitor-keep) KEEP_DECLARED="$marker"; return 0 ;;
+      *) if keep_marker "${marker%/*}"; then KEEP_DECLARED="$marker"; return 0; fi ;;
+    esac
+  done <<< "$found"
+  return 1
+}
 # W1-T14400: retire_held_worktree <linked worktree> <hold reason>. The Mac's preserve-retire on the Azure host: a
 # linked worktree idle HELD_WORKTREE_DAYS, closed and unmounted, gets its uncommitted patch, an unpublished-commit
-# bundle, its untracked files and a MANIFEST written to the preserve root (preserve_repo, the same format as the
-# preserve-then-retire pass), each read back, then leaves through git worktree remove. Its branch stays.
-# INVARIANT nothing-unsaved-is-removed: a failed save or read-back, a locked, open or recent worktree is kept.
+# bundle, its untracked files and a MANIFEST written to the state disk's HELD_PRESERVE_ROOT (preserve_repo, the same
+# format as the preserve-then-retire pass), each read back, then leaves through git worktree remove. Its branch stays.
+# INVARIANT nothing-unsaved-is-removed: a failed save or read-back, a locked, open, recent or keep-marked worktree
+# is kept.
 retire_held_worktree() {
   local wt="$1" reason="$2" gitdir bytes copy
   local IDLE_MINUTES=$(( HELD_WORKTREE_DAYS * 1440 ))
+  # Shadows the scratch preserve root and its watched mark for the save, room check and read-back below.
+  local PRESERVE_ROOT="$HELD_PRESERVE_ROOT" PRESERVE_MARK_PCT="" PRESERVE_MARK_KB=0
   if ! configured_hand_worktree "$wt"; then log "KEEP $wt: $reason; outside configured hand worktree roots"; return 0; fi
+  if keep_declared "$wt"; then log "KEEP $wt: $reason; keep marker $KEEP_DECLARED"; return 0; fi
   if ! retirement_payload_safe "$wt"; then log "KEEP $wt: $reason; nested repository or bundle found, or payload scan failed"; return 0; fi
   is_worktree_idle "$wt" || return 0
   git_head_idle "$wt" || return 0
@@ -778,6 +812,8 @@ retire_held_worktree() {
      [ "$(rgit "$wt" rev-parse --verify HEAD 2>/dev/null)" != "$PRESERVED_HEAD" ]; then
     log "KEEP $wt: changed or active before retire (copy kept: $copy)"; return 0
   fi
+  # A marker above the worktree changes nothing inside it, so the idle recheck cannot see it.
+  if keep_declared "$wt"; then log "KEEP $wt: keep marker $KEEP_DECLARED before retire (copy kept: $copy)"; return 0; fi
   if ! audit_writable; then log "KEEP $wt: audit log unwritable ($AUDIT_LOG; copy kept: $copy)"; return 0; fi
   log "REMOVE $wt: $reason; idle ${HELD_WORKTREE_DAYS} days, preserved then retired (${bytes:-unknown} bytes; copy: $copy)"
   if rgit "$wt" worktree remove --force -- "$wt" 2>/dev/null; then tally "held-worktree ${wt%/*}" "$bytes"
@@ -1067,6 +1103,7 @@ scratch_guard() {
   if ruling_namespace "$p"; then log "KEEP $p: operator ruling 2026-10-23 (retired only by the service-user pass)"; return 1; fi
   # The preserve-then-retire copies sit on the scratch disk; only retention may expire them.
   case "$PRESERVE_ROOT" in "$p"|"$p"/*) log "KEEP $p: holds the janitor's preserve root $PRESERVE_ROOT"; return 1 ;; esac
+  case "$HELD_PRESERVE_ROOT" in "$p"|"$p"/*) log "KEEP $p: holds the janitor's preserve root $HELD_PRESERVE_ROOT"; return 1 ;; esac
   while IFS= read -r parent; do
     [ -n "$parent" ] || continue
     parent="${parent%/}"
@@ -1416,7 +1453,7 @@ state_child_guard() {
     case "$configured" in "$p"|"$p"/*) STATE_REASON="holds janitor path $configured"; return 1 ;; esac
   done < <(printf '%s\n' "$ARCHIVE_ROOT" "$WORKTREE_ARCHIVE_ROOT" "$TMP_ROOTS" "$SCRATCH_ROOTS" \
              "$SCRATCH_PARENTS" "$WORKTREE_ROOTS" "$COVERAGE_LOCK_DIR" "$LOCK_FILE" "$PRESERVE_ROOT" \
-             "$RETAIN_ROOTS" | tr ':' '\n')
+             "$HELD_PRESERVE_ROOT" "$RETAIN_ROOTS" | tr ':' '\n')
 }
 # Fails with STATE_REASON when state parent $1 is the root disk's own directory (disk not mounted).
 state_parent_ok() {
@@ -1562,8 +1599,8 @@ preserve_skip() {
       "$p") return 0 ;;
       "$p"/*) [ "$(worktree_root_of "$other")" = "$other" ] || return 0 ;;
     esac
-  done < <(printf '%s\n' "$PRESERVE_ROOTS" "$PRESERVE_ROOT" "$ARCHIVE_ROOT" "$WORKTREE_ARCHIVE_ROOT" "$RETAIN_ROOTS" \
-             "$COVERAGE_PATHS" "$LOCK_FILE" | tr ':' '\n')
+  done < <(printf '%s\n' "$PRESERVE_ROOTS" "$PRESERVE_ROOT" "$HELD_PRESERVE_ROOT" "$ARCHIVE_ROOT" "$WORKTREE_ARCHIVE_ROOT" \
+             "$RETAIN_ROOTS" "$COVERAGE_PATHS" "$LOCK_FILE" | tr ':' '\n')
   return 1
 }
 preserve_oversized() {
@@ -2169,17 +2206,21 @@ expire_dated_root() {
   done
 }
 expire_preserved_copies() {
-  local e
-  [ -d "$PRESERVE_ROOT" ] && [ ! -L "$PRESERVE_ROOT" ] || return 0
-  for e in "$PRESERVE_ROOT"/*@[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z "$PRESERVE_ROOT"/.incoming-*; do
-    [ -d "$e" ] && [ ! -L "$e" ] || continue
-    keep_container_path "$e" && continue
-    [ "$(owner_uid "$e")" = "$RUN_UID" ] || continue   # only copies this identity made
-    case "${e##*/}" in
-      .incoming-*)   # an interrupted copy never counted as one; it goes once idle
-        if is_idle "$e" && ! is_open "$e"; then log "REMOVE $e: interrupted preservation"; act rm -rf -- "$e"; fi ;;
-      *) expire_entry "$e" "$RETAIN_DAYS" "retention $PRESERVE_ROOT" "preserved copy older than ${RETAIN_DAYS} days (operator ruling 2026-10-23)" ;;
-    esac
+  local e root
+  local -a roots=("$PRESERVE_ROOT")
+  [ "$HELD_PRESERVE_ROOT" = "$PRESERVE_ROOT" ] || roots+=("$HELD_PRESERVE_ROOT")
+  for root in "${roots[@]}"; do
+    [ -d "$root" ] && [ ! -L "$root" ] || continue
+    for e in "$root"/*@[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z "$root"/.incoming-*; do
+      [ -d "$e" ] && [ ! -L "$e" ] || continue
+      keep_container_path "$e" && continue
+      [ "$(owner_uid "$e")" = "$RUN_UID" ] || continue   # only copies this identity made
+      case "${e##*/}" in
+        .incoming-*)   # an interrupted copy never counted as one; it goes once idle
+          if is_idle "$e" && ! is_open "$e"; then log "REMOVE $e: interrupted preservation"; act rm -rf -- "$e"; fi ;;
+        *) expire_entry "$e" "$RETAIN_DAYS" "retention $root" "preserved copy older than ${RETAIN_DAYS} days (operator ruling 2026-10-23)" ;;
+      esac
+    done
   done
 }
 # Codex rollout logs. On Azure ~/.codex IS $STATE_DISK/agent-codex (one bind mount), so these are
