@@ -15,6 +15,7 @@ import { OPS_PR_RED_STALLED_STEP, OPS_PR_WATCH_UNREADABLE_STEP, firstErrorLine, 
 import type { Escalation } from "#src/lib/escalate.js";
 import { appendLedger, rotateLedger } from "#src/lib/ledger.js";
 import { readLedgerUnionRawLinesAsync, readLedgerUnionRawLinesSync } from "#src/lib/ledger-union.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { prReferentFromIssueText } from "#src/lib/escalate.js";
 
 const REPO = "acme/remudero-ops";
@@ -112,7 +113,7 @@ test("W1-T14865 criterion 2: invariant:once-per-head — a second tick on the sa
 });
 
 test("W1-T14865 criterion 2: once-per-head memory survives a real ledger rotation", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "ops-pr-watch-rotation-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}ops-pr-watch-rotation-`));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const ledger = join(dir, "ledger.ndjson");
   appendLedger(ledger, { step: OPS_PR_RED_STALLED_STEP, run_id: "test-run", task_id: "OPS-PR-748", pr_number: 748, head_sha: HEAD, ts: "2026-11-24T23:30:00Z" },
