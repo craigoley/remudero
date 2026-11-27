@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import fs, { existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -31,7 +31,7 @@ const record = (extra: Partial<StaticRecord> = {}): StaticRecord => ({
 
 function fakeHost(files: Record<string, string | Error> = {}, extra: Partial<ReservedTreeProbeHost> = {}): ReservedTreeProbeHost {
   const proc: Record<string, string | Error> = {
-    "/proc/self/status": "Name:\twaiter\nNSpid:\t77\n", "/proc/1/stat": stat("5"), "/proc/42/stat": stat("200"), ...files,
+    "/proc/self/ns/pid": WAITER_NS, "/proc/self/status": "Name:\twaiter\nNSpid:\t77\n", "/proc/1/stat": stat("5"), "/proc/42/stat": stat("200"), ...files,
   };
   return {
     platform: "linux", list: () => ["1", "42", "self", "sys"],
@@ -143,10 +143,12 @@ test("W1-T12822 criterion 2: the real default /proc scan clears a start no proce
   const never = `proc:${BigInt(own.slice(5)) + 10n ** 15n}`;
   const dead = record({ processStart: never }), dead2 = fixture.plant(dead);
   const live = fixture.plant(record({ processStart: own, label: "live foreign static", memoryBytes: 512 * 1024 ** 2 }));
-  const initial = readFileSync("/proc/self/status", "utf8").match(/^NSpid:[ \t]*(.*)$/m)?.[1]?.trim().split(/[ \t]+/).length === 1;
-  // Only a waiter outside the initial namespace has its NSpid line injected; every other read is the real /proc.
+  // W1-T15112: the initial namespace is the kernel's fixed init link, not a one-entry NSpid alone.
+  const initial = readlinkSync("/proc/self/ns/pid") === WAITER_NS &&
+    readFileSync("/proc/self/status", "utf8").match(/^NSpid:[ \t]*(.*)$/m)?.[1]?.trim().split(/[ \t]+/).length === 1;
+  // Only a waiter outside the initial namespace has its namespace link and NSpid line injected; every other read is the real /proc.
   const scan = initial ? null : () => scanProcessStarts({
-    read: path => path === "/proc/self/status" ? "NSpid:\t1\n" : readFileSync(path, "utf8"),
+    read: path => path === "/proc/self/ns/pid" ? WAITER_NS : path === "/proc/self/status" ? "NSpid:\t1\n" : readFileSync(path, "utf8"),
   });
   const admission = fixture.admit(scan, { memoryHeadroom: () => 2 * GiB });
   assert.equal(existsSync(dead2.path), false, `the never-started writer's record was removed: ${JSON.stringify(fixture.rows)}`);

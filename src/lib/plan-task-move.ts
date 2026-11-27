@@ -32,7 +32,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { MOVED_FROM_VALUE, defaultGitRunnerAsync, withoutOneMovedFromLine } from "./plan.js";
 import {
   MOVE_COPY_RECEIPT, PreviewUnknown, type OpsGateNamedReader, type BatchFits, catalog, liveHeadJudge, migrationOptions, publicReferences, readState, refs, selectPlanTaskMigration, unknown,
-  type CatalogOriginal, type MigrationGraphqlReader, type MigrationOptions, type PreviewState,
+  heldAtBase, moveReservation, unresolvedCitations, type CatalogOriginal, type MigrationGraphqlReader, type MigrationOptions, type PreviewState,
 } from "./plan-task-migration.js";
 import { planPrPreflightAllows, planPrPreflightAtCommitAsync, ratifyPrCreateRestArgs, type PlanPrPreflightResult } from "./plan-pr-emitter.js";
 import { ghJsonAsync } from "./github-transport.js";
@@ -118,7 +118,7 @@ export function batchFits(o: ReceiptOptions, publicRefs: ReadonlyMap<string, str
   return batch => (["copy", "remove"] as const).every(step => {
     const receipt = step === "copy" ? copyReceipt : removeReceipt;
     const members = batch.map((m): Planned => ({ step, id: m.id, repository: step === "copy" ? "ops" : "public", path: m.path, title: "", evidence: {},
-      message: `\n\n${receipt(o, m.id, m.path, m.blob, publicRefs.get(`refs/rmd-id/${m.id}`) ?? "0".repeat(40))}` }));
+      message: `\n\n${receipt(o, m.id, m.path, m.blob, publicRefs.get(`refs/rmd-id/${m.id}`) ?? heldAtBase(o.publicCommit))}` }));
     return bodyOf(stepOf(members)).length <= limit;
   });
 }
@@ -188,7 +188,7 @@ async function moverHistory(root: string, commit: string): Promise<Map<string, M
   for (const entry of out.split("\x1e")) {
     const [sha, body] = entry.trim().split("\x1f");
     if (!sha || body === undefined) continue;
-    const reservations = new Map([...body.matchAll(/^Remudero-Move-Reservation: (\S+) ([0-9a-f]{40})$/gm)].map(m => [m[1]!, m[2]!]));
+    const reservations = new Map([...body.matchAll(/^Remudero-Move-Reservation: (\S+) ([0-9a-f]{40}|held-at=remudero@[0-9a-f]{40})$/gm)].map(m => [m[1]!, m[2]!]));
     for (const m of body.matchAll(/^Remudero-Moved-To: \S+@[0-9a-f]{40} (\S+) path=(\S+) blob=([0-9a-f]{40})$/gm)) {
       if (!latest.has(m[1]!)) latest.set(m[1]!, { kind: "removed", id: m[1]!, commit: sha, path: m[2]!, blob: m[3]!, reservation: reservations.get(m[1]!) });
     }
@@ -260,18 +260,19 @@ async function commitOn(root: string, parent: string, tree: string, message: str
 
 function plannedConverge(o: MigrationOptions, state: PreviewState, publicRefs: Map<string, string>, id: string,
   pub: CatalogOriginal, opsCopy: CatalogOriginal, bound: { text: string; blob: string; commit: string },
-  referred: ReadonlySet<string>): Planned | { held: string } {
+  referred: ReadonlySet<string>, cited: ReadonlySet<string>): Planned | { held: string } {
   if (withoutOneMovedFromLine(opsCopy.text) !== bound.text) return { held: "ops_copy_differs" };
   if (opsCopy.path !== pub.path) return { held: "path_differs" };
   const amended = pub.blob !== bound.blob ? "amended" : undefined;
-  const owner = amended ?? (referred.has(id) ? "public_referrers" : publicOwner(id, pub.path, publicRefs, state.open));
+  const owner = amended ?? (referred.has(id) ? "public_referrers" : cited.has(id) ? "public_citations" : publicOwner(id, pub.path, publicRefs, state.open));
   const evidence = { boundCommit: bound.commit, boundBlob: bound.blob, publicBlob: pub.blob, opsBlob: opsCopy.blob, owner: owner ?? null };
   if (owner !== undefined) {
     return { step: "rollback", id, repository: "ops", path: opsCopy.path, reason: owner, evidence,
       title: `chore(plan): roll back the move of ${id} into the ops catalog`,
       message: `chore(plan): roll back the move of ${id} into the ops catalog\n\nThe public copy is ${owner}, so it stays and this ops copy is removed.\n\n${MOVE_ROLLBACK_TRAILER} ${id} path=${opsCopy.path} reason=${owner}\n` };
   }
-  const reservation = publicRefs.get(`refs/rmd-id/${id}`);
+  // W1-T14993: the public plan holds the record at this base (pub is its copy there), as ops-gate check_reserved accepts.
+  const reservation = moveReservation(id, publicRefs, { commit: o.publicCommit, ids: new Set([id]) });
   if (reservation === undefined) return { held: "reservation_absent" };
   return { step: "remove", id, repository: "public", path: pub.path, blob: bound.blob, evidence: { ...evidence, reservation },
     title: `chore(plan): move ${id} to the ops catalog`,
@@ -307,6 +308,13 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
     // leave that reference dangling, so the REMOVE's checks would fail at every pass. Shared referrers move with it.
     const sharedIds = new Set(shared);
     const referred = publicReferences(pub.plan.tasks.filter(task => !sharedIds.has(task.id)));
+    // W1-T14993: a copied record with no reservation ref that a public file cited after its copy is rolled back too,
+    // read at this commit, since its REMOVE would leave the id unresolved for task-id-existence at every pass.
+    const leavingShared = new Set(shared.map(id => pub.originals.get(id)!.path));
+    const cited = new Set<string>();
+    for (const id of shared) {
+      if (!publicRefs.has(`refs/rmd-id/${id}`) && (await unresolvedCitations(o.publicRoot, o.publicCommit, id, leavingShared)).length > 0) cited.add(id);
+    }
     const converge = async (): Promise<PlannedStep | { held: string; id: string } | undefined> => {
       const held: Array<{ held: string; id: string }> = [];
       const steps: Planned[] = [];
@@ -317,7 +325,7 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
         const opsCopy = ops.originals.get(id)!, pubCopy = pub.originals.get(id)!;
         const text = await readBytes(o.publicRoot, `${source}:${opsCopy.path}`);
         if (text === undefined) { held.push({ held: "bound_original_unreadable", id }); continue; }
-        const step = plannedConverge(o, state, publicRefs, id, pubCopy, opsCopy, { text, blob: blobOf(text), commit: source }, referred);
+        const step = plannedConverge(o, state, publicRefs, id, pubCopy, opsCopy, { text, blob: blobOf(text), commit: source }, referred, cited);
         if ("held" in step) held.push({ ...step, id }); else steps.push(step);
       }
       const rollbacks = steps.filter(step => step.step === "rollback");
@@ -343,7 +351,9 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
     // COMPLETE evidence: every removal only ops now holds, with its reservation ref unchanged since the removal.
     const completed = [...history.values()].filter(event => event.kind === "removed" && !pub.plan.byId.has(event.id) && ops.plan.byId.get(event.id)?.moved_from !== undefined)
       .map(event => ({ id: event.id, removalCommit: event.commit, reservation: publicRefs.get(`refs/rmd-id/${event.id}`) ?? null,
-        reservationUnchanged: event.reservation !== undefined && publicRefs.get(`refs/rmd-id/${event.id}`) === event.reservation }));
+        // W1-T14993: a removal held at its base stays unchanged while the id stays unreserved.
+        reservationUnchanged: event.reservation !== undefined && (publicRefs.get(`refs/rmd-id/${event.id}`) ??
+          (event.reservation.startsWith("held-at=") ? event.reservation : undefined)) === event.reservation }));
     if (step !== undefined) planned = step;
     else {
       const selection = await selectPlanTaskMigration(o, reader, ports.bounds, batchFits(o, publicRefs, ports.bodyLimit), ports.opsGateNamed);
@@ -354,7 +364,7 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
       for (const candidate of selection.batch) {
         const id = String(candidate.id), path = String(candidate.sourcePath), original = String(candidate.yaml);
         if (await readBytes(o.opsRoot, `${o.opsCommit}:${path}`) !== undefined) return unknown("ops_path_taken");
-        const reservation = publicRefs.get(`refs/rmd-id/${id}`) ?? unknown("reservation_absent");
+        const reservation = moveReservation(id, publicRefs, { commit: o.publicCommit, ids: pub.plan.byId }) ?? unknown("reservation_absent");
         const text = withMovedFromLine(original, id, o.publicCommit);
         members.push({ step: "copy", id, repository: "ops", path, text, blob: String(candidate.sourceBlob),
           evidence: { sourceCommit: o.publicCommit, sourceBlob: candidate.sourceBlob, reservation },
@@ -408,7 +418,19 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
         // W1-T14592: a copy refused ONLY because some members' proofs already pass on core drops exactly those members
         // and is judged again by the same preflight; anything else, or a refusal that names no member, stands down.
         const drops = planned.step === "copy" ? staleProofDrops(verdict, planned.members) : undefined;
-        const kept = drops === undefined ? [] : planned.members.filter(m => !drops.some(d => d.id === m.id));
+        let kept = drops === undefined ? [] : planned.members.filter(m => !drops.some(d => d.id === m.id));
+        // W1-T14993: a kept member with no reservation ref whose citer was just dropped would be left cited at its REMOVE.
+        for (let changed = drops !== undefined; changed;) {
+          changed = false;
+          const leaving = new Set(kept.map(m => m.path));
+          for (const m of kept) {
+            if (publicRefs.has(`refs/rmd-id/${m.id}`) || (await unresolvedCitations(o.publicRoot, o.publicCommit, m.id, leaving)).length === 0) continue;
+            drops!.push({ id: m.id, proof: "citation_unresolved" });
+            kept = kept.filter(k => k.id !== m.id);
+            changed = true;
+            break;
+          }
+        }
         if (drops !== undefined && kept.length > 0) {
           dropped.push(...drops);
           planned = stepOf(kept);

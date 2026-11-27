@@ -1705,6 +1705,17 @@ githubEventWake:
     origin: "net-new"
     min: 1000
     max: 60000
+  # W1-T14809 — the freshness floor for a PR head's kept rollup. A head whose sha did not move and
+  # that no verified check_run/status/pull_request delivery named is answered from its kept
+  # check-runs/status reads; this is how old that answer may grow before the sweep re-reads it,
+  # so a dropped delivery (0.66% measured 2026-11-25; GitHub never redelivers) is corrected
+  # within 10 minutes. A floor, never a cap: a moved sha or a delivery re-reads at once.
+  # min=60000 keeps it at or above one ordinary poll; max=3600000 bounds a missed delivery's staleness.
+  headRecheckMs:
+    value: 600000
+    origin: "net-new"
+    min: 60000
+    max: 3600000
   # W1-T14810 — the fold-debt and mutation-verdict artifact lists run when a workflow_run.completed
   # delivery arrived since the last listing (an artifact only appears when a run completes), and
   # otherwise once the last listing is older than this. A freshness floor for a missed delivery,

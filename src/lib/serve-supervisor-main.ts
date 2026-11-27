@@ -16,7 +16,8 @@ import { loadConfig } from "./config.js";
 import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { buildSlotChildEntries, createSlotPreparer, prepareSlotDeps, runCommand, type RunCommand } from "./serve-slots.js";
-import { createServeSupervisor, handoffSwitch, SERVE_HANDOFF_SPACING_BASE_MS, type ServeSupervisor, type ServeSupervisorOptions } from "./serve-supervisor.js";
+import { startGithubHookListener } from "./github-hook-listener.js";
+import { createServeSupervisor, handoffSwitch, serveHostOf, SERVE_HANDOFF_SPACING_BASE_MS, type ServeSupervisor, type ServeSupervisorOptions } from "./serve-supervisor.js";
 
 export const SERVE_GENS_DIR_ENV = "RMD_SERVE_GENS_DIR";
 
@@ -27,6 +28,8 @@ export interface SupervisorMainOptions {
   headSha?: (repoDir: string) => string;
   log?: ServeSupervisorOptions["log"];
   create?: (opts: ServeSupervisorOptions) => ServeSupervisor;
+  /** W1-T14986: starts the webhook listener thread; defaults to {@link startGithubHookListener}, nothing when its port is unset. */
+  hookListener?: typeof startGithubHookListener;
   onSignal?: (signal: NodeJS.Signals, handler: () => void) => void;
 }
 
@@ -49,16 +52,20 @@ export async function runServeSupervisor(argv: readonly string[], opts: Supervis
   const coldDeps = await prepareSlotDeps(repoDir, repoDir, run);
   // W1-T9421: and its worker bundles are built, as a prepared slot's are.
   const coldChildEntries = await buildSlotChildEntries(repoDir, run);
+  const serveArgs = serveArgsOf(argv);
+  // W1-T14986: ships dark; RMD_SERVE_HOOK_PORT unset starts no thread.
+  const hookListener = (opts.hookListener ?? startGithubHookListener)({ env, host: serveHostOf(serveArgs), log });
   const sha = (opts.headSha ?? ((dir: string) => execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()))(repoDir);
   const supervisor = (opts.create ?? createServeSupervisor)({
     coldSlot: { dir: repoDir, sha, deps: coldDeps },
     prepare: createSlotPreparer({ repoDir, gensDir, run, log }),
-    serveArgs: serveArgsOf(argv),
+    serveArgs,
     handoffEnabled: handoffSwitch(env, gensDir),
     spacingBaseMs: SERVE_HANDOFF_SPACING_BASE_MS,
     spaceFromBoot: true,
     // W1-T13277: between generations, serve's port answers 503 with the restarting state, not a refused connection.
     restartingAnswer: true,
+    ...(hookListener ? { hookListener } : {}),
     log,
   });
   const onSignal = opts.onSignal ?? ((signal, handler) => void process.once(signal, handler));

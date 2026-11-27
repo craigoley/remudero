@@ -166,9 +166,9 @@ const INVARIANT: Record<string, string> = {
 // W1-T14825: W1-T406, named only by W1-T405 in the same batch, now joins it instead of waiting a round as public_dependants.
 const EXPECTED_BATCH = ["W1-T401", "W1-T402", "W1-T405", "W1-T406", "W1-T407", "W1-T408"];
 const EXPECTED_REFUSED = [
-  { id: "W1-T403", reason: "not_open" }, { id: "W1-T404", reason: "reservation_absent" },
+  { id: "W1-T403", reason: "not_open" }, { id: "W1-T404", reason: "owned" },
 ];
-const prepare = (w: ReturnType<typeof moveWorld>) => { w.pub.origin.git("update-ref", "-d", "refs/rmd-id/W1-T404"); };
+const prepare = (w: ReturnType<typeof moveWorld>) => { w.pub.origin.git("update-ref", "refs/rmd-dispatch/W1-T404", w.main("public")); /* W1-T14993: an unreserved id now moves; a dispatch claim keeps W1-T404 on core */ };
 
 test("W1-T14424 criterion 3: invariant:a-record-the-gate-accepts-is-selected-as-today — the batch, its order and the refusals are origin/main's", async t => {
   const today = await select(t, INVARIANT, prepare);
