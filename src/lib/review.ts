@@ -8115,7 +8115,8 @@ export interface RenewReviewTokenOpts {
 export async function renewReviewPublisherToken(opts: RenewReviewTokenOpts = {}): Promise<ReviewTokenRenewal> {
   const env = opts.env ?? process.env;
   const now = (opts.clock ?? systemClock).now();
-  const armed = await (opts.ensureHeld ?? ensureHeldTokenFresh)(opts.force === true ? Number.MAX_SAFE_INTEGER : HELD_TOKEN_READ_MARGIN_MS);
+  // W1-T15030: a forced renewal mints in the armed loop too; its timer not being due proves nothing about a refused token.
+  const armed = await (opts.ensureHeld ?? ensureHeldTokenFresh)(HELD_TOKEN_READ_MARGIN_MS, opts.force === true ? { force: true } : undefined);
   if (armed !== "not_armed") return armed === "token_expired" ? "token_unrenewable" : armed;
   const held = nativeReviewPublisher;
   if (held === undefined || !env.GH_TOKEN || held.tokenDigest !== publisherTokenDigest(env.GH_TOKEN)) return "not_held";
@@ -13520,6 +13521,9 @@ export interface PostReviewStatusGuardedOpts {
    *  leaves a standing failure standing. Absent, the post is unchecked — only the out-of-scope dependency review
    *  (`decideDepReview`, which has no reviewer by design) omits it. */
   semanticJudgement?: SemanticJudgementFact;
+  /** W1-T15030: the run that took this run's claim over, re-read inside the review-status lock before the post. A
+   *  named taker refuses the post (`review.post_refused` reason `claim_lost`): nothing is posted or escalated. */
+  claimLost?: () => Promise<string | undefined>;
 }
 
 type ReviewerCodeFreshness =
@@ -13542,6 +13546,8 @@ export interface PostReviewStatusGuardedResult {
   cappedHold?: string;
   /** W1-T14902: set when a success was held as pending because the named task carries (or may carry) dispatch_hold. */
   taskHold?: string;
+  /** W1-T15030: the run that took this run's claim over; set when the post was refused `claim_lost`. */
+  claimLost?: string;
   /** Present only when `posted` is false — either {@link decideReviewStatusPost} refused the write (see
    * `review.post_refused`), or the post itself failed after retries or as a permanent error (`review.post_failed`). */
   reason?: string;
@@ -13664,13 +13670,27 @@ async function decidePlanLintRetryPublication(
  * {@link decideReviewStatusPost} posts or refuses. Ledger every attempt, including `review.post_refused`.
  * W1-T135: catch exhausted transient or permanent {@link postReviewStatus} errors here, ledger `review.post_failed`
  * with the unposted verdict, and return `{posted:false}` like a refusal. */
+/** W1-T15030: the post refused because another run took this run's claim over, or undefined while it still holds it. */
+async function claimLostRefusal(opts: PostReviewStatusGuardedOpts): Promise<PostReviewStatusGuardedResult | undefined> {
+  const taker = await opts.claimLost?.();
+  if (taker === undefined) return undefined;
+  appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: opts.taskId, step: "review.post_refused", head_sha: opts.sha,
+    pr_url: opts.prUrl, attempted_state: opts.state, reason: "claim_lost", taken_over_by_run_id: taker });
+  return { posted: false, reason: "claim_lost", claimLost: taker };
+}
+
 export async function postReviewStatusGuarded(
   opts: PostReviewStatusGuardedOpts,
 ): Promise<PostReviewStatusGuardedResult> {
-  if (reviewerCodePublicationRefusal(opts.state, opts.reviewerCodeFreshness) !== undefined) return publishReviewStatusLocked(opts);
+  if (reviewerCodePublicationRefusal(opts.state, opts.reviewerCodeFreshness) !== undefined) {
+    return (await claimLostRefusal(opts)) ?? publishReviewStatusLocked(opts);
+  }
   const lockPath = join(dirname(opts.ledgerPath), "review-status-locks", `${opts.taskId}.lock`);
   const handle = await acquireReviewStatusLock(lockPath, opts.lockOpts);
   try {
+    // W1-T15030: a takeover that landed while this run awaited its freshness read is seen here, under the lock.
+    const lost = await claimLostRefusal(opts);
+    if (lost !== undefined) return lost;
     let effectiveVerdict = opts.verdict;
     let historyApplied = false;
     if (opts.state === "success") {

@@ -485,8 +485,11 @@ export interface HeldTokenAccess {
   tokenState(token: string | undefined): HeldTokenState;
   /** Past expiry (or, W1-T14677, inside `minRemainingMs` of it) with the timer overdue, renews once (concurrent calls
    *  share it). A retry not yet due is refused when the token has expired, and reads "fresh" while it has not. */
-  ensureFresh(minRemainingMs?: number): Promise<EnsureFreshOutcome>;
+  ensureFresh(minRemainingMs?: number, opts?: EnsureFreshOpts): Promise<EnsureFreshOutcome>;
 }
+/** W1-T15030: `force` mints now, whatever the timer says: GitHub refused the held token (HTTP 401), so its expiry
+ *  proves nothing. "renewed" only when a mint returned a new token; "token_expired" when it did not. */
+export interface EnsureFreshOpts { force?: boolean }
 
 /** W1-T14677: the time a garden pass's GitHub read needs left on its token. A nearer expiry is renewed first. */
 export const HELD_TOKEN_READ_MARGIN_MS = 5 * 60 * 1000;
@@ -495,9 +498,11 @@ let armedHeldToken: HeldTokenAccess | undefined;
 
 /** W1-T14677: before a GitHub read, renew this process's held token when it has less than `minRemainingMs` left, so
  *  a pass that outlives its token never presents it. `not_armed`: no loop holds a token here, and nothing is done. */
-export async function ensureHeldTokenFresh(minRemainingMs: number = HELD_TOKEN_READ_MARGIN_MS): Promise<EnsureFreshOutcome | "not_armed"> {
+export async function ensureHeldTokenFresh(
+  minRemainingMs: number = HELD_TOKEN_READ_MARGIN_MS, opts?: EnsureFreshOpts,
+): Promise<EnsureFreshOutcome | "not_armed"> {
   const held = armedHeldToken;
-  return held === undefined ? "not_armed" : held.ensureFresh(minRemainingMs);
+  return held === undefined ? "not_armed" : held.ensureFresh(minRemainingMs, opts);
 }
 
 /** The margin's attempt count at the measured cycle (timer lateness plus exchange), up to half a life. */
@@ -656,7 +661,16 @@ export function startInstallationTokenRefresh(opts: {
     return now() < lastSuccessfulExpiresAtMs ? "fresh" : "expired";
   };
   // W1-T14543: a held loop cannot fire the timer, so a read past expiry renews here. A retry not yet due stays the timer's.
-  const ensureFresh = async (minRemainingMs = 0): Promise<EnsureFreshOutcome> => {
+  const ensureFresh = async (minRemainingMs = 0, ensureOpts?: EnsureFreshOpts): Promise<EnsureFreshOutcome> => {
+    // W1-T15030: a refused token is minted again now; a mint already in flight is that new token.
+    if (ensureOpts?.force === true) {
+      if (stopped) return "token_expired";
+      if (inflight === undefined) {
+        if (timer) clear(timer);
+        void track(runOnce());
+      }
+      return (await inflight!).ok ? "renewed" : "token_expired";
+    }
     const replaced = lastSuccessfulExpiresAtMs;
     if (replaced === undefined || now() < replaced - minRemainingMs) return "fresh";
     if (inflight === undefined) {

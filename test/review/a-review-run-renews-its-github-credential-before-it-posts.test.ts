@@ -7,19 +7,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { type ReviewCommandHost, runReview } from "#src/cli/commands/review.js";
+import { failureRecordingPoster, reviewCommand, type ReviewCommandDeps, type ReviewCommandHost, runReview,
+  withdrawAfterPublication } from "#src/cli/commands/review.js";
 import { disarmAutoMergeAsync } from "#src/lib/arm-auto-merge.js";
 import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
 import type { Config } from "#src/lib/config.js";
+import { startInstallationTokenRefresh } from "#src/lib/github-app.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import type { Mount } from "#src/lib/mounts.js";
 import type { AcceptanceCriterion } from "#src/lib/plan.js";
-import { holdReviewRunLive, postReviewPending, refreshReviewPublisherToken, renewReviewPublisherToken,
+import { holdReviewRunLive, postReviewPending, postReviewStatusGuarded, refreshReviewPublisherToken, renewReviewPublisherToken,
   reviewOwnerOrphaned } from "#src/lib/review.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, orphanedOwnerRetryView, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
 const HEAD = "abc1234def5678";
@@ -55,6 +58,17 @@ const READS = [
     head: { ref: "b", sha: HEAD }, base: { ref: "main" } }) },
 ];
 
+/** reviewCommand's host for the start-failed path; unreached dependencies refuse loudly. */
+const START_HOST = {
+  GIT_UNTRACKED_FILES_ALL: "--untracked-files=all", JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
+  acceptedReviewAttemptId: () => undefined, reviewWorktreeAsync: { fetch: () => {} },
+  materializeReviewWorktree: () => { throw new Error("forbidden real materialization"); },
+  realDeps: () => { throw new Error("forbidden default worker graph"); },
+  reviewPostedDescription: () => "fixture",
+  liveWorkerRunIds: new Set<string>(), reviewWorkerLockId: (id: string) => `fixture-${id}`,
+} as unknown as ReviewCommandHost;
+const REPO_ROOT_FOR_TEST = REPO_ROOT;
+
 const UNMET: AcceptanceCriterion[] = [{ claim: "VISIBLE-CLAIM the surface behaves", proof: "unit test: never-matches-W1-T15030" }];
 
 /** Drive the real runReview to a failing verdict (the keyword floor finds nothing), which withdraws an arm and posts.
@@ -62,6 +76,8 @@ const UNMET: AcceptanceCriterion[] = [{ claim: "VISIBLE-CLAIM the surface behave
 async function reviewFailing(t: TestContext, opts: {
   token: string; refuse?: boolean; renewAccepted?: boolean; runId?: string;
   midRun?: (ledgerPath: string) => void;
+  /** Runs while the run awaits its reviewer-code freshness read, after its first claim check. */
+  duringFreshness?: (ledgerPath: string) => void;
 }) {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1-t15030-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -82,6 +98,11 @@ async function reviewFailing(t: TestContext, opts: {
         account: (r: WorkerResult) => r, spawnReviewer: false, reviewerMount: MOUNT,
         ledgerPath, runId: opts.runId ?? "review-PR1-1",
         readReviewReuseFacts: () => { opts.midRun?.(ledgerPath); return undefined; },
+        ...(opts.duringFreshness === undefined ? {} : {
+          reviewerCodeFreshness: async () => {
+            opts.duringFreshness!(ledgerPath);
+            return { status: "fresh" as const, codeSha: "c".repeat(40), originMainSha: "c".repeat(40), advance: "none" as const };
+          } }),
         renewToken: async (o) => {
           renewals.push(o ?? {});
           order.push(`renew:${o?.force === true ? "forced" : "due"}`);
@@ -287,4 +308,130 @@ test("W1-T15030 criterion 4: a run that lost its claim cannot post", async (t) =
   assert.equal(refused.length, 1);
   assert.equal(refused[0]!.taken_over_by_run_id, "review-PR1-taker");
   assert.equal(run.rows.some((row) => row.step === "escalation.filed" || row.step === "review.posted" && row.state !== "pending"), false);
+});
+
+test("W1-T15030 criterion 2: a 401 under an armed refresh loop mints a new token, not the timer's fresh one", async (t) => {
+  // OBSERVED (review of e08b8f587): with the daemon's loop armed, a forced renewal read "fresh" while the timer was not
+  // due, so the retry presented the token GitHub had just refused. Mints stayed 1.
+  let clock = Date.parse("2026-11-27T04:00:00Z");
+  let mints = 0;
+  let accept = true;
+  const env: Record<string, string | undefined> = { GH_APP_ID: "42", GH_APP_INSTALLATION_ID: "7", GH_APP_PRIVATE_KEY_PATH: "/unused.pem" };
+  const loop = startInstallationTokenRefresh({ log: () => {}, env, now: () => clock, setTimer: () => ({}), clearTimer: () => {},
+    refresh: async () => {
+      if (!accept) return { ok: false, reason: "exchange_failed" };
+      env.GH_TOKEN = `loop-token-${++mints}`;
+      return { ok: true, expiresAtMs: clock + 60 * 60_000 };
+    } });
+  t.after(() => loop.stop?.());
+  await loop.ready;
+  assert.equal(mints, 1);
+  clock += 10 * 60_000;
+  // An unforced renewal of a token with 50 minutes left mints nothing.
+  assert.equal(await renewReviewPublisherToken({}), "fresh");
+  assert.equal(mints, 1);
+  // THE CLAIM: a 401's forced renewal mints a new token in the armed loop.
+  assert.equal(await renewReviewPublisherToken({ force: true }), "renewed");
+  assert.equal(mints, 2);
+  assert.equal(env.GH_TOKEN, "loop-token-2");
+  // A forced mint that fails is unrenewable, never "fresh".
+  accept = false;
+  assert.equal(await renewReviewPublisherToken({ force: true }), "token_unrenewable");
+});
+
+test("W1-T15030 criterion 2: a disarm refused twice after publication is recorded, not discarded", async () => {
+  const rows: Array<Record<string, unknown>> = [];
+  const ctx = { prUrl: PR_URL, taskId: "W1-T15030", headSha: HEAD, ledgerPath: "/unused/ledger.ndjson", runId: "review-PR1-1",
+    log: (step: string, extra: Record<string, unknown> = {}) => { rows.push({ ...extra, step }); } };
+  const pending = { state: "pending" as const, capped: false, planOnly: false };
+  const held = await withdrawAfterPublication(pending, ctx, { disarm: () => "token_unrenewable", claimLost: async () => undefined });
+  assert.equal(held, "token_unrenewable");
+  assert.deepEqual(rows.filter((row) => row.step === "review.post_refused").map((row) => row.reason), ["token_unrenewable"],
+    "THE CLAIM: the twice-refused disarm is a named refusal, not discarded");
+  rows.length = 0;
+  assert.equal(await withdrawAfterPublication(pending, ctx, { disarm: () => "disarmed", claimLost: async () => undefined }), undefined);
+  assert.equal(rows.some((row) => row.step === "review.post_refused"), false, "control: a disarm that worked records no refusal");
+});
+
+test("W1-T15030 criterion 2: a status post that succeeds on retry is not recorded as failed", async () => {
+  await withGhShim([{ when: "state=pending", stderr: "gh: Bad credentials (HTTP 401)", exit: 1 }], async (shim) => {
+    const poster = failureRecordingPoster();
+    const o = { owner: "acme", repo: "remudero", sha: HEAD, state: "pending" as const, description: "d" };
+    await assert.rejects(poster.post(o));
+    assert.equal(poster.failed(), true);
+    shim.addRoute({ when: "state=pending", stdout: "{}" });
+    await poster.post(o);
+    assert.equal(poster.published(), true);
+    assert.equal(poster.failed(), false, "THE CLAIM: the retry that published clears the earlier failure");
+  });
+});
+
+test("W1-T15030 criterion 4: a takeover during the freshness read is seen under the status lock, and nothing posts", async (t) => {
+  // OBSERVED (review of e08b8f587): the one claim check ran before the awaited freshness read, so a takeover appended
+  // during it was missed and the run still posted failure.
+  const runId = "review-PR1-raced";
+  const run = await reviewFailing(t, { token: "fresh-token", runId, duringFreshness: (ledgerPath) => {
+    appendLedger(ledgerPath, { run_id: "review-PR1-taker", task_id: "W1-T15030", step: "review.pending_posted", pr_url: PR_URL,
+      head_sha: HEAD, took_over_run_id: runId, owner_pid: process.pid, owner_started_at: new Date().toISOString() });
+  } });
+  assert.equal(run.verdict.verdictWithheld, "claim_lost");
+  assert.equal(run.terminalPosts, 0, "THE CLAIM: the post re-reads the claim under its lock");
+  const refused = run.rows.filter((row) => row.step === "review.post_refused" && row.reason === "claim_lost");
+  assert.equal(refused.length, 1);
+  assert.equal(refused[0]!.taken_over_by_run_id, "review-PR1-taker");
+  // The one disarm ran before the takeover, while the run still held its claim; none follows it.
+  assert.equal(run.order.filter((step) => step.startsWith("disarm:")).length, 1);
+  assert.equal(run.rows.some((row) => row.step === "escalation.filed" || row.step === "review.posted"), false);
+
+  // The guarded post itself: a named taker refuses before any post, and a held claim posts.
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t15030-lock-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  let posts = 0;
+  const base = { owner: "acme", repo: "remudero", sha: HEAD, state: "pending" as const, description: "d", taskId: "W1-T15030",
+    evidence: "no_evidence" as const, ledgerPath, runId, prUrl: PR_URL, post: async () => { posts++; },
+    fetchLifecycle: async () => ({ state: "open" as const }) };
+  const lost = await postReviewStatusGuarded({ ...base, claimLost: async () => "review-PR1-taker" } as never);
+  assert.equal(lost.posted, false);
+  assert.equal(lost.claimLost, "review-PR1-taker");
+  assert.equal(posts, 0);
+  assert.equal(readLedgerLines(ledgerPath).filter((row) => row.step === "review.post_refused" && row.reason === "claim_lost").length, 1);
+});
+
+test("W1-T15030 criterion 4: a run that lost its claim posts no start-failed pending", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t15030-start-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const outcome = "spawn_error";
+  const run = async (takeOver: boolean) => {
+    const posted: Array<{ state: string; taker?: string }> = [];
+    const deps: ReviewCommandDeps = {
+      fetchView: () => ({ headRefOid: HEAD, headRefName: "codex/t15030-start", number: 1, url: PR_URL,
+        body: "## Acceptance\n- it works | grep: review in src/lib/review.ts\n" }),
+      fetchHead: () => {},
+      loadConfig: () => ({ root, installRoot: REPO_ROOT_FOR_TEST, claudeBin: "/bin/true" }) as Config,
+      postReviewPending: (async () => ({ posted: true })) as never,
+      materialize: (() => ({ worktreePath: undefined, failure: { errorClass: "test", message: "fixture" } })) as never,
+      runReview: (async (args: { log: (step: string, extra?: Record<string, unknown>) => void; ledgerPath: string; runId: string }) => {
+        if (takeOver) appendLedger(args.ledgerPath, { run_id: "review-PR1-taker", task_id: "W1-T15030", step: "review.pending_posted",
+          pr_url: PR_URL, head_sha: HEAD, took_over_run_id: args.runId, owner_pid: process.pid, owner_started_at: new Date().toISOString() });
+        args.log("review.semantic_incomplete", { reason: `required-semantic-${outcome}`, head_sha: HEAD, pr_url: PR_URL, reviewer_outcome: outcome });
+        return { state: "failure", criteria: [], testTheater: false, summary: "s", floorDegraded: true, capped: true, keywordOnly: false,
+          planOnly: false, headSha: HEAD, reviewerOutcome: outcome, verdictWithheld: `required-semantic-${outcome}` };
+      }) as never,
+      // The real guarded post refuses a lost claim; this records what the start-failed post hands it.
+      postStatus: (async (opts: Parameters<typeof postReviewStatusGuarded>[0]) => {
+        posted.push({ state: opts.state, taker: await opts.claimLost?.() });
+        return { posted: true };
+      }) as never,
+    };
+    await reviewCommand(START_HOST, "codex/t15030-start", ["--repo", "acme/remudero"], deps);
+    return posted;
+  };
+  const held = await run(false);
+  assert.deepEqual(held, [{ state: "pending", taker: undefined }], "control: a run that holds its claim posts the start-failed pending");
+  const lost = await run(true);
+  assert.deepEqual(lost, [{ state: "pending", taker: "review-PR1-taker" }],
+    "THE CLAIM: the start-failed pending carries the claim check, so the guarded post refuses it claim_lost");
 });
