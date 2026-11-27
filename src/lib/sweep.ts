@@ -7456,16 +7456,37 @@ export const REVIEW_RUN_SETTLED_STEPS: ReadonlySet<string> = new Set(["review.po
 export const REVIEW_HELD_PASS_STEPS: ReadonlySet<string> = new Set(["review.capped_pass_held", "review.semantic_pass_refused",
   "review.dispatch_hold_held"]);
 
-/** W1-T15005: the run whose review of `pr`'s current head is in flight, or undefined. A run is in flight from its
- *  review.pending_posted claim on this head until it writes a row that settles it ({@link REVIEW_RUN_SETTLED_STEPS}) or
- *  ends it without a verdict (review.lane_aborted, or a held pass: {@link REVIEW_HELD_PASS_STEPS}); a takeover ends the run it took over; the sweep's in-process reclaim
- *  of this head (aborted or released unsettled) ends every claim before it; and the run the view proves dead
- *  (reviewPendingOwnerDead) holds nothing. Each end is a row, never an age. */
+/** W1-T15005: POSITIVE liveness of a review of `pr`'s current head in THIS process: a key in the review mutex
+ *  ({@link inFlightReviewKeys}) naming this PR and head. An in-process review holds its key from claimReview until its
+ *  attempt settles, and a review run child from registerChildWork (or its boot adoption) until settleChildWork, so the
+ *  key goes the moment the review ends by any exit: a verdict, a hold, an abort or a throw. No age, pid or row decides. */
+export function reviewOfHeadRunningHere(pr: Pick<OpenPrView, "prNumber" | "headSha" | "prUrl" | "taskId" | "reviewInputDigest">): boolean {
+  const legacy = `${reviewOutcomeTaskIdFor(pr)}@${pr.headSha}`;
+  for (const key of inFlightReviewKeys) {
+    if (key === legacy) return true;
+    if (!key.startsWith("input:")) continue;
+    const parsed = JSON.parse(key.slice("input:".length)) as unknown[];
+    if (parsed[1] === pr.prUrl && parsed[2] === pr.headSha) return true;
+  }
+  return false;
+}
+
+/** W1-T15005: the run whose review of `pr`'s current head is in flight, or undefined. In flight needs BOTH a claim on
+ *  this head that no row has ended yet, AND positive liveness ({@link reviewOfHeadRunningHere}, or `isLive`). The
+ *  liveness half is what makes no-review-no-wait hold: a review that ended by a path writing no ending row (a throw at
+ *  publish, an exit this list does not name) has released its key, so the round dispatches. Rows end a claim early:
+ *  a settled row ({@link REVIEW_RUN_SETTLED_STEPS}), review.lane_aborted, a held pass ({@link REVIEW_HELD_PASS_STEPS}),
+ *  a takeover, the sweep's in-process reclaim of this head, and the run the view proves dead (reviewPendingOwnerDead).
+ *  Rows match the PR by url, else by the key the review side writes them under ({@link reviewLedgerKeyFor}: `PR-<n>`
+ *  for an untasked PR). */
 export function reviewInFlightOnHead(
-  pr: Pick<OpenPrView, "prNumber" | "headSha" | "prUrl" | "taskId" | "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerRunId">,
+  pr: Pick<OpenPrView, "prNumber" | "headSha" | "prUrl" | "taskId" | "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerRunId" |
+    "reviewInputDigest">,
   lines: ReadonlyArray<Record<string, unknown>>,
+  isLive: (pr: Parameters<typeof reviewOfHeadRunningHere>[0]) => boolean = reviewOfHeadRunningHere,
 ): string | undefined {
   if (pr.reviewState !== "pending") return undefined;
+  const key = reviewLedgerKeyFor(pr.taskId, pr.prNumber);
   const live = new Set<string>();
   for (const line of lines) {
     if (line.head_sha !== pr.headSha) continue;
@@ -7474,7 +7495,7 @@ export function reviewInFlightOnHead(
       if (line.pr_number === pr.prNumber) live.clear();
       continue;
     }
-    if (!reviewRowNamesPr(line, pr.taskId, pr.prUrl) || typeof line.run_id !== "string") continue;
+    if (!reviewRowNamesPr(line, key, pr.prUrl) || typeof line.run_id !== "string") continue;
     if (line.step === "review.pending_posted") {
       if (typeof line.took_over_run_id === "string") live.delete(line.took_over_run_id);
       live.delete(line.run_id);
@@ -7485,7 +7506,8 @@ export function reviewInFlightOnHead(
     }
   }
   if (pr.reviewPendingOwnerDead === true && pr.reviewPendingOwnerRunId !== undefined) live.delete(pr.reviewPendingOwnerRunId);
-  return [...live].at(-1);
+  const run = [...live].at(-1);
+  return run !== undefined && isLive(pr) ? run : undefined;
 }
 
 /** W1-T15005: {@link reviewInFlightOnHead} over the live ledger, read off the loop. A ledger not yet written holds no

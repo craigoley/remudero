@@ -26,8 +26,19 @@ const EVIDENCE: FixDispatchEvidence = { unmetCriteria: [], ciFailures: [{ name: 
 
 type Row = { step: string } & Record<string, unknown>;
 
-/** The sweep's real fix dispatch over a ledger holding `ledger`, with every effect past the deferral point faked. */
-function dispatcher(t: TestContext, ledger: Row[] | "unreadable", view: Partial<OpenPrView> = {}) {
+let liveSeq = 0;
+/** A review of `head` running in this process, through the real review mutex a review run child holds
+ *  (registerChildWork) until it settles. Returns its settle. */
+function liveReview(view: Pick<OpenPrView, "prNumber" | "taskId" | "reviewInputDigest">, head = HEAD): () => void {
+  const runId = `t15005-live-${++liveSeq}`;
+  sweep.registerChildWork({ runId, kind: "review", taskId: view.taskId ?? "PR-15005", prNumber: view.prNumber, headSha: head,
+    reviewKey: `${sweep.reviewOutcomeTaskIdFor(view)}@${head}` });
+  return () => { sweep.settleChildWork(runId); };
+}
+
+/** The sweep's real fix dispatch over a ledger holding `ledger`, with every effect past the deferral point faked. By
+ *  default a review of the head is running (`live`); `live: false` is a review that ended by an exit writing no row. */
+function dispatcher(t: TestContext, ledger: Row[] | "unreadable", view: Partial<OpenPrView> = {}, live: boolean | string = true) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t15005-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const dir of ["state/inflight", "repos/fixture", "tmp"]) mkdirSync(join(root, dir), { recursive: true });
@@ -63,7 +74,11 @@ function dispatcher(t: TestContext, ledger: Row[] | "unreadable", view: Partial<
   } as unknown as sweep.BuildSweepEffectsDeps);
   const pr = { prNumber: 15005, taskId: TASK, headSha: HEAD, headRefName: BRANCH, priorStrikes: 0, prUrl: PR_URL,
     checksState: "red", mergeState: "clean", reviewState: "pending", unmetCriteria: [], ...view } as unknown as OpenPrView;
-  return { rows, seen, dispatch: () => effects.dispatchFix!(pr, EVIDENCE) };
+  const dispatch = async () => {
+    const settle = live === false ? undefined : liveReview(pr, typeof live === "string" ? live : HEAD);
+    try { return await effects.dispatchFix!(pr, EVIDENCE); } finally { settle?.(); }
+  };
+  return { rows, seen, dispatch };
 }
 
 const claim = (run: string, head = HEAD, extra: Record<string, unknown> = {}): Row =>
@@ -195,6 +210,53 @@ test("W1-T15005 criterion 3: a review that ended its pass on a held pending stat
   assert.deepEqual([...sweep.REVIEW_HELD_PASS_STEPS].sort(), [...held.map(([, row]) => row.step)].sort(), "each held step is exercised above");
 });
 
+test("W1-T15005 criterion 3: a claim whose review is no longer running holds nothing, whatever rows it left", async (t) => {
+  // OBSERVED 2026-11-27 (review of 49e977384): a real runReview that throws at publish (a GitHub rate limit) writes no
+  // ending row after its claim, and the daemon stays alive. In flight now needs the review itself running: its key in the
+  // review mutex, released when the attempt settles by any exit.
+  const exits: Array<[string, Row[]]> = [
+    ["a throw after the claim (no row)", [claim("review-PR15005-1")]],
+    ["a throw after reviewer progress", [claim("review-PR15005-1"), { step: "review.reviewer.materialized", run_id: "review-PR15005-1",
+      task_id: TASK, pr_url: PR_URL, head_sha: HEAD, ts: "2026-11-26T16:10:00.000Z" }]],
+    ["a throw after proof execution", [claim("review-PR15005-1"), { step: "review.proof_execution", run_id: "review-PR15005-1",
+      task_id: TASK, head_sha: HEAD, ts: "2026-11-26T16:12:00.000Z" }]],
+    ["a pending-post error", [claim("review-PR15005-1"), { step: "review.pending_post.error", run_id: "review-PR15005-1",
+      task_id: TASK, pr_url: PR_URL, head_sha: HEAD, ts: "2026-11-26T16:13:00.000Z" }]],
+  ];
+  for (const [why, ledger] of exits) {
+    for (let pass = 0; pass < 3; pass++) {
+      const d = dispatcher(t, ledger, {}, false);
+      await d.dispatch();
+      assert.equal(deferrals(d.rows).length, 0, `THE CLAIM: ${why} defers nothing once its review stopped running (pass ${pass + 1})`);
+      assert.equal(d.seen.claimKeys, 1, `${why}: the round takes its branch claim as today`);
+    }
+    // Positive control: the same rows with the review still running wait.
+    const running = dispatcher(t, ledger);
+    await running.dispatch();
+    assert.equal(deferrals(running.rows).length, 1, `${why}: a review still running waits`);
+  }
+  // A review running on ANOTHER head is not this head's review.
+  const elsewhere = dispatcher(t, [claim("review-PR15005-1")], {}, OTHER);
+  await elsewhere.dispatch();
+  assert.equal(deferrals(elsewhere.rows).length, 0, "a live review of another head holds nothing");
+});
+
+test("W1-T15005 criterion 3: an untasked PR's held pass, written under PR-<n> with no url, holds nothing", async (t) => {
+  // OBSERVED 2026-11-27 (review of 49e977384): for an untasked PR publishCappedHold writes task_id PR-<n> and no pr_url.
+  const key = "PR-15005";
+  const untaskedClaim: Row = { ...claim("review-PR15005-1"), task_id: key };
+  const capped: Row = { step: "review.capped_pass_held", run_id: "review-PR15005-1", task_id: key, head_sha: HEAD,
+    attempted_state: "success", reason: "capped", outcome: "pending", ts: "2026-11-26T16:30:00.000Z" };
+  for (let pass = 0; pass < 3; pass++) {
+    const d = dispatcher(t, [untaskedClaim, capped], { taskId: undefined });
+    await d.dispatch();
+    assert.equal(deferrals(d.rows).length, 0, `THE CLAIM: the untasked held pass defers nothing (pass ${pass + 1})`);
+  }
+  const waiting = dispatcher(t, [untaskedClaim], { taskId: undefined });
+  await waiting.dispatch();
+  assert.equal(deferrals(waiting.rows).length, 1, "positive control: the untasked claim with its review running waits");
+});
+
 test("W1-T15005 criterion 1: an owned conflicted head whose round waits on a review records no worker round", async (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t15005-owned-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -224,7 +286,8 @@ test("W1-T15005 criterion 1: an owned conflicted head whose round waits on a rev
     await withLiveWritesAllowed(async () => { await sweep.runSweep([pr], deps); await sweep.drainDetachedSweepActions(); });
     return { dispatched, rounds: ledger.filter((row) => row.step === sweep.OWNED_CONFLICT_ROUND_STEP && row.round === "worker") };
   };
-  const waiting = await pass([pending]);
+  const settle = liveReview({ prNumber: 15006, taskId: undefined, reviewInputDigest: undefined });
+  const waiting = await pass([pending]).finally(settle);
   assert.equal(waiting.dispatched, 1, "the dispatch still decides, and defers");
   assert.deepEqual(waiting.rounds, [], "THE CLAIM: a round the review holds back records no worker round");
   // Positive control: once that review posts, the round is recorded before it runs, as today.
