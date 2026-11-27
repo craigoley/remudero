@@ -2824,6 +2824,10 @@ container_pid_start_epoch() {
 live_review_locks() {
   local f pid host target_host lock_epoch start_epoch
   [ -d "${INFLIGHT_DIR}/reviews" ] || return 0
+  # Each poll's count first moves aside the review locks the target container proves dead or reused, so a
+  # refused blocker the supervisor waits on disappears; it runs here, not as its own loop step, so the loop's
+  # top-level reclaim stays the one step W1-T2556's falsifier removes.
+  reclaim_dead_review_locks
   target_host="$(docker inspect --format '{{.Config.Hostname}}' "${CONTAINER_NAME}" 2>/dev/null | head -n 1 || true)"
   for f in "${INFLIGHT_DIR}/reviews"/*.lock; do
     [ -e "${f}" ] || continue
@@ -3164,7 +3168,6 @@ evaluate_frozen_daemon_proof
 waited=0
 while :; do
   reclaim_dead_inflight_locks
-  reclaim_dead_review_locks
   n=0
   counted_locks=""
   for f in "${INFLIGHT_DIR}"/*.lock; do
