@@ -19,7 +19,6 @@ import type { AcceptanceCriterion } from "#src/lib/plan.js";
 import { holdReviewRunLive, postReviewPending, postReviewStatusGuarded, postUnreadTaskHoldGuarded, refreshReviewPublisherToken,
   renewReviewPublisherToken, reviewDecisionDigest, reviewInputDigest, reviewOwnerOrphaned } from "#src/lib/review.js";
 import { tryEscalateAsync } from "#src/lib/escalate.js";
-import { readFileSync } from "node:fs";
 import { buildOpenPrViewsAsync } from "#src/lib/tick-read-worker.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, orphanedOwnerRetryView, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
@@ -586,8 +585,8 @@ test("W1-T15030 criterion 3: a review run called the way runTask calls it stays 
  *  escalation posts (renewingIssueGateway, src/cli/commands/review.ts):
  *    - holdDisputedPass, cannotEvaluateEscalation (run and replay), the managed-checkout install escalation
  *  Each site is driven through its real entry point with 401-then-ok (lands after one renewal) and 401-then-401 (a
- *  token_unrenewable refusal is recorded and nothing lands). A source census below fails when a site is added outside
- *  these helpers. */
+ *  token_unrenewable refusal is recorded and nothing lands). A new site joins this list and the drives below: the
+ *  source-text census (W1-T2905) refuses a test that reads src/ as text, so this census is behavioural only. */
 type Drive = (refusals: number) => Promise<{ landed: boolean; renewals: number; unrenewable: number }>;
 
 const refusing = (refusals: number, onLand: () => void) => {
@@ -675,23 +674,6 @@ test("W1-T15030 criterion 2: census — every status post, disarm and escalation
     assert.deepEqual(refused, { landed: false, renewals: 1, unrenewable: 1 },
       `${site}: a second 401 is one token_unrenewable refusal, and nothing lands`);
   }
-
-  // The source census: a GitHub write added outside these helpers fails here.
-  const review = readFileSync(join(REPO_ROOT, "src/lib/review.ts"), "utf8");
-  const helper = review.slice(review.indexOf("async function postRenewingOnce"), review.indexOf("/** W1-T15030: GitHub refused the token"));
-  assert.equal([...review.matchAll(/\bawait post\(/g)].length, [...helper.matchAll(/\bawait post\(/g)].length + 1,
-    "every remudero-review status post in src/lib/review.ts is inside postRenewingOnce (the one other is postRepairLease's, which no review path calls)");
-  assert.equal([...review.matchAll(/\bpostRenewingOnce(?:<S>)?\(/g)].length, 3, "postRenewingOnce: its definition, the decision post and the conflict hold");
-  const cli = readFileSync(join(REPO_ROOT, "src/cli/commands/review.ts"), "utf8");
-  assert.deepEqual([...cli.matchAll(/\btryEscalate\(|\bghIssueGateway\(|\bdisarmAutoMerge\(prUrl/g)].map((m) => m[0]), [],
-    "no review escalation or disarm uses a sync gateway or the sync disarm");
-  const escalations = [...cli.matchAll(/tryEscalateAsync\(/g)].length;
-  const renewing = [...cli.matchAll(/issues: renewingIssueGateway\(/g)].length;
-  assert.equal(escalations, renewing, "every review escalation's gateway renews");
-  assert.equal([...cli.matchAll(/disarmAutoMergeAsync\(prUrl, realArmDepsAsync\(\), \{ renewToken \}\)/g)].length, 1,
-    "the one real disarm carries its renewal");
-  const sweep = readFileSync(join(REPO_ROOT, "src/lib/sweep.ts"), "utf8");
-  assert.equal(/\bpostReviewStatus\(/.test(sweep), false, "the sweep posts no review status of its own");
 });
 
 test("W1-T15030 criterion 2: a pending post refused twice is re-reviewed on the next pass, end to end", async (t) => {
