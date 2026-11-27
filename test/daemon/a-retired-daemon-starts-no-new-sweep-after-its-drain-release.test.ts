@@ -13,7 +13,7 @@ import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
 import { spawnRunChild } from "#src/lib/run-child.js";
 import { captureInboxDraftSnapshot, commitInboxDraftOutcomes, draftsDueOnDaemon, runDraftRung, type DraftLaneIdentity, type Proposal } from "#src/lib/inbox.js";
 import { resolveFleetControlHold, type LightPassScope, type RestartAdmission } from "#src/lib/daemon.js";
-import { createClaudeExecutableCache, runInWorkerSpawnScope, spawnWorker, workerSpawnRetiredBy, WorkerSpawnRetiredError, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
+import { createClaudeExecutableCache, runInWorkerSpawnScope, spawnWorker, workerSpawnRetiredBy, WorkerNotStartedError, WorkerSpawnRetiredError, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
 import { spawnCodexWorker, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -23,7 +23,7 @@ import { appendLedger } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 // The shared run-task test helper, not a direct src/run-task.ts import (the affected-suite reach ratchet bounds direct importers).
-import { buildSweepEffects, runReview } from "#test/helpers/run-task-test.js";
+import { buildSweepEffects, dispatchMainRepairFixRun, mainRepairLaneFor, runReview, type AlertFixDispatchDeps } from "#test/helpers/run-task-test.js";
 
 type Row = { step: string } & Record<string, unknown>;
 
@@ -451,14 +451,14 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
 
   // The review command itself: a retired scope stands down before its pending claim and records no withheld attempt.
   const shim = ghShim([
+    // CI's proof record answers slowly, as on a loaded host, so a read the stand-down left running would outlive it.
+    { when: "proof-discrimination-gate", stdout: JSON.stringify({ workflow_runs: [] }), delaySeconds: 1 },
     { when: "/statuses?", stdout: "[[]]" },
     { when: "pulls/", stdout: JSON.stringify({ number: 7, html_url: pr.prUrl, updated_at: "t", body: "", state: "open",
       head: { ref: "run-W1-T90007-1", sha: pr.headSha } }) },
     { when: "/status", stdout: JSON.stringify({ state: "pending", statuses: [] }) },
   ], { kind: "t14916-review" });
-  // On a CPU-starved runner a shim call can still be appending to its logs when the review returns (flake-screen saw
-  // ENOTEMPTY here); retrying the removal outlasts that late write.
-  t.after(() => rmSync(shim.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
   const reviewLedger = join(root, "review-ledger.ndjson");
   const priorPath = process.env.PATH;
   process.env.PATH = `${shim.dir}:${priorPath ?? ""}`;
@@ -498,7 +498,47 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
     assert.equal(midSteps.includes("review.semantic_incomplete"), false, midSteps.join(", "));
     assert.equal(midSteps.includes("review.posted"), false);
     assert.equal(midSteps.at(-1), "review.stood_down");
+    // Every gh read the stand-down started has settled before it returned, so none outlives the review (or this shim).
+    const events = shim.events();
+    assert.equal(events.some((e) => e.phase === "start" && e.args.join(" ").includes("proof-discrimination-gate")), true,
+      "control: the proof-record read did start");
+    const open = events.filter((e) => e.phase === "start" && !events.some((x) => x.phase === "end" && x.id === e.id));
+    assert.deepEqual(open.map((e) => e.args.join(" ")), [], "no gh read is still running when the review returns");
   } finally {
     process.env.PATH = priorPath;
   }
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and a main-repair fix it withheld is neither a refusal nor a PR", async (t: TestContext) => {
+  const root = ownedFixtureDir(t, "retired-main-repair").dir;
+  const ledgerPath = join(root, "ledger.ndjson");
+  const RETIRED = "drain lock released; the successor owns this work";
+  const request = { branch: "main", headSha: "a".repeat(40), offendingSha: "b".repeat(40), offendingPr: 7, failingChecks: ["ci"],
+    failingTestTitles: [], testFiles: [], diffStat: "", logExcerpt: "", reason: "required check ci failed" } as never;
+  const deps: AlertFixDispatchDeps = {
+    worktreeAdd: () => {}, worktreeRemove: () => {}, renderWorkerSettings: () => join(root, "settings.json"),
+    loadMounts: () => ({}) as never, resolveMount: () => ({ model: "sonnet", provider: "claude", effort: "medium", maxTurns: 10 }) as never,
+    spawn: async () => ({ notStarted: "admission-abandoned", subtype: "admission_abandoned", sessionId: "", costUsd: 0, numTurns: 0,
+      text: "", blocks: [], stderr: "", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], model: "sonnet",
+      effort: "medium", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [],
+      qualitySuspect: false }) as unknown as WorkerResult,
+    ensureTaskTrailer: () => { throw new Error("no PR exists to trail"); }, checkAcceptance: () => ({ ok: true }) as never,
+  };
+  // The dispatcher: a worker that never started is not a fix run that opened no PR.
+  await assert.rejects(dispatchMainRepairFixRun("acme", "fixture-repo", { root } as never, request, ledgerPath, "R", deps),
+    (error: unknown) => error instanceof WorkerNotStartedError && error.notStarted === "admission-abandoned");
+  const steps = readLedgerLines(ledgerPath).map((row) => String(row.step));
+  assert.equal(steps.includes("main-repair.no_pr"), false, steps.join(", "));
+
+  // The lane: in a retired daemon it never settles, so the rung writes no fix_refused row and the successor finds the
+  // attempt unreported (W1-T13134); in a live daemon the not-started run still reaches the rung as an error.
+  const notStarted = async (): Promise<string | undefined> => { throw new WorkerNotStartedError("admission-abandoned"); };
+  const lane = mainRepairLaneFor("acme", "fixture-repo", { root } as never, ledgerPath, "R", notStarted);
+  let settled: string = "pending";
+  void runInWorkerSpawnScope({ retiredBy: RETIRED }, async () => lane.openFixPr!(request)).then(() => { settled = "fulfilled"; }, () => { settled = "rejected"; });
+  for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, "pending", "a retired daemon reports nothing for a fix it never ran");
+  await assert.rejects(runInWorkerSpawnScope({}, async () => lane.openFixPr!(request)), WorkerNotStartedError,
+    "control: a live daemon's not-started fix reaches the rung");
 });

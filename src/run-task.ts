@@ -42287,6 +42287,8 @@ export async function dispatchMainRepairFixRun(
       promptFor: ({ harnessOwnsGit }) => mainRepairFixPrompt(request, bodyFile, harnessOwnsGit),
     });
     log("main-repair.dispatched_worker", { session_id: worker.sessionId, subtype: worker.subtype, ...workerLedgerFields(worker) });
+    // W1-T14916: a worker that never started is not a fix run that opened no PR; the lane decides what it means.
+    if (worker.notStarted) throw new WorkerNotStartedError(worker.notStarted);
     let prUrl = parseReport(workerTranscript(worker))?.prUrl;
     const owned = !prUrl && repairHarnessOwnsGit({ provider: worker.provider, tools: toolBound, harnessCommit: workerHarnessCommit(worker) });
     if (owned) {
@@ -42748,9 +42750,16 @@ export function mainRepairLaneFor(
         ...(outcomes.reason === undefined ? {} : { reason: outcomes.reason }) });
       return outcomes;
     },
-    openFixPr: (request) => {
+    openFixPr: async (request) => {
       testFilesBySha.set(request.offendingSha, request.testFiles);
-      return dispatchFix(owner, repo, config, request, ledgerPath, runId);
+      try {
+        return await dispatchFix(owner, repo, config, request, ledgerPath, runId);
+      } catch (error) {
+        // W1-T14916: a fix run a retired daemon withheld never ran, so it is neither a refusal nor a PR. This process
+        // reports nothing; its successor finds the attempt unreported and dispatches it again (W1-T13134's lost run).
+        if (error instanceof WorkerNotStartedError && workerSpawnRetiredBy() !== undefined) return new Promise<never>(() => {});
+        throw error;
+      }
     },
     openRevertPr: (request) =>
       openRevert(owner, repo, config, request, ledgerPath, runId, undefined, testFilesBySha.get(request.offendingSha) ?? []),

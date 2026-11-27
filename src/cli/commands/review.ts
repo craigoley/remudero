@@ -1816,7 +1816,10 @@ export async function runReview(host: ReviewCommandHost, args: {
         reapWorkerScratch(snapshot.cwd);
       });
     } catch (e) {
-      if (e instanceof WorkerSpawnRetiredError) return retiredStandDown(e.reason);
+      if (e instanceof WorkerSpawnRetiredError) {
+        await proofReuseRead; // settled before the stand-down, so no gh read outlives this review (it never rejects)
+        return retiredStandDown(e.reason);
+      }
       // Advisory only — the deterministic floor still binds and posts below.
       reviewerSpawnFailed = true;
       if (e instanceof WorkerAbandonedError) {
