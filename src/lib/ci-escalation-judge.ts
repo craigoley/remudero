@@ -22,6 +22,7 @@ import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { loadMounts, mountsPath } from "./mounts.js";
 import { isDiffTooLarge, PR_DIFF_READ_TIMEOUT_MS } from "./pr-diff.js";
 import { JUDGE_SHADOW_COMPARED_KEY, resolveCiJudgeMount, runJudgeShadow } from "./risk-judge.js";
+import { shadowSampledIn } from "./judge-shadow.js";
 import { spawnWorker } from "./worker.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
@@ -384,7 +385,9 @@ export function productionCiJudgePorts(opts: {
       const result = await spawn(args);
       opts.log("ci_judge.spend", { cost_usd: result.costUsd, num_turns: result.numTurns, model: mount.model, effort: mount.effort,
         provider: mount.provider ?? null });
-      if (mount.shadow !== undefined) {
+      const shadowKey = pr ? `PR${pr.number}@${pr.headSha}` : "unknown";
+      // A judgement the row's shadow_rate samples out reads no suite list and writes no shadow row.
+      if (mount.shadow !== undefined && shadowSampledIn("ci-judge", shadowKey, mount.shadowRate)) {
         // Advisory: the verdict the pass posts is the primary's text, whatever the shadow answers or refuses.
         let known: readonly string[] | undefined;
         try {
@@ -396,7 +399,7 @@ export function productionCiJudgePorts(opts: {
           const suites = known;
           const parse = (text: string) => { const parsed = parseCiJudgeOutput(text, suites); return parsed.kind === "parsed" ? parsed.output : undefined; };
           await runJudgeShadow({
-            surface: "ci-judge", key: pr ? `PR${pr.number}@${pr.headSha}` : "unknown", mount, primaryArgs: args,
+            surface: "ci-judge", key: shadowKey, mount, primaryArgs: args,
             primaryVerdict: parse(result.text), parse,
             // W1-T13365: the shared table's key; a parsed verdict always has one.
             agreementKey: (output) => JUDGE_SHADOW_COMPARED_KEY["ci-judge"](output) ?? "",

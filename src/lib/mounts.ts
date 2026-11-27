@@ -163,6 +163,10 @@ export interface JudgePrimary {
 export interface JudgeMount extends Mount {
   shadow?: JudgeShadowArm;
   threshold?: JudgeThreshold;
+  /** The share of this role's judgements its shadow is asked about, from `shadow_rate` (0 to 1); absent = every one.
+   *  A judgement is in or out by a stable hash of its role and key ({@link shadowSampledIn}, judge-shadow.ts), so a
+   *  rerun of one judgement makes the same choice. A judgement sampled out spends nothing and writes no shadow row. */
+  shadowRate?: number;
 }
 
 /** W1-T12417: the fixed-option judges with no mount row of their own. Each may name a shadow under `judge_shadows`. */
@@ -376,7 +380,7 @@ function parseThreshold(raw: unknown, where: string): JudgeThreshold {
 function parseJudgeMount(raw: unknown, where: string, tiers: Record<string, number>, efforts: Record<string, number>,
   decisionModels?: Record<string, DecisionCandidate>): JudgeMount {
   const mount: JudgeMount = parseMount(raw, where, tiers, efforts);
-  const { shadow, shadow_fallback: shadowFallback, threshold } = raw as Record<string, unknown>;
+  const { shadow, shadow_fallback: shadowFallback, threshold, shadow_rate: shadowRate } = raw as Record<string, unknown>;
   let arm = shadow === undefined ? undefined : parseShadowArm(shadow, where, decisionModels);
   if (shadowFallback !== undefined) {
     if (arm?.provider !== "auto") throw new MountsError(`mount ${where}: 'shadow_fallback' is read only beside 'shadow: auto'.`);
@@ -384,8 +388,15 @@ function parseJudgeMount(raw: unknown, where: string, tiers: Record<string, numb
     if (fallback.provider === "auto") throw new MountsError(`mount ${where}: 'shadow_fallback' must name a cash deployment or a decision model, not auto.`);
     arm = { ...arm, fallback };
   }
+  if (shadowRate !== undefined) {
+    if (typeof shadowRate !== "number" || !Number.isFinite(shadowRate) || shadowRate < 0 || shadowRate > 1) {
+      throw new MountsError(`mount ${where}: 'shadow_rate' must be a number from 0 to 1, got ${JSON.stringify(shadowRate)}.`);
+    }
+    if (arm === undefined) throw new MountsError(`mount ${where}: 'shadow_rate' is read only beside 'shadow'.`);
+  }
   return { ...mount, ...(arm === undefined ? {} : { shadow: arm }),
-    ...(threshold === undefined ? {} : { threshold: parseThreshold(threshold, where) }) };
+    ...(threshold === undefined ? {} : { threshold: parseThreshold(threshold, where) }),
+    ...(shadowRate === undefined ? {} : { shadowRate: shadowRate as number }) };
 }
 
 /** W1-T12417: a `judge_shadows` entry that makes a decision model the primary: `{ primary: <name>, threshold: {...} }`,

@@ -545,6 +545,18 @@ suite list or an approach that a decision model cannot give. The edit is a canar
 change and goes through the fleet's review and merge; a guardrail breach opens a pull request that
 reverts the line.
 
+## A judge row can shadow a share of its judgements
+
+A judge row that names a `shadow` may also carry `shadow_rate`, a number from 0 to 1. Without it, or
+at 1, every judgement is shadowed, as before the rate existed. At 0.2, about one judgement in five is.
+Which ones is a stable hash of the role and the judgement's key (`shadowSampledIn` in
+`src/lib/judge-shadow.ts`), so a rerun of a judgement makes the same choice, and a higher rate keeps
+every judgement a lower rate kept. A judgement that is sampled out asks no shadow, spends nothing and
+writes no `judge_shadow.*` row, so the shadow summary and the config gardener count only calls that
+were made. A lower rate slows how fast a role's record reaches the gardener's bar, so lower it only
+on a role whose shadow already clears the bar's paired-call count with room to spare. `shadow_rate`
+without `shadow` is refused when the table loads. No row sets it today.
+
 ## A new model joins each judge's shadow pool by itself
 
 W1-T12422. A role's shadow may be `shadow: auto` (on its row, or in `judge_shadows`). Its pool is

@@ -201,12 +201,25 @@ function shadowRecorder(log: ShadowLog, common: Record<string, unknown>): Shadow
   };
 }
 
+/** Whether the judgement `key` of `role` is one its shadow is asked about, at the row's `shadow_rate`. No rate, or a
+ *  rate of 1, asks about every judgement, as before the rate existed; 0 asks about none. The choice is a stable hash
+ *  of the role and key, so it never depends on the clock or on which process asks, and a rerun repeats it. */
+export function shadowSampledIn(role: string, key: string, rate: number | undefined): boolean {
+  if (rate === undefined || rate >= 1) return true;
+  if (!(rate > 0)) return false;
+  const bucket = createHash("sha256").update(`${role}\u0000${key}`).digest().readUInt32BE(0);
+  return bucket / 0x1_0000_0000 < rate;
+}
+
 /** ADVISORY ONLY: ask the row's cash shadow arm the same judgement and ledger both verdicts and whether they agree.
  *  It never throws and returns nothing the caller acts on; a refusal for capacity or budget is ledgered and changes
  *  nothing. A row with no shadow arm spends nothing. */
 export async function runJudgeShadow<T>(request: JudgeShadowRequest<T>): Promise<JudgeShadowOutcome> {
   const named = request.mount.shadow;
   if (named === undefined) return { kind: "skipped" };
+  // A judgement the row's shadow_rate samples out spends nothing and writes no row, so the shadow summary and the
+  // config gardener count only the calls that were made.
+  if (!shadowSampledIn(request.surface, request.key, request.mount.shadowRate)) return { kind: "skipped" };
   // W1-T14841: an auto arm whose role pool is empty asks its fallback, on that arm's own path.
   const fallback = named.provider === "auto" ? emptyPoolFallback(named, request.surface, request.mount, request.primaryArgs, request.decisions) : undefined;
   if (fallback !== undefined) return runJudgeShadow({ ...request, mount: { ...request.mount, shadow: fallback } });
@@ -303,6 +316,7 @@ async function pullRequestUrl(root: string | undefined, number: number, ownerRep
  *  own answer before any shadow request is made. It never throws. */
 export async function shadowJudgeCall<T>(call: ShadowJudgeCall<T>): Promise<void> {
   const arm = call.mount.shadow;
+  if (!shadowSampledIn(call.role, call.key, call.mount.shadowRate)) return;
   if (arm?.provider === "auto") return poolShadow(call);
   if (arm?.provider === "decisions") return decisionShadow(call, arm);
   if (call.mount.provider === "cash" || (arm === undefined && !CASH_ROW_SHADOW_ROLES.has(call.role))) return;
