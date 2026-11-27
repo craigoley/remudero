@@ -7,8 +7,9 @@ import { CHECK_PROOF_CHILD_ENTRY, CHECK_PROOF_EXIT, checkProofChildArgv } from "
 
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
@@ -60,14 +61,19 @@ export function honouredGuards(criteria, source, taskId) {
 }
 
 /** Run the public diagnostic command instead of duplicating any proof parsing or execution. */
+const CHECK_PROOF_MAX_BUFFER = 16 * 1024 * 1024;
+const checkProofSpawnOptions = (root) => ({
+  cwd: root,
+  // check-proof is a read-only diagnostic against the caller's pinned head/base. Re-syncing a
+  // detached PR head against a moving origin/main would replace that question with a refusal.
+  env: { ...process.env, RMD_SELF_SYNC_DONE: "1" },
+});
+
 export function runCheckProof(proof, mergeBase, { root = REPO_ROOT, spawn = spawnSync } = {}) {
   const result = spawn(process.execPath, checkProofChildArgv(proof, mergeBase), {
-    cwd: root,
+    ...checkProofSpawnOptions(root),
     encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-    // check-proof is a read-only diagnostic against the caller's pinned head/base. Re-syncing a
-    // detached PR head against a moving origin/main would replace that question with a refusal.
-    env: { ...process.env, RMD_SELF_SYNC_DONE: "1" },
+    maxBuffer: CHECK_PROOF_MAX_BUFFER,
   });
   return {
     status: result.status,
@@ -78,23 +84,47 @@ export function runCheckProof(proof, mergeBase, { root = REPO_ROOT, spawn = spaw
   };
 }
 
+/** W1-T15183: {@link runCheckProof} without blocking, so the gate can run several proofs at once.
+ *  Same child, options and result shape; output past the same per-stream buffer ends the child with an error. */
+export function runCheckProofAsync(proof, mergeBase, { root = REPO_ROOT, spawnChild = spawn } = {}) {
+  return new Promise((resolve) => {
+    const out = { stdout: "", stderr: "" };
+    let error;
+    let settled = false;
+    const settle = (status, signal) => {
+      if (settled) return;
+      settled = true;
+      resolve({ status, signal, error, stdout: out.stdout, stderr: out.stderr });
+    };
+    const child = spawnChild(process.execPath, checkProofChildArgv(proof, mergeBase), checkProofSpawnOptions(root));
+    for (const name of ["stdout", "stderr"]) {
+      child[name]?.setEncoding("utf8");
+      child[name]?.on("data", (chunk) => {
+        if (Buffer.byteLength(out[name]) + Buffer.byteLength(chunk) > CHECK_PROOF_MAX_BUFFER) {
+          error ??= `${name} maxBuffer length exceeded`;
+          child.kill();
+          return;
+        }
+        out[name] += chunk;
+      });
+    }
+    child.on("error", (spawnError) => {
+      error ??= spawnError.message;
+      if (child.pid === undefined) settle(null, null);
+    });
+    child.on("close", (status, signal) => settle(error === undefined ? status : null, signal));
+  });
+}
+
 function proofCounts(stdout) {
   const head = /^hits:\s*(\d+)\s*$/m.exec(stdout)?.[1];
   const base = /^base hits:\s*(\d+)\s*$/m.exec(stdout)?.[1];
   return { head: head ?? "not reported", base: base ?? "not reported" };
 }
 
-/** Evaluate every executable criterion.  Exit 5 is `check-proof`'s stable, reviewer-owned name
- * for head/base parity.  Other reviewer outcomes are deliberately outside this task's scope. */
-export function evaluateProofDiscrimination(criteria, mergeBase, runProof) {
-  const stale = [];
-  const unreadable = [];
-  let executed = 0;
-  let credited = 0;
-  let guarded = 0;
-  const countDiscriminated = [];
-  // W1-T11157: every proof this gate ran, with its raw outcome, for the published result record.
-  const judged = [];
+/** The criteria this gate runs, in criterion order, and the ones it counts without running. */
+function planProofDiscrimination(criteria) {
+  const plan = { proofs: [], credited: 0, guarded: 0 };
   for (const criterion of criteria) {
     // W1-T3729 — A CRITERION THE PLAN CREDITS TO AN EARLIER MERGE IS STALE BY CONSTRUCTION.
     //
@@ -114,7 +144,7 @@ export function evaluateProofDiscrimination(criteria, mergeBase, runProof) {
     // COUNTED SEPARATELY, NEVER AS `executed`: `executed` is this gate's evidence that it did
     // work, and a task of entirely-credited criteria must not report a green it did not earn.
     if (criterion.satisfied_by) {
-      credited += 1;
+      plan.credited += 1;
       continue;
     }
     // W1-T4419 — A GUARD CRITERION PASSES AT THE MERGE BASE BY DESIGN, SO IT CANNOT DISCRIMINATE.
@@ -130,12 +160,26 @@ export function evaluateProofDiscrimination(criteria, mergeBase, runProof) {
     // entirely of guards is refused at parse time (plan.ts's validateAcceptanceShape), so a mixed
     // task reaching this gate with SOME guards must not be reported as if this gate did no work.
     if (criterion.kind === "guard") {
-      guarded += 1;
+      plan.guarded += 1;
       continue;
     }
     const proof = criterion.proof?.trim() ?? "";
     if (!proof || parseWhitelistedProof(proof) === null) continue;
-    const result = runProof(proof, mergeBase);
+    plan.proofs.push(proof);
+  }
+  return plan;
+}
+
+/** Judge each planned proof's outcome, in criterion order: the one verdict both evaluators return. */
+function judgeProofDiscrimination(plan, results) {
+  const stale = [];
+  const unreadable = [];
+  let executed = 0;
+  const countDiscriminated = [];
+  // W1-T11157: every proof this gate ran, with its raw outcome, for the published result record.
+  const judged = [];
+  for (const [index, proof] of plan.proofs.entries()) {
+    const result = results[index];
     judged.push({ proof, status: result.status, error: result.error ?? result.signal, stdout: String(result.stdout ?? "") });
     if (result.status === null || result.status === undefined || result.error) {
       unreadable.push({ proof, detail: result.error ?? result.signal ?? "check-proof did not return an exit status" });
@@ -156,7 +200,46 @@ export function evaluateProofDiscrimination(criteria, mergeBase, runProof) {
       stale.push({ proof, ...proofCounts(result.stdout), output: result.stdout.trim() });
     }
   }
-  return { stale, unreadable, executed, credited, guarded, countDiscriminated, judged };
+  return { stale, unreadable, executed, credited: plan.credited, guarded: plan.guarded, countDiscriminated, judged };
+}
+
+/** Evaluate every executable criterion.  Exit 5 is `check-proof`'s stable, reviewer-owned name
+ * for head/base parity.  Other reviewer outcomes are deliberately outside this task's scope. */
+export function evaluateProofDiscrimination(criteria, mergeBase, runProof) {
+  const plan = planProofDiscrimination(criteria);
+  return judgeProofDiscrimination(plan, plan.proofs.map((proof) => runProof(proof, mergeBase)));
+}
+
+/** W1-T15183: the pool size, the runner's available parallelism capped at the proof count; one when it cannot be read. */
+export function proofPoolSize(proofCount, readParallelism = availableParallelism) {
+  let cores;
+  try {
+    cores = readParallelism();
+  } catch {
+    // An unreadable core count is not a gate failure: the gate runs one proof at a time, as it did before.
+    cores = 1;
+  }
+  const usable = Number.isInteger(cores) && cores > 0 ? cores : 1;
+  return Math.max(1, Math.min(usable, proofCount));
+}
+
+/** W1-T15183: {@link evaluateProofDiscrimination} with the proofs run through a pool of `poolSize` at once.
+ *  Each proof still runs at head and at the merge base; results are kept by index, so the verdict is the same. */
+export async function evaluateProofDiscriminationConcurrently(criteria, mergeBase, runProof, {
+  poolSize = proofPoolSize,
+} = {}) {
+  const plan = planProofDiscrimination(criteria);
+  const results = new Array(plan.proofs.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < plan.proofs.length) {
+      const index = next;
+      next += 1;
+      results[index] = await runProof(plan.proofs[index], mergeBase);
+    }
+  };
+  await Promise.all(Array.from({ length: poolSize(plan.proofs.length) }, worker));
+  return judgeProofDiscrimination(plan, results);
 }
 
 /**
@@ -336,7 +419,8 @@ export function resultLine(record) {
   return `${RESULT_MARKER}${JSON.stringify({ format: RESULT_FORMAT, head_sha: record.head_sha, too_large: true, bytes })}`;
 }
 
-export function main(argv, {
+/** W1-T15183: the event, merge base and criteria both entry points judge, or `{ exit }` when the gate refuses first. */
+function prepareProofDiscrimination(argv, {
   root = REPO_ROOT,
   readPayload = readEventPayload,
   mergeBase = resolveMergeBase,
@@ -351,27 +435,33 @@ export function main(argv, {
   const eventPath = values["event-path"] ?? process.env.GITHUB_EVENT_PATH;
   if (!eventPath) {
     log.error("proof-discrimination: REFUSED — no event payload path (pass --event-path or set GITHUB_EVENT_PATH)");
-    return 1;
+    return { exit: 1 };
   }
   const payload = readPayload(eventPath);
   if (!payload.readable) {
     log.error(`proof-discrimination: REFUSED — unreadable event payload: ${payload.reason}`);
-    return 1;
+    return { exit: 1 };
   }
   const base = mergeBase(payload.baseSha, payload.headSha, { root });
   if (!base.ok) {
     log.error(`proof-discrimination: REFUSED — ${base.message}`);
-    return 1;
+    return { exit: 1 };
   }
   // W1-T4206: the reviewer's identity surfaces, in its order — the body trailer, then a run-shaped head ref.
   const identity = resolveTaskIdentity({ body: payload.body, headRefName: payload.headRefName });
   const { criteria, source } = resolveCriteria(bodyWithRecoveredIdentity(payload.body, identity), payload.headSha, { root });
   const taskId = identity.taskId;
-  const result = evaluateProofDiscrimination(honouredGuards(criteria, source, taskId), base.mergeBase, runProof);
+  return { criteria: honouredGuards(criteria, source, taskId), mergeBase: base.mergeBase, runProof, payload, source,
+    taskId, identity, root, baseline, log, executorDigests, writeResult, resultPath: values["result-path"] };
+}
+
+/** W1-T15183: the verdict and its log for one evaluated head, the same for both entry points. */
+function reportProofDiscrimination({ mergeBase, payload, source, taskId, identity, root, baseline, log,
+  executorDigests, writeResult, resultPath }, result) {
   const allowed = staleAllowanceFor(taskId, baseline(root));
   const verdict = judgeStaleAgainstAllowance(result.stale.length, allowed);
-  publishResult({ payload, mergeBase: base.mergeBase, source, judged: result.judged, root, executorDigests, log,
-    resultPath: values["result-path"], writeResult });
+  publishResult({ payload, mergeBase, source, judged: result.judged, root, executorDigests, log,
+    resultPath, writeResult });
   // W1-T3729 design (ii): SKIPPED IS REPORTED, NEVER SILENT — on every verdict path below, so a
   // reader of a pass and a reader of a refusal both learn the same thing.
   if (result.credited > 0) {
@@ -402,7 +492,7 @@ export function main(argv, {
     return 0;
   }
   if (result.stale.length > 0) {
-    log.error(`proof-discrimination: FAIL — ${result.stale.length} proof(s) pass at both PR head and merge base (${base.mergeBase}); they cannot establish this PR's work:`);
+    log.error(`proof-discrimination: FAIL — ${result.stale.length} proof(s) pass at both PR head and merge base (${mergeBase}); they cannot establish this PR's work:`);
     for (const row of result.stale) {
       log.error(`  proof: ${row.proof}`);
       log.error(`  head hits: ${row.head}; base hits: ${row.base}`);
@@ -416,12 +506,30 @@ export function main(argv, {
     log.error("Remedy: replace each stale proof with one that names behavior this PR changes, then rerun this check.");
     // #10234: the sweep reads only a failed step's last lines (CI_STEP_ERROR_CONTEXT_LINES), and each proof's output
     // above can run long, so the verdict and its proofs close the log for the stale-proof route to find.
-    log.error(`proof-discrimination: FAIL — ${result.stale.length} proof(s) pass at both PR head and merge base (${base.mergeBase}):`);
+    log.error(`proof-discrimination: FAIL — ${result.stale.length} proof(s) pass at both PR head and merge base (${mergeBase}):`);
     for (const row of result.stale) log.error(`  proof: ${row.proof}`);
     return 1;
   }
   log.log(`proof-discrimination: OK — ${result.executed} executable proof(s) from ${source} did not pass at both head and merge base.`);
   return 0;
+}
+
+
+export function main(argv, deps = {}) {
+  const run = prepareProofDiscrimination(argv, deps);
+  if (run.exit !== undefined) return run.exit;
+  return reportProofDiscrimination(run, evaluateProofDiscrimination(run.criteria, run.mergeBase, run.runProof));
+}
+
+/** W1-T15183: the command-line entry. {@link main} with the proofs run concurrently, up to the runner's cores;
+ *  the verdict, the published record and the exit codes are {@link main}'s. */
+export async function mainConcurrent(argv, deps = {}) {
+  const root = deps.root ?? REPO_ROOT;
+  const run = prepareProofDiscrimination(argv, { runProof: (proof, base) => runCheckProofAsync(proof, base, { root }), ...deps });
+  if (run.exit !== undefined) return run.exit;
+  const result = await evaluateProofDiscriminationConcurrently(run.criteria, run.mergeBase, run.runProof,
+    { poolSize: deps.poolSize });
+  return reportProofDiscrimination(run, result);
 }
 
 /** Publish the record as one log line before any verdict line, so a failing job's log still ends in its verdict
@@ -439,4 +547,4 @@ function publishResult({ payload, mergeBase, source, judged, root, executorDiges
   if (resultPath) writeResult(resultPath, `${JSON.stringify(record, null, 2)}\n`);
 }
 
-if (isMainModule(import.meta.url)) process.exitCode = main(process.argv.slice(2));
+if (isMainModule(import.meta.url)) process.exitCode = await mainConcurrent(process.argv.slice(2));
