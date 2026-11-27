@@ -92,6 +92,7 @@ test("W1-T15105 criterion 3: invariant:public-plan-otherwise — no ok catalog, 
   const refused = fixture(t, [ask(PARKED_ASK)], undefined, false);
   assert.equal(await approve(refused.deps, PARKED_ASK), 409, "no ok catalog: the approve refuses");
   assert.deepEqual(refused.approved, []);
+  assert.equal(refused.reads.catalog, 1, "the approve read the catalog, found it not ok, and kept the public plan");
 
   const publicOnly = fixture(t, [ask(PUBLIC_ASK)], combinedPlan);
   const result = classifyAllProposalsMemo(publicOnly.deps, () => corePlan);
