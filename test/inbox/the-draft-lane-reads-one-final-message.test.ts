@@ -8,6 +8,7 @@ import {DRAFT_AUTOFIX_OFF_FILE} from "#src/lib/draft-repair.js";
 import {workerTranscript, type WorkerResult} from "#src/lib/worker.js";
 import {buildInboxDraftSpawnArgs} from "#src/run-task.js";
 import type {Config} from "#src/lib/config.js";
+import {RMD_TMP_PREFIX} from "#src/lib/tmp.js";
 import {REPO_ROOT} from "#test/helpers/repo-root.js";
 
 const proposal: Proposal = {id: "machine-judge:W1-T1", summary: "Existing parked task", evidenceAnchors: []};
@@ -95,7 +96,7 @@ test("draft rejection telemetry counts the same final message that the parser re
 });
 
 test("the in-spawn draft evaluation judges an answer the repair makes clean as clean, unless the kill switch is set", () => {
-  const root = mkdtempSync(join(tmpdir(), "draft-autofix-evaluate-"));
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}draft-autofix-evaluate-`));
   const fixable = inboxDraftExampleFragmentYaml().replace('title: "Tighten', 'title: "NEW-1: Tighten').replace("verify: auto", "verify: manual");
   const answer = `=== FRAGMENT START ===\n${fixable}\n=== FRAGMENT END ===\nSTAMP: - P9 (tighten the guard) — RATIFIED 2026-01-01 -> NEW-1.`;
   try {

@@ -14,6 +14,7 @@ import {
 } from "#src/lib/inbox.js";
 import { DRAFT_AUTOFIX_OFF_FILE, draftAutofixOff, repairDraftedFragment, titleWithoutOwnId, type DraftRepairFacts } from "#src/lib/draft-repair.js";
 import type { WorkerResult } from "#src/lib/worker.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // The draft rung spent a model retry on every lint failure, including the ones whose remedy the lint message itself
 // computes. Measured 2026-11-23..27: 912 draft attempts for 359 proposals, 460 relint rows. These pin the repairs that
@@ -164,7 +165,7 @@ test("the draft autofix kill switch lints each draft as the model wrote it", asy
   assert.ok(steps.includes("inbox.draft_relint"));
   assert.ok(!steps.includes("inbox.draft_autofixed"));
   assert.ok(outcome.ok && /NEW-1: Tighten/.test(outcome.candidate.fragmentYaml), "the model's fragment is cached unrepaired");
-  const state = mkdtempSync(join(tmpdir(), "draft-autofix-off-"));
+  const state = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}draft-autofix-off-`));
   try {
     assert.equal(draftAutofixOff(state), false);
     writeFileSync(join(state, DRAFT_AUTOFIX_OFF_FILE), "");
