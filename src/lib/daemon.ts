@@ -18,6 +18,7 @@ import { startPlainBackfill, type PlainBackfillDeps } from "./inbox-plain.js";
 import { startRecommendationBackfill, type RecommendationBackfill } from "./inbox-recommendation.js";
 import { startFleetLane, triageFleetLaneAsync, type FleetLaneDeps } from "./fleet-lane.js";
 import type { Escalation } from "./escalate.js";
+import { OPS_PR_RED_STALLED_STEP, OPS_PR_WATCH_UNREADABLE_STEP, opsPullRequestWatchTick, watchOpsPullRequests, type OpsPullRequestWatch } from "./ops-pr-watch.js";
 import { governorIncidentFromLedgerRow, governorTiersFromLedger, sreGovernorVerdict, SRE_GOVERNOR_STEP, type SreGovernorControls, type SreGovernorIncident, type SreGovernorVerdict } from "./sre-governor.js";
 import { runSreLanePass, sreLaneOffPath, type SreLaneInput } from "./sre-lane.js";
 import { daemonSreGovernorEnforcer, receiptFromLedgerRow, type SreGovernorEnforcer, type SreRunbookReceipt } from "./sre-runbooks.js";
@@ -1551,6 +1552,15 @@ interface OpsDispatchContext {
   opsIds: ReadonlySet<string>;
 }
 
+/** W1-T14865: a ledger line the ops pull request watch reads back, its once-per-head memory or its last unreadable row. */
+export function isOpsPullRequestWatchRow(line: string): boolean {
+  if (!line.includes("\"ops_pr.")) return false;
+  try {
+    const step = (JSON.parse(line) as { step?: unknown }).step;
+    return step === OPS_PR_RED_STALLED_STEP || step === OPS_PR_WATCH_UNREADABLE_STEP;
+  } catch (error) { void error; return false; /* a torn line is not the watch's row */ }
+}
+
 export interface DaemonDeps {
   /** W1-T13286: the selection-timing row's own clock, so timing never consumes a reading of `now` a decision depends on. */
   selectionTimingNow?: () => number;
@@ -1558,6 +1568,9 @@ export interface DaemonDeps {
   readOpsTaskDispatch?: (publicPlan: Plan) => OpsTaskDispatchRead;
   /** W1-T13681: the move janitor, one detached movePlanTask tick per iteration; absent, no tick runs. */
   planTaskMover?: PlanTaskMover;
+  /** W1-T14865: the ops catalog repository whose open pull requests the daemon watches for a stalled red required
+   *  check, the GET-only api it reads them through, and the operator escalation it writes. Absent, nothing is watched. */
+  opsPullRequestWatch?: OpsPullRequestWatch;
   /** W1-T11600: an optional, already-parsed second catalog used only for shadow comparison. No source
    *  reader is installed here; absence preserves the single-plan path exactly, and this snapshot
    *  can never contribute work to the actual dispatch set. */
@@ -1598,6 +1611,8 @@ export interface DaemonDeps {
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: (plan?: Plan) => MergedSet;
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
+  /** W1-T14893: the lane refill's merged-set read, which may reuse the tick read published moments ago; absent, the refill reads through `refreshMergedAsync`. */
+  refreshMergedForRefill?: (plan?: Plan) => Promise<MergedSet>;
   /** W1-T14644: where the last refreshMerged read's projection spent its time, handed over once; undefined when it measured nothing. */
   takeRefreshMergedPhases?: () => ProjectPlanPhases | undefined;
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
@@ -6010,6 +6025,11 @@ export async function runDaemon(
   };
   // W1-T13681 + W1-T14584: at most one move-task tick in flight, started from a cycle's top or a dispatch tick; the hold is
   // read only when a tick starts, and a start never gates dispatch.
+  // W1-T14865: at most once per OPS_PR_WATCH_EVERY_MS, detached, so a slow GitHub read never holds the loop.
+  const startOpsPullRequestWatch = opsPullRequestWatchTick(deps.opsPullRequestWatch,
+    { clock: daemonClock, log, run: (input) => watchOpsPullRequests(input),
+      // Only the watch's own rows: the once-per-head memory and the unreadable row it does not repeat.
+      ledgerLines: () => (deps.readLedgerLines?.() ?? []).filter(isOpsPullRequestWatchRow) });
   const startPlanTaskMoveTick = (readHold: () => string | undefined): void => {
     if (!deps.planTaskMover) return;
     if (!detachedActionInFlight(PLAN_TASK_MOVE_ACTION)) {
@@ -8269,6 +8289,7 @@ export async function runDaemon(
     }
     // W1-T13681: the move-task tick, detached after this iteration's ops hold is read.
     startPlanTaskMoveTick(opsDispatchHoldReason);
+    startOpsPullRequestWatch();
     cycleStage("refresh_merged");
     const isMerged = deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch);
     cycleStage("boot_review_and_gates");
@@ -10004,8 +10025,9 @@ export async function runDaemon(
             // object that supplies no async port keeps the synchronous read, and its refill stays synchronous.
             // W1-T14644: drop phases an earlier read left, so the row names only this probe's own.
             deps.takeRefreshMergedPhases?.();
-            if (deps.refreshMergedAsync) {
-              return timing.probe("refreshMerged", () => deps.refreshMergedAsync!(refillPlan)).then(
+            const refillRead = deps.refreshMergedAsync ? (deps.refreshMergedForRefill ?? deps.refreshMergedAsync) : undefined;
+            if (refillRead) {
+              return timing.probe("refreshMerged", () => refillRead(refillPlan)).then(
                 (isMerged) => {
                   timing.noteRefreshMergedPhases(deps.takeRefreshMergedPhases?.());
                   if (deps.readLiveState) return decideLive(refillPlan, isMerged);

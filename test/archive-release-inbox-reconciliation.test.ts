@@ -78,9 +78,11 @@ test("W1-T4768: archived positive release retires exact ask", async (t) => {
   const world = fixture();
   t.after(() => rmSync(world.root, { recursive: true, force: true }));
   await withServer(world.deps, async (base) => {
-    const inbox = await get(base, "/v1/inbox") as { notReady: Array<{ proposalId: string }> };
-    assert.ok(!inbox.notReady.some((item) => item.proposalId === RELEASED));
-    assert.ok(inbox.notReady.some((item) => item.proposalId === UNRELEASED));
+    const inbox = await get(base, "/v1/inbox") as { ready: Array<{ proposalId: string }>; notReady: Array<{ proposalId: string }> };
+    // W1-T14977: an unreleased parked ask is ready to approve as its release, so it may be listed in ready.
+    const listed = (id: string) => [...inbox.ready, ...inbox.notReady].some((item) => item.proposalId === id);
+    assert.ok(!listed(RELEASED));
+    assert.ok(listed(UNRELEASED));
     const threads = await get(base, "/v1/inbox/threads") as { threads: Array<{ proposalId: string }> };
     assert.ok(!threads.threads.some((item) => item.proposalId === RELEASED));
     assert.ok(threads.threads.some((item) => item.proposalId === UNRELEASED));
@@ -122,9 +124,11 @@ test("W1-T4768: archive gap preserves unproven ask", async (t) => {
   const world = fixture(true);
   t.after(() => rmSync(world.root, { recursive: true, force: true }));
   await withServer(world.deps, async (base) => {
-    const inbox = await get(base, "/v1/inbox") as { notReady: Array<{ proposalId: string }> };
-    assert.ok(inbox.notReady.some((item) => item.proposalId === RELEASED));
-    assert.ok(inbox.notReady.some((item) => item.proposalId === UNRELEASED));
+    const inbox = await get(base, "/v1/inbox") as { ready: Array<{ proposalId: string }>; notReady: Array<{ proposalId: string }> };
+    // W1-T14977: an unreleased parked ask is ready to approve as its release, so it may be listed in ready.
+    const listed = (id: string) => [...inbox.ready, ...inbox.notReady].some((item) => item.proposalId === id);
+    assert.ok(listed(RELEASED));
+    assert.ok(listed(UNRELEASED));
     const census = await get(base, "/v1/inbox/attention-census") as {
       sources: { archiveLedger: string }; items: Array<{ proposalId: string; attention: string }>;
     };
@@ -167,5 +171,22 @@ test("W1-T4768: a live positive release remains proven when a retained archive i
     assert.equal(census.items.find((item) => item.proposalId === HELD)?.attention, "decision");
     assert.equal(census.items.find((item) => item.proposalId === RELEASED)?.attention, "decision",
       "the archived-only release remains unproven during the read fault");
+  });
+});
+
+test("W1-T14977: an archived release also refuses a machine-judge ask's draft-free approval", async (t) => {
+  const world = fixture();
+  t.after(() => rmSync(world.root, { recursive: true, force: true }));
+  const ask = "machine-judge:W1-T217";
+  updateProposalRegistry(world.registryPath, (current) => [...current, { id: ask, summary: "Approve W1-T217's release", evidenceAnchors: [] }]);
+  await withServer(world.deps, async (base) => {
+    const approve = await fetch(`${base}/v1/inbox/approve`, {
+      method: "POST",
+      headers: { authorization: "Bearer write-token", "content-type": "application/json" },
+      body: JSON.stringify({ proposalId: ask }),
+    });
+    assert.equal(approve.status, 409, "W1-T217's only release row is archived, so its machine-judge ask is not released again");
+    assert.match(String(((await approve.json()) as { detail?: string }).detail), /already released; .*RELEASE-217/);
+    assert.deepEqual(world.approved, []);
   });
 });

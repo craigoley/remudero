@@ -42,7 +42,7 @@ import { formatTail } from "./proofExecutor.js";
 import { playwrightCacheRoot } from "./worker-home.js";
 import { makeTempDir } from "./tmp.js";
 import { createProofCache, ProofCacheUnavailableError, type ProofCache, type ProofCacheRelease } from "./proof-cache.js";
-import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
+import { acquireProofCpuAdmission, defaultTestSlots, lowPriorityCommand, PROOF_CPU_ADMISSION_WAIT_STEP, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad, type ProofCpuAdmission } from "./test-slot.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import { dependencySeedRootChoice, primeRefusalReceipt, SEED_LOCK_RECLAIMED, type DependencyGenerationRefusalReceipt } from "./dependency-seeds.js";
 import { configPath } from "./config.js";
@@ -872,6 +872,8 @@ export interface ReviewVerdict {
   /** W1-T6124: present when this review started a proof child WITHOUT the bwrap sandbox, naming why ({@link
    *  ProofSandboxStatus}). It rides `review.posted`'s `decision_verdict`, so a degraded review is on the record. */
   proofSandboxDegraded?: string;
+  /** W1-T15002: milliseconds this review's proof children waited for host CPU pressure to leave a free core. */
+  proofCpuWaitMs?: number;
   criteria: CriterionVerdict[];
   /** True when the diff adds tests that assert nothing (a global fail signal). */
   testTheater: boolean;
@@ -2780,7 +2782,32 @@ function execFileAsync(
 export type AsyncProofSpawner = (command: string, args: readonly string[], cwd: string, timeoutMs: number) => Promise<string>;
 export type AsyncProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => Promise<ReturnType<ProofExecutor>>;
 
-export const defaultAsyncProofSpawner: AsyncProofSpawner = async (command, args, cwd, timeoutMs) => {
+/** W1-T15002: CPU admission time this process's proof children spent waiting, read off their wait rows. */
+let proofCpuWaitMs = 0;
+
+/** W1-T15002: each wait is ledgered under the review lane's sender, SWEEP, and added to the reviews' wait total. */
+export function recordProofCpuWait(step: string, fields: Record<string, unknown>): void {
+  if (step === PROOF_CPU_ADMISSION_WAIT_STEP && typeof fields.wait_ms === "number") proofCpuWaitMs += fields.wait_ms;
+  try {
+    appendLedger(join(proofStateDir().dir, LEDGER_FILENAME), { run_id: "review-proof-cpu", task_id: "SWEEP", step, ...fields });
+  } catch (error) {
+    console.error(`review: a proof CPU admission wait was not recorded: ${installFailure(error)}`);
+  }
+}
+
+/** The async spawner every review proof runs through; `admit` is the host-wide CPU admission (W1-T15002). */
+export function asyncProofSpawnerWith(admit: () => Promise<ProofCpuAdmission>): AsyncProofSpawner {
+  return async (command, args, cwd, timeoutMs) => {
+    const admission = await admit();
+    try {
+      return await spawnPreparedProofAsync(command, args, cwd, timeoutMs);
+    } finally {
+      admission.release();
+    }
+  };
+}
+
+async function spawnPreparedProofAsync(command: string, args: readonly string[], cwd: string, timeoutMs: number): Promise<string> {
   const child = prepareProofChild(command, args, cwd);
   try {
     if (child.startCheck) await startCheckAsync(child, cwd);
@@ -2793,7 +2820,10 @@ export const defaultAsyncProofSpawner: AsyncProofSpawner = async (command, args,
   } finally {
     child.cleanup();
   }
-};
+}
+
+export const defaultAsyncProofSpawner: AsyncProofSpawner = asyncProofSpawnerWith(() =>
+  acquireProofCpuAdmission({ log: recordProofCpuWait }));
 
 /** W1-T4587: checkouts the reviewer itself created for proof execution (the PR head and base
  *  worktrees). {@link ensureDeps} may replace a partial node_modules only in one of these. */
@@ -6589,7 +6619,7 @@ export function judgeReview(
   // judgeCriterion so that function stays byte-compatible for its audit callers, which must keep spawning per call.
   const proofMemo = evidence.headCheckoutDir
     ? memoizeProofExecutor(evidence.execProof ?? execWhitelistedProof, evidence.sampleLoad) : undefined;
-  const unsandboxedBefore = unsandboxedProofSpawns;
+  const unsandboxedBefore = proofRecordMark();
   const execCtx: ProofExecContext | undefined = evidence.headCheckoutDir
     ? {
         cwd: evidence.headCheckoutDir,
@@ -6888,10 +6918,16 @@ export function judgeReview(
 }
 
 /** W1-T6124: the verdict's degraded-sandbox record when a proof child started unsandboxed since `before`. */
-function proofSandboxRecord(before: number): Pick<ReviewVerdict, "proofSandboxDegraded"> {
-  if (unsandboxedProofSpawns === before) return {};
+function proofSandboxRecord(before: ProofRecordMark): Pick<ReviewVerdict, "proofSandboxDegraded" | "proofCpuWaitMs"> {
+  const waited = proofCpuWaitMs > before.cpuWaitMs ? { proofCpuWaitMs: proofCpuWaitMs - before.cpuWaitMs } : {};
+  if (unsandboxedProofSpawns === before.unsandboxed) return waited;
   const status = proofSandboxStatus();
-  return status.mode === "unsandboxed" ? { proofSandboxDegraded: status.reason } : {};
+  return status.mode === "unsandboxed" ? { ...waited, proofSandboxDegraded: status.reason } : waited;
+}
+
+type ProofRecordMark = { unsandboxed: number; cpuWaitMs: number };
+function proofRecordMark(): ProofRecordMark {
+  return { unsandboxed: unsandboxedProofSpawns, cpuWaitMs: proofCpuWaitMs };
 }
 
 type ProofObservation =
@@ -7008,7 +7044,7 @@ export async function judgeReviewAsync(
   evidence: ReviewEvidence,
 ): Promise<ReviewVerdict> {
   if (!evidence.headCheckoutDir) return judgeReview(criteria, evidence);
-  const unsandboxedBefore = unsandboxedProofSpawns;
+  const unsandboxedBefore = proofRecordMark();
   const observed = new Map<string, ProofObservation>();
   const recorder = proofPhaseRecorder(evidence);
   let basePriming: Promise<void> | undefined;
@@ -12669,6 +12705,14 @@ export interface PostReviewStatusRetryOpts {
   /** Injectable `gh` invocation — the "gh gateway" a unit test simulates without shelling out. Defaults to the
    *  awaited {@link execGhStatusPostAsync} POST below (W1-T9549). */
   exec?: (args: string[], env: NodeJS.ProcessEnv) => void | Promise<void>;
+  /** W1-T15038: re-mint the ambient installation token after a 401; resolves whether a fresh token was minted.
+   *  Default: {@link refreshReviewPublisherToken} when no reviewer-token override is set and GH_APP_ID is set. */
+  reauth?: () => Promise<boolean>;
+}
+
+/** W1-T15038: a refusal that says the token is no longer accepted. */
+export function isExpiredCredentialRefusal(text: string): boolean {
+  return /Bad credentials|HTTP 401/.test(text);
 }
 
 /** W1-T9549 — the status POST {@link postReviewStatus} and the repair lease make by default, AWAITED over
@@ -12726,12 +12770,23 @@ export async function postReviewStatus(
   const backoffMs = retryOpts.backoffMs ?? ((failedAttempt) => POST_REVIEW_STATUS_BASE_DELAY_MS * 2 ** (failedAttempt - 1));
   const sleep = retryOpts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const exec = retryOpts.exec ?? execGhStatusPostAsync;
+  const reauth = retryOpts.reauth ?? (reviewerToken || !process.env.GH_APP_ID
+    ? undefined : async () => (await refreshReviewPublisherToken()).ok);
+  let reauthed = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       await exec(args, env);
       return;
     } catch (e) {
+      // W1-T15038: an expired token is re-minted once and the post retried; a 401 after that is thrown as before.
+      if (!reauthed && reauth && isExpiredCredentialRefusal(ghErrorText(e))) {
+        reauthed = true;
+        if (await reauth()) {
+          attempt -= 1;
+          continue;
+        }
+      }
       const transient = classifyFailure({ text: ghErrorText(e) }) === "transient";
       if (!transient || attempt >= maxAttempts) throw e; // permanent, or transient-but-exhausted: surface once
       await sleep(backoffMs(attempt));

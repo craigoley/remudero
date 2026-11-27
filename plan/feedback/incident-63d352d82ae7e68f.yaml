@@ -19,10 +19,11 @@ raw: >-
     (none found)
 attachments: []
 origin: incident#63d352d82ae7e68fedbcf914e0cf020f371a025e3701efc4b8ce980f56af7894
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

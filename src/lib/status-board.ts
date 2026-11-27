@@ -78,6 +78,7 @@ import {
   type InboxClassification,
   type Proposal,
   type ReadinessContext,
+  releasedHumanTaskPredicate,
 } from "./inbox.js";
 import { loadPlan, type MergedResolver, type Plan, type RetirementReason, type Task } from "./plan.js";
 import { escalationAgeDays, machineFamily, MACHINE_JUDGE_UNANSWERED_WITHDRAW_DAYS, readOperatorReleaseRecords } from "./machine-filing-judge.js";
@@ -1937,6 +1938,7 @@ function deriveInbox(
     grepAnchorTrue,
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(lines, id),
+    isReleasedHumanTask: releasedHumanTaskPredicate(plan, lines),
   };
   const classifications: InboxClassification[] = proposals.map((p) => classifyProposal(p, drafts[p.id], ctx));
   const readyCount = classifications.filter((c) => c.state === "ready").length;
