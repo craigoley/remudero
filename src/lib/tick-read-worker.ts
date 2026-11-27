@@ -3689,10 +3689,7 @@ export function buildEscalationReconcileCandidates(
     // W1-T14998: an issue filed in a shared escalation pool (another repository than this code repository) is this
     // reconciler's only when it records this code repository and names no other's PR: its task id and PR number are
     // resolved HERE, so another repository's PR-<n> would otherwise be closed by this repository's PR #<n>.
-    if (!pooledIssueIsCodeRepositorys(issue, codeRepository)) {
-      log?.("sweep.escalation_reconcile.other_repository", { issue_url: issue.url, code_repository: codeRepository });
-      continue;
-    }
+    if (!pooledIssueIsCodeRepositorys(issue, codeRepository)) continue; // another repository's: its own reconciler's
     const taskId = escalationTaskId(issue.body);
     if (!taskId) {
       intake.droppedNoTaskTrailer++;
