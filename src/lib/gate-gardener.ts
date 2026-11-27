@@ -186,7 +186,8 @@ export function renderFalsePositiveShard(action: GateGardenAction, taskId: strin
     invariants: { declared: [{ slug: "gate-still-refuses-its-defect",
       statement: `${rule.gate} still refuses the defect it was written for; the repair admits the healthy case and nothing else.`,
       claim: `The defect ${rule.gate} was written to catch is still refused by ${rule.symbol} after the repair.`,
-      proof: `unit test: ${taskId}: ${rule.symbol} still refuses the defect its gate was written for` }] },
+      proof: `unit test: ${taskId}: ${rule.symbol} still refuses the defect its gate was written for`,
+      guard: true }] }, // W1-T14924: the gate refuses its defect today
     rationale: [`Gate ${rule.gate}, PR #${pair.pr}: ${pair.redSha} -> ${pair.greenSha}; classification ${classification}.`,
       `Repair the recognizer ${rule.symbol} in ${rule.recognizer}. Gate-owned files: ${rule.ownFiles.join(", ")}.`,
       "Measure the gate's suspect repair rate after the remedy merges; lowering that rate is the effect.",
@@ -931,7 +932,8 @@ export function renderHeadroomShard(f: HeadroomFinding, taskId: string) {
     invariants: { declared: [{ slug: "gate-limit-not-raised",
       statement: `the ${f.gate} gate still refuses what it refused before: ${f.field} in ${f.limitFile} is not raised above ${f.limit}.`,
       claim: `${f.field} in ${f.limitFile} is at most ${f.limit} after the cleanup.`,
-      proof: `unit test: ${taskId}: ${f.gate} ${f.field} limit is not raised` }] },
+      proof: `unit test: ${taskId}: ${f.gate} ${f.field} limit is not raised`,
+      guard: true }] }, // W1-T14924: the limit holds today
     rationale: [
       `Measured ${f.measured} against the limit ${f.limit} (${f.field} in ${f.limitFile}).`,
       f.raised ? `Commit ${f.raised.commit} on main raised it ${f.raised.detail} in the last ${HEADROOM_WINDOW_DAYS} days; the census refuses any growth past it.`
@@ -998,7 +1000,8 @@ export function renderCommentCompressionShard(finding: CommentCompressionFinding
       statement: `${finding.file} runs the same code after the compression; only its comment lines change.`,
       claim: `A regression named for this task compares ${finding.file} with its pre-compression source through the shared comparator, so a changed statement fails it.`,
       // Never `grep: assertSameTokens`: a file compressed before already has its pin test, so that pattern matches at base.
-      proof: `grep: test("${taskId}: the compressed file keeps its executable tokens" in ${testFile}` }] },
+      proof: `grep: test("${taskId}: the compressed file keeps its executable tokens" in ${testFile}`,
+      guard: true }] }, // W1-T14924: preserves the file's executable code
     rationale: [
       `Observed ${finding.comments} comment lines in ${finding.file}. This is maintenance debt, never a merge ceiling.`,
       "Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.",

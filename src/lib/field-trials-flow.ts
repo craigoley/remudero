@@ -38,7 +38,7 @@ import { quarantinedLedgerFingerprints } from "./field-trials-ledger-quarantine.
 import { loadConfig } from "./config.js";
 import { ghInteractiveRead } from "./github-transport.js";
 import { startInstallationTokenRefresh } from "./github-app.js";
-import { syncFieldNoteSiteImport, type FieldNoteExport, type SiteImportOutcome, type SiteRelease } from "./field-trials-site-import.js";
+import { coreVerifiedOutcomeReceipts, syncFieldNoteSiteImport, type FieldNoteExport, type SiteImportOutcome, type SiteRelease } from "./field-trials-site-import.js";
 import { BENCHMARK_PAID_PILOT_VERSION, loadPaidPilotProtocol } from "./benchmark-paid-pilot.js";
 import { parseRefreshSteps, recordFieldTrialsRefresh, refreshSection, type FieldTrialsRefresh, type RefreshStep } from "./field-trials-refresh.js";
 import type { IssueGateway } from "./escalate.js";
@@ -1641,11 +1641,13 @@ function fieldNoteMode(args: { outDir: string; out: string; nowIso: string; json
  * the pass's field-trials.refresh row; it never changes the refresh's exit code.
  */
 async function siteImportPass(args: { outDir: string; nowIso: string; consent: FieldTrialsConsent | string | null; offline: boolean;
-  deps: Parameters<typeof syncFieldNoteSiteImport>[1] | undefined }): Promise<SiteImportOutcome> {
+  cohortIndexPath: string; deps: Parameters<typeof syncFieldNoteSiteImport>[1] | undefined }): Promise<SiteImportOutcome> {
   const outcome: SiteImportOutcome = args.consent === null ? { state: "withheld", reason: "no-consent-receipt" }
     : typeof args.consent === "string" ? { state: "withheld", reason: args.consent }
     : args.offline ? { state: "withheld", reason: "offline-pass" }
     : await syncFieldNoteSiteImport({ workRoot: join(args.outDir, "site-import"), nowIso: args.nowIso,
+      // W1-T14985: the core ledger's cohort index, authorised only by core's own live aggregate receipt.
+      verifiedOutcome: { cohortIndexPath: args.cohortIndexPath, receipts: coreVerifiedOutcomeReceipts(args.consent.repos) },
       exportCandidate: (released): FieldNoteExport => {
         const result = exportFieldNoteCandidate({ outDir: args.outDir, out: join(args.outDir, "field-note-candidate-latest.json"),
           nowIso: args.nowIso, consent: args.consent, registryPath: undefined, released });
@@ -1886,7 +1888,8 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
     print("  observational only: no causal claim, no routing change, nothing published");
   }
   if (refreshSteps && snapshot.state !== "unavailable") {
-    const siteImport = await siteImportPass({ outDir, nowIso, consent, offline: values.offline === true, deps: input.siteImport });
+    const siteImport = await siteImportPass({ outDir, nowIso, consent, offline: values.offline === true, deps: input.siteImport,
+      cohortIndexPath: join(defaultLedgers.get("core") ?? join(config.root, "state"), "benchmark-cohort-index.json") });
     if (values.json !== true) print(`  site import: ${siteImport.state}${"reason" in siteImport ? ` (${siteImport.reason})` : ""}`
       + `${"prUrl" in siteImport ? ` ${siteImport.pr} ${siteImport.prUrl}` : ""}`);
     recordFieldTrialsRefresh({ ...refreshInput, steps: refreshSteps, snapshotAsOf: snapshot.asOf, siteImport });
