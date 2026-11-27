@@ -23,8 +23,9 @@
 import { execFileSync } from "node:child_process";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 import { runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, sep } from "node:path";
+import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { lstat, readdir, rm } from "node:fs/promises";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import type { Config } from "./config.js";
 import { DEFAULT_WORKTREE_REAP_GRACE_MS, reviewWorktreeHoldState, worktreesDir, worktreeRemove, worktreeRemoveAsync } from "./worker.js";
@@ -35,6 +36,10 @@ export { holdReviewWorktree, releaseReviewWorktree, reviewWorktreeIsHeld } from 
  *  derives BOTH from the name alone, never from a walk of the tree's own mtimes, because a review
  *  worktree is a read-only checkout that nothing legitimately touches after creation. */
 const REVIEW_WORKTREE_NAME = /^review-PR(\d+)-(\d+)$/;
+
+/** W1-T14928: the other trees the daemon cuts under its worktrees root: a run's `<run-id>-source` view
+ *  (src/run-task.ts) and reviewer-health's `healed-*` trees. Only an unregistered one is ever reclaimed. */
+const DAEMON_RUN_TREE_NAME = /^(?:run-[A-Za-z0-9._-]+-source|healed-[0-9A-Za-z]+)$/;
 
 /** Reused rather than a second policy constant: the same "a linked worktree might still be doing
  *  something" grace window {@link DEFAULT_WORKTREE_REAP_GRACE_MS} already protects the general
@@ -61,7 +66,9 @@ export type ReviewWorktreeSweepReason =
   /** THIS process materialized it and has not torn it down — a live review, whatever its age. */
   | "live-review"
   /** Shared ownership was unreadable; a missing owner has not been established. */
-  | "review-ownership-unknown";
+  | "review-ownership-unknown"
+  /** W1-T14928: its admin directory is gone, but the clone still lists it. */
+  | "registered";
 
 export interface ReviewWorktreeSweepOutcome {
   name: string;
@@ -96,6 +103,12 @@ export interface ReviewWorktreeSweepOptions {
   removeWorktree?: (repoDir: string, worktreePath: string) => void;
   /** Whether THIS process is still reviewing in the candidate. Defaults to {@link reviewWorktreeIsHeld}. */
   isLive?: (worktreePath: string) => boolean;
+  /** W1-T14928: the clone's registered worktree paths. `undefined` = unreadable. */
+  listRegisteredWorktrees?: (repoDir: string) => string[] | undefined;
+  /** W1-T14928: removes an unregistered tree, which `git worktree remove` cannot. */
+  removeUnregisteredTree?: (path: string) => void;
+  /** W1-T14928: the bytes a tree holds, for the ledger row. */
+  measureTreeBytes?: (path: string) => number;
 }
 
 /**
@@ -113,23 +126,31 @@ export interface ReviewWorktreeSweepOptions {
  * no `finally` is pending for. Called once per daemon tick (src/lib/daemon.ts); see this module's
  * header for the full defect and design.
  */
-export type ReviewWorktreeSweepAsyncOptions = Omit<ReviewWorktreeSweepOptions, "readHeadSha" | "readRemoteHeadSha" | "removeWorktree"> & {
+type AsyncPorted = "readHeadSha" | "readRemoteHeadSha" | "removeWorktree" | "listRegisteredWorktrees" | "removeUnregisteredTree" | "measureTreeBytes";
+export type ReviewWorktreeSweepAsyncOptions = Omit<ReviewWorktreeSweepOptions, AsyncPorted> & {
   readHeadSha?: (worktreePath: string) => string | undefined | Promise<string | undefined>;
   readRemoteHeadSha?: (repoDir: string, prNumber: number) => string | undefined | Promise<string | undefined>;
   removeWorktree?: (repoDir: string, worktreePath: string) => void | Promise<void>;
+  listRegisteredWorktrees?: (repoDir: string) => string[] | undefined | Promise<string[] | undefined>;
+  removeUnregisteredTree?: (path: string) => void | Promise<void>;
+  measureTreeBytes?: (path: string) => number | Promise<number>;
 };
-type ReviewSweepGitPorts = Required<Pick<ReviewWorktreeSweepAsyncOptions, "readHeadSha" | "readRemoteHeadSha" | "removeWorktree">>;
+type ReviewSweepGitPorts = Required<Pick<ReviewWorktreeSweepAsyncOptions, AsyncPorted>>;
 
 export function sweepStrandedReviewWorktrees(config: Config, log: (step: string, extra?: Record<string, unknown>) => void,
   opts: ReviewWorktreeSweepOptions = {}): ReviewWorktreeSweepSummary {
   return runStepsSync(strandedReviewWorktreeSteps(config, log, opts,
-    { readHeadSha: defaultReadHeadSha, readRemoteHeadSha: defaultReadRemoteHeadSha, removeWorktree: worktreeRemove }, false));
+    { readHeadSha: defaultReadHeadSha, readRemoteHeadSha: defaultReadRemoteHeadSha, removeWorktree: worktreeRemove,
+      listRegisteredWorktrees: defaultListRegisteredWorktrees, removeUnregisteredTree: (p) => rmSync(p, { recursive: true, force: true }),
+      measureTreeBytes: treeBytes }, false));
 }
 
 export function sweepStrandedReviewWorktreesAsync(config: Config, log: (step: string, extra?: Record<string, unknown>) => void,
   opts: ReviewWorktreeSweepAsyncOptions = {}): Promise<ReviewWorktreeSweepSummary> {
   return runStepsAsync(strandedReviewWorktreeSteps(config, log, opts,
-    { readHeadSha: defaultReadHeadShaAsync, readRemoteHeadSha: defaultReadRemoteHeadShaAsync, removeWorktree: worktreeRemoveAsync }, true));
+    { readHeadSha: defaultReadHeadShaAsync, readRemoteHeadSha: defaultReadRemoteHeadShaAsync, removeWorktree: worktreeRemoveAsync,
+      listRegisteredWorktrees: defaultListRegisteredWorktreesAsync, removeUnregisteredTree: (p) => rm(p, { recursive: true, force: true }),
+      measureTreeBytes: treeBytesAsync }, true));
 }
 
 function* strandedReviewWorktreeSteps(config: Config, log: (step: string, extra?: Record<string, unknown>) => void,
@@ -154,6 +175,9 @@ function* strandedReviewWorktreeSteps(config: Config, log: (step: string, extra?
   const readHeadSha = opts.readHeadSha ?? defaults.readHeadSha;
   const readRemoteHeadSha = opts.readRemoteHeadSha ?? defaults.readRemoteHeadSha;
   const removeWorktree = opts.removeWorktree ?? defaults.removeWorktree;
+  const listRegistered = opts.listRegisteredWorktrees ?? defaults.listRegisteredWorktrees;
+  const removeTree = opts.removeUnregisteredTree ?? defaults.removeUnregisteredTree;
+  const measureBytes = opts.measureTreeBytes ?? defaults.measureTreeBytes;
   const holdState = opts.isLive
     ? (path: string) => opts.isLive!(path) ? "held" : "unheld"
     : reviewWorktreeHoldState;
@@ -165,6 +189,34 @@ function* strandedReviewWorktreeSteps(config: Config, log: (step: string, extra?
     log("review_worktree.sweep.kept", { name, reason, ...extra });
   };
 
+  type Verdict = { kind: "resolvable" } | { kind: "kept"; reason: ReviewWorktreeSweepReason } | { kind: "eligible" };
+  // INVARIANT registered-and-young-kept: only a tree whose admin directory is gone, absent from the
+  // clone's worktree list, unheld and past the grace is eligible.
+  function* unregisteredTreeVerdict(path: string): Steps<Verdict> {
+    const pointer = readGitPointer(path);
+    if (!pointer || existsSync(pointer.adminDir)) return { kind: "resolvable" };
+    if (!existsSync(join(pointer.repoDir, ".git"))) return { kind: "kept", reason: "git-unreadable" };
+    const newest = newestMtimeMs(path);
+    if (newest === undefined || clock.now() - newest < graceMs) return { kind: "kept", reason: "too-young" };
+    const owner = holdState(path);
+    if (owner !== "unheld") return { kind: "kept", reason: owner === "held" ? "live-review" : "review-ownership-unknown" };
+    const registered = yield* step(() => listRegistered(pointer.repoDir));
+    if (registered === undefined) return { kind: "kept", reason: "git-unreadable" };
+    if (registered.some((p) => resolve(p) === resolve(path))) return { kind: "kept", reason: "registered" };
+    return { kind: "eligible" };
+  }
+  function* reclaimUnregistered(name: string, path: string): Steps<void> {
+    if (recheckOwnership && holdState(path) !== "unheld") { keep(name, path, "live-review"); return; }
+    try {
+      const bytes = yield* step(() => measureBytes(path));
+      yield* step(() => removeTree(path));
+      reclaimed.push(name);
+      log("review_worktree.sweep.reclaimed", { name, path, bytes, kind: "unregistered" });
+    } catch (e) {
+      keep(name, path, "removal-failed", { error: String((e as Error)?.message ?? e) });
+    }
+  }
+
   let names: string[];
   try {
     names = listEntries(root);
@@ -174,7 +226,16 @@ function* strandedReviewWorktreeSteps(config: Config, log: (step: string, extra?
 
   for (const name of names) {
     const m = REVIEW_WORKTREE_NAME.exec(name);
-    if (!m) continue; // closed to review worktrees BY CONSTRUCTION — coverage/, rmd-*, anything else is never a candidate
+    if (!m) {
+      // W1-T14928: a run tree is considered only once git no longer resolves it; any other name never is.
+      if (!DAEMON_RUN_TREE_NAME.test(name) || !isDirectory(join(root, name))) continue;
+      const path = join(root, name);
+      const verdict = yield* unregisteredTreeVerdict(path);
+      if (verdict.kind === "resolvable") continue;
+      if (verdict.kind === "kept") { keep(name, path, verdict.reason); continue; }
+      yield* reclaimUnregistered(name, path);
+      continue;
+    }
     const prNumber = Number(m[1]);
     const createdAtMs = Number(m[2]);
     const path = join(root, name);
@@ -197,7 +258,9 @@ function* strandedReviewWorktreeSteps(config: Config, log: (step: string, extra?
     }
     const localHead = yield* step(() => readHeadSha(path));
     if (!localHead) {
-      keep(name, path, "git-unreadable");
+      const verdict = yield* unregisteredTreeVerdict(path);
+      if (verdict.kind === "eligible") yield* reclaimUnregistered(name, path);
+      else keep(name, path, "git-unreadable");
       continue;
     }
     const remoteHead = yield* step(() => readRemoteHeadSha(repoDir, prNumber));
@@ -299,4 +362,71 @@ function defaultReadRemoteHeadSha(repoDir: string, prNumber: number): string | u
   }
   const sha = out.split(/\s+/)[0]?.trim();
   return sha ? sha : undefined;
+}
+
+/** W1-T14928: a linked tree's `.git` pointer, its admin directory and its clone. `undefined` when `.git` is not
+ *  a pointer file naming a `<clone>/.git/worktrees/<id>` directory. */
+function readGitPointer(path: string): { adminDir: string; repoDir: string } | undefined {
+  let raw: string;
+  try {
+    if (!lstatSync(join(path, ".git")).isFile()) return undefined;
+    raw = readFileSync(join(path, ".git"), "utf8");
+  } catch (e) {
+    console.error(`review-worktree-reclaim: could not read ${join(path, ".git")} (${String((e as Error)?.message ?? e)})`);
+    return undefined;
+  }
+  const m = raw.match(/^gitdir:\s*(.+?)\s*$/m);
+  if (!m) return undefined;
+  const adminDir = isAbsolute(m[1]) ? m[1] : resolve(path, m[1]);
+  const marker = `${sep}.git${sep}worktrees${sep}`;
+  const idx = adminDir.indexOf(marker);
+  return idx === -1 ? undefined : { adminDir, repoDir: adminDir.slice(0, idx) };
+}
+
+/** The newest of the tree root's and its `.git` pointer's mtimes. `undefined` = unreadable. */
+function newestMtimeMs(path: string): number | undefined {
+  try {
+    return Math.max(statSync(path).mtimeMs, lstatSync(join(path, ".git")).mtimeMs);
+  } catch (e) {
+    console.error(`review-worktree-reclaim: could not stat ${path} (${String((e as Error)?.message ?? e)})`);
+    return undefined;
+  }
+}
+
+function parseWorktreeList(out: string): string[] {
+  return out.split("\n").filter((l) => l.startsWith("worktree ")).map((l) => l.slice("worktree ".length).trim());
+}
+
+function defaultListRegisteredWorktrees(repoDir: string): string[] | undefined {
+  try {
+    return parseWorktreeList(hostWorktreeGit(repoDir, ["worktree", "list", "--porcelain"]));
+  } catch (e) {
+    console.error(`review-worktree-reclaim: could not list worktrees of ${repoDir} (${String((e as Error)?.message ?? e)})`);
+    return undefined;
+  }
+}
+
+async function defaultListRegisteredWorktreesAsync(repoDir: string): Promise<string[] | undefined> {
+  try { return parseWorktreeList(await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"])); }
+  catch (e) {
+    console.error(`review-worktree-reclaim: could not list worktrees of ${repoDir} (${String((e as Error)?.message ?? e)})`);
+    return undefined;
+  }
+}
+
+/** Bytes under `path`, symlinks counted as links, never followed. */
+function treeBytes(path: string): number {
+  const st = lstatSync(path);
+  if (!st.isDirectory()) return st.size;
+  let total = 0;
+  for (const entry of readdirSync(path)) total += treeBytes(join(path, entry));
+  return total;
+}
+
+async function treeBytesAsync(path: string): Promise<number> {
+  const st = await lstat(path);
+  if (!st.isDirectory()) return st.size;
+  let total = 0;
+  for (const entry of await readdir(path)) total += await treeBytesAsync(join(path, entry));
+  return total;
 }
