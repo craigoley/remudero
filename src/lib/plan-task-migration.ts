@@ -550,6 +550,36 @@ export function publicReferences(tasks: ReadonlyArray<Task>): Set<string> {
   return new Set(tasks.flatMap(task => [...task.depends_on, ...(task.superseded_by === undefined ? [] : [task.superseded_by])]));
 }
 
+/** W1-T14993: the reservation evidence a moving record whose id has no refs/rmd-id ref carries in its receipts. */
+export const heldAtBase = (publicCommit: string) => `held-at=remudero@${publicCommit}`;
+/** W1-T14993 (operator ruling 2026-11-26T15:10:25Z, "match the ops gate's rule"): what proves a moving record's id. Its
+ *  refs/rmd-id ref when one exists; otherwise, as ops-gate check_reserved exempts a verified move, the public plan holding
+ *  the id at the move's base proves it (ids before W1-T4217 predate reservations). Undefined when neither does. */
+export function moveReservation(id: string, publicRefs: ReadonlyMap<string, string>, base: { commit: string; ids: { has(id: string): boolean } }): string | undefined {
+  return publicRefs.get(`refs/rmd-id/${id}`) ?? (base.ids.has(id) ? heldAtBase(base.commit) : undefined);
+}
+
+/** W1-T14993: the roots and skipped folders scripts/task-id-existence-check.mjs scans for cited ids. */
+const CITATION_ROOTS = ["src", "deploy", "plan"];
+const CITATION_SKIPPED = new Set(["node_modules", "dist", "build", ".git", "coverage"]);
+/** W1-T14993: the public files at `commit` that would still cite `id` once the paths in `leaving` are removed, as
+ *  task-id-existence reads them (a whole-word id under its roots; its baseline exempts an id). A record held only at the
+ *  base resolves through its own shard, so its removal is refused by that gate whenever this is non-empty. */
+export async function unresolvedCitations(root: string, commit: string, id: string, leaving: ReadonlySet<string>): Promise<string[]> {
+  const git = defaultGitRunnerAsync(root);
+  const grep = ["grep", "-I", "-l", "-w", "-F", "-e", id, commit, "--", ...CITATION_ROOTS];
+  const found = await exitOf(git, ["grep", "-q", ...grep.slice(1)]);
+  if (found === 1) return [];
+  if (found !== 0) return unknown("citation_unreadable");
+  const cited = (await git(grep)).split("\n").filter(Boolean).map(line => line.slice(commit.length + 1))
+    .filter(path => !leaving.has(path) && !path.split("/").some(part => CITATION_SKIPPED.has(part)));
+  if (cited.length === 0) return [];
+  const baseline = "scripts/task-id-existence-baseline.json";
+  if (await exitOf(git, ["cat-file", "-e", `${commit}:${baseline}`]) !== 0) return cited;
+  const rows = JSON.parse(await git(["show", `${commit}:${baseline}`])) as Array<{ id?: unknown }>;
+  return rows.some(row => row.id === id) ? [] : cited;
+}
+
 /** The selection the preview verb prints (W1-T13680 exports it for `rmd move-task`): pinned catalogs, ownership, the
  *  merge-credit search and a stable re-read. It throws {@link PreviewUnknown} on any unread or changed evidence.
  *  W1-T14345: it fills a batch of open tasks, oldest filing first, that the ops catalog has room for; a batch of one is
@@ -568,6 +598,7 @@ export async function selectPlanTaskMigration(
   const control = [...initial.recent].reverse().find(pr => taskIdFromRunBranch(String(pr.headRefName)) !== undefined);
   const refused: Array<{ id: string; reason: string }> = [];
   const publicPrerequisites = publicReferences(pub.plan.tasks);
+  const atBase = { commit: o.publicCommit, ids: pub.plan.byId };
   // Oldest filing first; records filed in one commit keep the reverse dispatch order the preview always read.
   const ranks = await filingRanks(o.publicRoot, o.publicCommit, [...new Set([...pub.originals.values()].filter(x => x.shard).map(x => dirname(x.path)))]);
   const rank = (task: Task) => ranks.get(pub.originals.get(task.id)!.path) ?? Number.MAX_SAFE_INTEGER;
@@ -595,7 +626,7 @@ export async function selectPlanTaskMigration(
     // W1-T14858: the ops gate judges a record as moved history by its status alone, so a retired record whose status is
     // still open-shaped (blocked, queued) is moved live work there and must pass the shape rules.
     if (!OPS_GATE_HISTORY_STATUSES.has(t.status) && opsGateShapeRefused(orig)) return "ops_gate_shape";
-    if (!publicRefs.has(`refs/rmd-id/${t.id}`)) return "reservation_absent";
+    if (moveReservation(t.id, publicRefs, atBase) === undefined) return "reservation_absent";
     return undefined;
   };
   /** The record's group, or undefined when any member cannot move or would leave a superseded_by unresolved in ops. */
@@ -630,11 +661,20 @@ export async function selectPlanTaskMigration(
     // exclude the mover's moved_from line, so a release survives the move. W1-T14424: an open record
     // the ops gate's moved-live rules refuse would fail the whole batch's copy, so it is left out before any lookup.
     const unmovable = !OPEN_STATUSES.has(task.status) ? "not_open" : opsGateShapeRefused(original) ? "ops_gate_shape" :
-      !publicRefs.has(`refs/rmd-id/${task.id}`) ? "reservation_absent" : undefined;
+      moveReservation(task.id, publicRefs, atBase) === undefined ? "reservation_absent" : undefined;
     if (unmovable) { refused.push({ id: task.id, reason: unmovable }); continue; }
     if (!control) return unknown("merge_credit_control_unreadable");
     // W1-T14825: an unnamed record is a group of one, selected exactly as before.
     const group = publicPrerequisites.has(task.id) ? groupOf(task)! : [task];
+    // W1-T14993: a member with no reservation ref resolves only through its own shard, so it moves only when its removal
+    // (with the batch's) leaves no public citation of its id for task-id-existence to refuse.
+    const leaving = new Set([...batch.map(m => String(m.sourcePath)), ...group.map(m => pub.originals.get(m.id)!.path)]);
+    let cited = false;
+    for (const member of group) {
+      if (publicRefs.has(`refs/rmd-id/${member.id}`)) continue;
+      if ((await unresolvedCitations(o.publicRoot, o.publicCommit, member.id, leaving)).length > 0) { cited = true; break; }
+    }
+    if (cited) { refused.push({ id: task.id, reason: group.length > 1 ? "group_citation_unresolved" : "citation_unresolved" }); continue; }
     let groupRefused: string | undefined;
     const carrying = [...carried];
     for (const member of group) {

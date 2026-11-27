@@ -546,6 +546,8 @@ export type ProofSkipReason =
  * TRAP W1-T267: workerKeychainPaths' unrelated pre-work hits falsely substantiated the claim.
  * inconclusive_load (W1-T11132): timeout/signal/exec_error, or failure despite hosted CI passing this
  * file/head; neither met nor unmet, PENDING until lower-load review.
+ * sandbox_start_failed (W1-T15100): the proof sandbox's start check failed again when re-run on the next fold pass;
+ * the proof's code never ran, so it is neither met nor unmet, and the next sweep pass re-reviews it at any load.
  * Rationale: docs/forensics/review.md#second-pass-2026-09-06. */
 export type ProofExecOutcome =
   | "executed_pass"
@@ -554,6 +556,7 @@ export type ProofExecOutcome =
   | "exec_error"
   | "cannot_evaluate"
   | "inconclusive_load"
+  | "sandbox_start_failed"
   | "executed_stale"
   | "base_unreadable"
   | "not_yet_built"
@@ -708,6 +711,8 @@ export interface CriterionVerdict {
   reviewerUnavailable?: string;
   /** Host load at the start and end of a proof that did not pass (W1-T11132): the sweep's re-review reads it. */
   load?: ProofLoadRecord;
+  /** W1-T15100: bwrap's own stderr, exit code, signal and bind-source state when `proof_exec` is `sandbox_start_failed`. */
+  sandboxStartFailure?: SandboxStartFailure;
   cause?: "promise-harvest-incomplete";
   /** The reviewer sandbox's own output for an `executed_fail` proof ({@link proofFailureExcerpt}): command, exit
    *  status and output tail. #10555's fix rounds saw only `reason` and could not reproduce a reviewer-only red. */
@@ -2255,9 +2260,35 @@ export type ProofSandboxStatus = { mode: "bwrap"; binary: string } | { mode: "un
 /** A sandbox that could not start for THIS proof. Unit-test proofs are `inconclusive_load`; other proofs remain
  *  `not_executable`: the proof's code was not run, so nothing was learned about the criterion. */
 export class ProofSandboxUnavailableError extends RmdError {
-  constructor(readonly sandboxReason: string) {
+  constructor(readonly sandboxReason: string, readonly startFailure?: SandboxStartFailure) {
     super("usage", GENERIC_EXIT_CODE, `proof sandbox could not start: ${sandboxReason}`, { sandboxReason });
   }
+}
+
+/** W1-T15100: what a failed sandbox start check left behind. The check ran the REAL sandbox argv around node, so
+ *  bwrap's own stderr, its exit code or signal, and which bind sources existed at that moment are the evidence the
+ *  intermittent start failure (about 13% of executions on 2026-11-27, cause unknown) is diagnosed from. */
+export interface SandboxStartFailure {
+  stderr: string;
+  exitCode: number | null;
+  signal: string | null;
+  bindSources: Array<{ path: string; existed: boolean }>;
+}
+
+/** The {@link SandboxStartFailure} of a start check's spawn error, its bind sources read from the check's own argv. */
+export function sandboxStartFailure(error: unknown, args: readonly string[], exists: (path: string) => boolean = existsSync): SandboxStartFailure {
+  const err = error as { stderr?: string | Buffer | null; status?: number | null; code?: unknown; signal?: string | null };
+  const stderr = typeof err.stderr === "string" ? err.stderr : (err.stderr?.toString("utf8") ?? "");
+  // execFileSync reports the exit code as `status`; execFile's callback error carries it as a numeric `code`.
+  const exitCode = typeof err.status === "number" ? err.status : typeof err.code === "number" ? err.code : null;
+  const sources = new Set<string>();
+  for (let i = 0; i < args.length - 1; i++) if (args[i] === "--bind" || args[i] === "--ro-bind") sources.add(args[i + 1]!);
+  return { stderr, exitCode, signal: err.signal ?? null, bindSources: [...sources].map((path) => ({ path, existed: exists(path) })) };
+}
+
+/** The start-check failure a proof error carries, or undefined for any other error. */
+export function sandboxStartFailureOf(error: unknown): SandboxStartFailure | undefined {
+  return error instanceof ProofSandboxUnavailableError ? error.startFailure : undefined;
 }
 
 /** The proof's working directory no longer exists (W1-T7822) — a reclaimed review worktree, say. Node raises ENOENT for a
@@ -2677,7 +2708,7 @@ function startCheckSync(child: PreparedProofChild, cwd: string): void {
       encoding: "utf8",
     });
   } catch (error) {
-    throw new ProofSandboxUnavailableError(spawnFailureText(error));
+    throw new ProofSandboxUnavailableError(spawnFailureText(error), sandboxStartFailure(error, child.startCheck!.args));
   }
 }
 
@@ -2691,7 +2722,7 @@ async function startCheckAsync(child: PreparedProofChild, cwd: string): Promise<
       killSignal: "SIGKILL",
     });
   } catch (error) {
-    throw new ProofSandboxUnavailableError(spawnFailureText(error));
+    throw new ProofSandboxUnavailableError(spawnFailureText(error), sandboxStartFailure(error, child.startCheck!.args));
   }
 }
 
@@ -4854,6 +4885,8 @@ export function judgeCriterion(
   let proofSkip: ProofSkipReason | undefined;
   // W1-T11132: the host load around a proof that did not pass, so a re-review can tell "failed under load" apart.
   let proofLoad: ProofLoadRecord | undefined;
+  // W1-T15100: what a failed sandbox start check left behind, recorded on the verdict.
+  let startFailure: SandboxStartFailure | undefined;
   // W1-T9860: a cited test path absent at the head is resolved by its unique basename, and the verdict says so.
   let resolutionNote: string | undefined;
   if (execCtx) {
@@ -5079,6 +5112,19 @@ export function judgeCriterion(
             proofExec = "not_executable";
             proofSkip = "cwd-missing";
             reason = `${reason} — NOTE: ${e.message}; not executed, keyword floor applied`;
+          } else if (e instanceof ProofSandboxUnavailableError && e.startFailure !== undefined) {
+            // W1-T15100: the start check failed again on its re-run; the proof's code never ran, whatever its kind. Not a
+            // load verdict, and never the keyword floor: a `grep:` proof is held and re-run exactly like a `unit test:`.
+            proofExec = "sandbox_start_failed";
+            proofSkip = "runner-absent";
+            startFailure = e.startFailure;
+            proofLoad = whitelisted.executionLoad;
+            met = false;
+            const exit = startFailure.signal ? `signal ${startFailure.signal}` : `exit ${startFailure.exitCode ?? "unknown"}`;
+            const missing = startFailure.bindSources.filter((b) => !b.existed).map((b) => b.path);
+            reason = `${reason} — NOTE: the proof sandbox's start check failed (${exit}; bwrap stderr: ` +
+              `${startFailure.stderr.trim() || "(empty)"}; missing bind sources: ${missing.join(", ") || "none"}); ` +
+              `sandbox_start_failed, not an unmet criterion — the next pass re-runs it`;
           } else if (e instanceof ProofSandboxUnavailableError) {
             proofSkip = "runner-absent";
             if (whitelisted.kind === "test") {
@@ -5203,6 +5249,7 @@ export function judgeCriterion(
   return {
     ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, ...(loadError ? { loadError } : {}),
     ...(proofLoad !== undefined ? { load: proofLoad } : {}),
+    ...(startFailure !== undefined ? { sandboxStartFailure: startFailure } : {}),
     ...(clauseChars !== undefined ? { clauseChars } : {}),
     ...(downgradeClass !== undefined ? { downgrade_class: downgradeClass } : {}),
     ...(followUp !== undefined ? { followUp } : {}),
@@ -6449,7 +6496,11 @@ export function memoizeAsyncProofExecutor(exec: AsyncProofExecutor, sample: () =
     let observation = identity ? observations.get(key) : undefined;
     if (!observation) {
       uniqueRuns++;
-      observation = observe();
+      // W1-T15100: a failed sandbox start check is never reused — the next request re-runs it.
+      observation = observe().then((o) => {
+        if ("error" in o && sandboxStartFailureOf(o.error) !== undefined && observations.get(key) === observation) observations.delete(key);
+        return o;
+      });
       if (identity) observations.set(key, observation);
     } else reuses++;
     const prior = await observation;
@@ -6731,7 +6782,8 @@ export function judgeReview(
 
   // W1-T11132: an `inconclusive_load` proof concluded nothing, so it is never an unmet criterion — it holds the verdict
   // PENDING (like `cannot_evaluate`) and triggers no fix round. A conclusive failure elsewhere still fails the review.
-  const inconclusiveLoad = verdicts.some((v) => v.proof_exec === "inconclusive_load");
+  // W1-T15100: a `sandbox_start_failed` proof never ran either, so it holds the verdict pending the same way.
+  const inconclusiveLoad = verdicts.some((v) => v.proof_exec === "inconclusive_load" || v.proof_exec === "sandbox_start_failed");
   const unmet = unmetReviewCriteria(verdicts);
   // W1-T14195: the diff is recomputed here from `evidence.diff`, never taken from the verdict's word.
   const moverRemovalAdmitted = criteria.length === 0 && evidence.moverRemoval?.verified === true &&
@@ -6739,7 +6791,7 @@ export function judgeReview(
   const noCriteria = criteria.length === 0 && !moverRemovalAdmitted;
   // W1-T2221: hoisted ahead of `state` (was computed only for `floorState`) so `state` can consult it on a plan-only
   // diff — see `unmetForState`.
-  const floorUnmet = verdicts.filter((v) => !(v.floorMet ?? v.met) && v.proof_exec !== "inconclusive_load");
+  const floorUnmet = verdicts.filter((v) => !(v.floorMet ?? v.met) && !proofConcludedNothing(v.proof_exec));
   // On a plan-only diff, `state` is decided on the FLOOR: a semantic downgrade alone must never fail a filing that has
   // no code for the semantic lane to judge (W1-T2221 design (ii)). `planOnly` is the exemption, never "a proof
   // happened not to execute" — the same shape `criteriaTampered` uses. A code diff is byte-identical: `unmetForState
@@ -6834,8 +6886,10 @@ export function judgeReview(
         ? `remudero-review: cannot-evaluate — ${visibleCriteria(verdicts).find(v => v.loadError)?.loadError ?? "proof test files could not load"}`
         : reviewerUnavailable !== undefined
         ? `remudero-review: cannot-evaluate — reviewer unable: ${reviewerUnavailable}`
-        : inconclusiveLoad && !cannotEvaluate
+        : inconclusiveLoad && !cannotEvaluate && verdicts.some((v) => v.proof_exec === "inconclusive_load")
         ? "remudero-review: inconclusive-load — a proof concluded nothing under host load; re-reviewed when load falls"
+        : inconclusiveLoad && !cannotEvaluate
+        ? "remudero-review: sandbox-start-failed — a proof's sandbox failed its start check; re-run on the next pass"
         : `remudero-review: promise-harvest-incomplete — ${promiseObservation?.state === "unknown" ? promiseObservation.reason : "harvest unfinished"}`).slice(0, 140)
       : state === "success"
       ? planOnly
@@ -6930,7 +6984,7 @@ function proofRecordMark(): ProofRecordMark {
   return { unsandboxed: unsandboxedProofSpawns, cpuWaitMs: proofCpuWaitMs };
 }
 
-type ProofObservation =
+export type ProofObservation =
   | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string; failureOutput?: string; failureTail?: string; load?: ProofLoadRecord }
   | { error: unknown; load?: ProofLoadRecord };
 
@@ -7001,6 +7055,16 @@ function primeBaseCheckoutEarly(
 }
 
 const PROOF_EXECUTION_STEP = "review.proof_execution";
+
+/** A review.proof_execution row's outcome: a failed sandbox start check is `sandbox_start_failed` and carries bwrap's
+ *  stderr, exit code, signal and each bind source's existence (W1-T15100); any other error is `error`. */
+export function proofExecutionOutcome(observation: ProofObservation): Record<string, unknown> {
+  if (!("error" in observation)) return { outcome: observation.outcome };
+  const failure = sandboxStartFailureOf(observation.error);
+  if (failure === undefined) return { outcome: "error" };
+  return { outcome: "sandbox_start_failed", sandbox_stderr: failure.stderr, sandbox_exit_code: failure.exitCode,
+    sandbox_signal: failure.signal, sandbox_bind_sources: failure.bindSources };
+}
 const PROOF_PHASE_STEP = "review.proof_phase";
 let proofPhases = 0;
 
@@ -7028,7 +7092,7 @@ function proofPhaseRecorder(evidence: ReviewEvidence): {
       for (const { whitelisted, cwd, observation, runMs, installMs } of results) append({
         step: PROOF_EXECUTION_STEP, fold, side: cwd === evidence.baseCheckoutDir ? "base" : "head", kind: whitelisted.kind,
         proof: whitelisted.label, checkout: cwd, run_ms: runMs, install_ms: installMs, start_load: observation.load?.start ?? null,
-        slots, outcome: "error" in observation ? "error" : observation.outcome,
+        slots, ...proofExecutionOutcome(observation),
       });
     },
     phase: (folds, converged) => append({
@@ -7046,6 +7110,7 @@ export async function judgeReviewAsync(
   if (!evidence.headCheckoutDir) return judgeReview(criteria, evidence);
   const unsandboxedBefore = proofRecordMark();
   const observed = new Map<string, ProofObservation>();
+  const startRetried = new Set<string>();
   const recorder = proofPhaseRecorder(evidence);
   let basePriming: Promise<void> | undefined;
   const proofFormCorrections = new Map<string, string | undefined>();
@@ -7055,7 +7120,8 @@ export async function judgeReviewAsync(
     (evidence.execProof ? async (w, cwd) => evidence.execProof!(w, cwd) : execWhitelistedProofAsync), evidence.sampleLoad);
   // The first fold requests head runs. A passing head may request a base run in the next fold.
   // No proof is launched until the existing judge asks for it, preserving filing carve-outs.
-  for (let pass = 0; pass <= criteria.length * 3 + 1; pass++) {
+  // W1-T15100: each start-check re-run takes one more pass, so the bound counts them.
+  for (let pass = 0; pass <= criteria.length * 3 + 1 + startRetried.size; pass++) {
     const pending = new Map<string, { whitelisted: WhitelistedProof; cwd: string }>();
     const replay: ProofExecutor = (whitelisted, cwd) => {
       const key = keyOf(whitelisted, cwd);
@@ -7086,6 +7152,12 @@ export async function judgeReviewAsync(
     const results = await running;
     recorder.executions(pass, slots, results);
     for (const { key, whitelisted, cwd, observation } of results) {
+      // W1-T15100: a first failed sandbox start check is not kept, so the next pass requests the proof again; only a
+      // repeat failure is folded as `sandbox_start_failed`.
+      if ("error" in observation && sandboxStartFailureOf(observation.error) !== undefined && !startRetried.has(key)) {
+        startRetried.add(key);
+        continue;
+      }
       observed.set(key, observation);
       if (!("error" in observation)) continue;
       const output = (observation.error as { loadOutput?: unknown })?.loadOutput;
@@ -7104,7 +7176,7 @@ export async function judgeReviewAsync(
     }
   }
   await basePriming;
-  recorder.phase(criteria.length * 3 + 2, false);
+  recorder.phase(criteria.length * 3 + 2 + startRetried.size, false);
   throw new Error("async proof observations did not converge");
 }
 
@@ -8557,11 +8629,16 @@ export function reviewLedgerLegibilityFields(
   };
 }
 
+/** W1-T11132 / W1-T15100: a proof that concluded nothing — under load, or because its sandbox never started. */
+export function proofConcludedNothing(outcome: ProofExecOutcome | undefined): boolean {
+  return outcome === "inconclusive_load" || outcome === "sandbox_start_failed";
+}
+
 /** A proof that concluded nothing is pending, so publication and verdict rollup must not call it unmet. */
 export function unmetReviewCriteria<T extends Pick<CriterionVerdict, "met"> & Partial<Pick<CriterionVerdict, "proof_exec">>>(
   criteria: readonly T[],
 ): T[] {
-  return criteria.filter(c => !c.met && c.proof_exec !== "inconclusive_load");
+  return criteria.filter(c => !c.met && !proofConcludedNothing(c.proof_exec));
 }
 
 /** The `reasons` array the `review.posted` line carries (W1-T1016): one per VISIBLE unmet criterion, plus a
@@ -12705,6 +12782,14 @@ export interface PostReviewStatusRetryOpts {
   /** Injectable `gh` invocation — the "gh gateway" a unit test simulates without shelling out. Defaults to the
    *  awaited {@link execGhStatusPostAsync} POST below (W1-T9549). */
   exec?: (args: string[], env: NodeJS.ProcessEnv) => void | Promise<void>;
+  /** W1-T15038: re-mint the ambient installation token after a 401; resolves whether a fresh token was minted.
+   *  Default: {@link refreshReviewPublisherToken} when no reviewer-token override is set and GH_APP_ID is set. */
+  reauth?: () => Promise<boolean>;
+}
+
+/** W1-T15038: a refusal that says the token is no longer accepted. */
+export function isExpiredCredentialRefusal(text: string): boolean {
+  return /Bad credentials|HTTP 401/.test(text);
 }
 
 /** W1-T9549 — the status POST {@link postReviewStatus} and the repair lease make by default, AWAITED over
@@ -12762,12 +12847,23 @@ export async function postReviewStatus(
   const backoffMs = retryOpts.backoffMs ?? ((failedAttempt) => POST_REVIEW_STATUS_BASE_DELAY_MS * 2 ** (failedAttempt - 1));
   const sleep = retryOpts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const exec = retryOpts.exec ?? execGhStatusPostAsync;
+  const reauth = retryOpts.reauth ?? (reviewerToken || !process.env.GH_APP_ID
+    ? undefined : async () => (await refreshReviewPublisherToken()).ok);
+  let reauthed = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       await exec(args, env);
       return;
     } catch (e) {
+      // W1-T15038: an expired token is re-minted once and the post retried; a 401 after that is thrown as before.
+      if (!reauthed && reauth && isExpiredCredentialRefusal(ghErrorText(e))) {
+        reauthed = true;
+        if (await reauth()) {
+          attempt -= 1;
+          continue;
+        }
+      }
       const transient = classifyFailure({ text: ghErrorText(e) }) === "transient";
       if (!transient || attempt >= maxAttempts) throw e; // permanent, or transient-but-exhausted: surface once
       await sleep(backoffMs(attempt));

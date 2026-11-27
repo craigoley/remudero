@@ -38,13 +38,14 @@ import { observeAdmissionDisposition } from "../../lib/action-executor.js";
 import { listedLedgerFiles, readLedgerUnionRawLinesAsync, readLedgerUnionRecords } from "../../lib/ledger-union.js";
 import { defaultGitRunnerAsync, visibleCriteria, type AcceptanceCriterion, DEFAULT_RISK, type TaskRisk } from "../../lib/plan.js";
 import { planDestinationRepository } from "../../lib/plan-destination.js";
+import { landReviewFindingsAsync, reviewFindingsRelPath, type LandFeedbackResult } from "../../lib/feedback-landing.js";
 import { defaultOpsCatalogApi, type OpsCatalogApi } from "../../lib/ops-catalog-source.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/mounts.js";
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import type { ReviewTriagePullRequest } from "../../lib/review-triage.js";
 import { isTestRunner } from "../../lib/live-write-guard.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, markUnbackedBodyGuards, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, postUnreadTaskHoldGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type CriterionVerdict, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure, type ReviewAdmission } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, markUnbackedBodyGuards, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, postUnreadTaskHoldGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, proofConcludedNothing, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type CriterionVerdict, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure, type ReviewAdmission } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -995,7 +996,7 @@ export function opsReviewCommentBody(state: string, acceptance: readonly Accepta
   const marks = visibleCriteria([...acceptance]).map(criterion => {
     const index = acceptance.indexOf(criterion);
     const judged = criteria[index]?.claim === criterion.claim ? criteria[index] : criteria.find(c => c.claim === criterion.claim);
-    const mark = judged === undefined || !judged.met && judged.proof_exec === "inconclusive_load" ? "UNDETERMINED"
+    const mark = judged === undefined || !judged.met && proofConcludedNothing(judged.proof_exec) ? "UNDETERMINED"
       : judged.met ? "PASS" : "FAIL";
     return `- ${mark}: ${criterion.claim}`;
   });
@@ -1014,7 +1015,9 @@ export interface OpsReviewRecord {
   state: string;
   review_decision_digest: string;
   criteria: Array<{ index: number; claim: string; met: boolean; proof_exec: string; proof: string; reason: string;
-    proof_failure_output?: string }>;
+    proof_failure_output?: string;
+    /** W1-T15100: a failed sandbox start check's stderr, exit code or signal, and each bind source's state. */
+    sandbox_start_failure?: { stderr: string; exit_code: number | null; signal: string | null; bind_sources: Array<{ path: string; existed: boolean }> } }>;
   reasons: string[];
   findings: Array<{ criterion_index: number; category: string; severity: string; mechanism: string; remedy: string | null;
     anchor: FindingCapture["findings"][number]["anchor"] }>;
@@ -1027,12 +1030,49 @@ export function opsReviewRecord(input: { taskId: string; prUrl: string; headSha:
     review_decision_digest: input.decisionDigest,
     criteria: input.criteria.flatMap((c, i) => c.holdout ? [] : [{ index: i + 1, claim: c.claim, met: c.met,
       proof_exec: c.proof_exec, proof: c.proof, reason: c.reason,
-      ...(c.proofFailureOutput !== undefined ? { proof_failure_output: c.proofFailureOutput } : {}) }]),
+      ...(c.proofFailureOutput !== undefined ? { proof_failure_output: c.proofFailureOutput } : {}),
+      ...(c.sandboxStartFailure !== undefined ? { sandbox_start_failure: { stderr: c.sandboxStartFailure.stderr,
+        exit_code: c.sandboxStartFailure.exitCode ?? null, signal: c.sandboxStartFailure.signal ?? null,
+        bind_sources: c.sandboxStartFailure.bindSources.map((b) => ({ path: b.path, existed: b.existed })) } } : {}) }]),
     reasons: [...input.reasons],
     findings: input.findings.filter(f => input.criteria[f.criterion - 1]?.holdout !== true).map(f => ({
       criterion_index: f.criterion, category: f.category, severity: f.severity, mechanism: f.mechanism, remedy: f.remedy,
       anchor: f.anchor })),
   };
+}
+
+/** W1-T15077: the private page of a failed or capped ops-task review: each criterion's reason, and each finding's
+ *  file:line, mechanism, remedy and status. It lands only in the plan destination, never on the public PR. */
+export function opsReviewFindingsMarkdown(record: OpsReviewRecord): string {
+  const one = (text: string | null): string => (text ?? "none").replace(/\s+/g, " ").trim();
+  return [`# Review of ${record.pr_url} at ${record.head_sha}`, "", `Task: ${record.task_id}. State: ${record.state}.`, "",
+    "## Criteria", ...record.criteria.map(c => `- ${c.index}. ${c.met ? "PASS" : "FAIL"} (${c.proof_exec}): ${one(c.claim)}\n` +
+      `  reason: ${one(c.reason)}`), "", "## Findings",
+    ...(record.findings.length === 0 ? ["- none"] : record.findings.map(f => `- ${f.anchor.path}:${f.anchor.line} ` +
+      `(criterion ${f.criterion_index}, ${f.severity} ${f.category}, ${f.anchor.status})\n` +
+      `  mechanism: ${one(f.mechanism)}\n  remedy: ${one(f.remedy)}`)),
+    ...(record.reasons.length === 0 ? [] : ["", "## Reasons", ...record.reasons.map(r => `- ${one(r)}`)]), ""].join("\n");
+}
+
+/** W1-T15077: a failed or capped ops-task verdict lands its findings in remudero-ops. A refused landing changes no
+ *  status: its cause is ledgered as review.record_write_failed beside the host record, and nothing else. */
+export async function publishOpsReviewFindings(stateDir: string, record: OpsReviewRecord,
+  target: { prNumber: number | undefined; capped: boolean }, log: (step: string, extra?: Record<string, unknown>) => void,
+  land: typeof landReviewFindingsAsync = landReviewFindingsAsync, say?: (line: string) => void): Promise<"landed" | "refused" | "not_failed"> {
+  if (record.state !== "failure" && !target.capped) return "not_failed";
+  const refuse = (reason: string): "refused" => {
+    log("review.record_write_failed", { pr_number: target.prNumber ?? null, head_sha: record.head_sha, destination: "plan_destination", reason });
+    return "refused";
+  };
+  if (target.prNumber === undefined) return refuse("the review names no pull request number");
+  const landed = await land(stateDir, { prNumber: target.prNumber, headSha: record.head_sha,
+    content: opsReviewFindingsMarkdown(record) }).catch((error: unknown): LandFeedbackResult => ({ landed: false, files: [], error: String(error) }));
+  const expectedPath = reviewFindingsRelPath(target.prNumber, record.head_sha);
+  const pathRefusal = landed.refused?.find(refusal => refusal.path === expectedPath);
+  if (pathRefusal !== undefined) return refuse(pathRefusal.reason);
+  if (!landed.landed) return refuse(landed.error ?? "the findings landing produced no pull request");
+  say?.(`remudero-review: findings for ${record.head_sha.slice(0, 7)} landed privately${landed.prUrl ? ` (${landed.prUrl})` : ""}`);
+  return "landed";
 }
 
 const SAFE_SEGMENT = /^(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}$/;
@@ -1240,6 +1280,8 @@ export async function runReview(host: ReviewCommandHost, args: {
   reservationHomeDir?: string;
   /** Injectable arm (impl-BG), awaited (W1-T9549). Default: the awaited {@link armAutoMergeDetailedAsync}. */
   arm?: (prUrl: string, taskId: string) => ArmOutcome | Promise<ArmOutcome>;
+  /** W1-T15077: lands a failed ops-task review's findings privately. Default {@link landReviewFindingsAsync}. */
+  landReviewFindings?: typeof landReviewFindingsAsync;
   /** W1-T13698: the repository's instance mode. Absent ⇒ read from the instance registry (unknown ⇒ live). */
   repoMode?: "shadow" | "live";
   /**
@@ -2111,6 +2153,23 @@ export async function runReview(host: ReviewCommandHost, args: {
   const historyEvidence = reviewerFindingText === undefined ? undefined : parseReviewerHistoryEvidence(reviewerFindingText, criteria.length);
   const presentedFailureIds = initialStatusHistory.kind === "readable" ? initialStatusHistory.failures.map(finding => finding.id) : [];
   let dispute: ReviewPassDispute | undefined;
+  // W1-T15077: the private findings page of an ops task's failed or capped verdict, landed at most once per run. EVERY
+  // return below that follows a status this run PUBLISHED calls it: the disputed-pass hold (holdDisputedPass), the
+  // semantic hold (posted.semanticHold), the task hold (posted.taskHold), the capped hold (posted.cappedHold), any
+  // other pending outcome, and the posted terminal verdict (after armIfVerdictPermitsAsync). The returns that publish
+  // no status for this head land nothing, as the next review of the head decides: the shadow
+  // (REVIEWER_SHADOW_VERDICT_STEP), a semantic replay (withholdSemanticVerdict), a withheld task id
+  // (taskIdOwnershipWithheld), a missing input digest, an aborted lane (laneAbortedResult), a refused post (!posted.posted)
+  // and a conflict hold that failed to post. publishOpsReviewFindings itself lands only a failed or capped verdict.
+  let findingsLanded = false;
+  const landFindings = async (capped: boolean): Promise<void> => {
+    if (task.catalog !== "ops" || findingsLanded) return;
+    findingsLanded = true;
+    const record = opsReviewRecord({ taskId: task.id, prUrl, headSha, state: verdict.state, decisionDigest, criteria: verdict.criteria,
+      reasons: reviewUnmetFields(verdict).reasons, findings: findingCapture.findings });
+    await publishOpsReviewFindings(dirname(args.ledgerPath), record, { prNumber: reviewPrNumber(prUrl), capped: capped || verdict.capped === true },
+      log, args.landReviewFindings, say);
+  };
   const posted = await postReviewStatusGuarded({
     post: catalogReviewPoster(task.catalog, poster.post, reviewerCodeFreshness?.status === "fresh" ? reviewerCodeFreshness.codeSha : undefined),
     outboxBeforePost: true,
@@ -2160,12 +2219,14 @@ export async function runReview(host: ReviewCommandHost, args: {
         reviewInputDigest: inputDigest, reviewEngineRevision: REVIEW_ENGINE_REVISION, reviewerCodeFreshness,
         fetchLifecycle: () => fetchPrLifecycleAsync(prUrl), readRequiredContexts: readRequiredStatusCheckContextsAsync }) });
     say(`remudero-review: PASS NOT PUBLISHED for ${headSha.slice(0, 7)} — ${held.verdictWithheld}`);
+    await landFindings(false);
     return { ...held, headSha, reviewerOutcome: outcome, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
   if (posted.semanticHold !== undefined) {
     // W1-T14235: the pass was held (pending, or a standing failure left standing), so an arm taken at open is withdrawn.
     withdrawArmIfVerdictRefuses(verdict, { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, { disarm: args.disarm });
     say(`remudero-review: PASS NOT PUBLISHED for ${headSha.slice(0, 7)} — ${posted.reason ?? posted.semanticHold}`);
+    await landFindings(false);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.reason ?? posted.semanticHold,
       reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
@@ -2173,6 +2234,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     // W1-T14902: the pass was held as pending until the operator releases the task's hold, so an arm taken at open is withdrawn.
     withdrawArmIfVerdictRefuses(verdict, { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, { disarm: args.disarm });
     say(`remudero-review: PASS NOT PUBLISHED for ${headSha.slice(0, 7)} — ${posted.taskHold}`);
+    await landFindings(false);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.taskHold,
       reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
@@ -2180,10 +2242,12 @@ export async function runReview(host: ReviewCommandHost, args: {
     // W1-T14241 (invariant capped-is-not-green): the capped pass was held as pending, so an arm taken at open is withdrawn.
     withdrawArmIfVerdictRefuses(verdict, { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, { disarm: args.disarm });
     say(`remudero-review: CAPPED PASS NOT PUBLISHED for ${headSha.slice(0, 7)} — ${posted.cappedHold}`);
+    await landFindings(true);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.cappedHold,
       reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
   if (posted.effectiveState === "pending") {
+    await landFindings(false);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.reason,
       reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
@@ -2226,6 +2290,11 @@ export async function runReview(host: ReviewCommandHost, args: {
   } else if (!posted.posted) {
     replayInput = { ...replayInput, publication_refusal: "terminal-publication-refused" };
     recordReplay(classifyReviewOutcome(replayInput));
+    // W1-T15077: terminal status failures are outboxed for retry. Publish this head's private
+    // evidence now as well, so a later drain that posts the status cannot leave it behind.
+    if (task.catalog === "ops" && posted.reason?.startsWith("posting remudero-review failed and was not applied")) {
+      await landFindings(verdict.capped === true);
+    }
     // REFUSED, NOT SWALLOWED: postReviewStatusGuarded already ledgered
     // `review.post_refused` with the full reason; this is the loud console
     // twin so a refusal is as visible as an ordinary posted verdict is.
@@ -2264,10 +2333,10 @@ export async function runReview(host: ReviewCommandHost, args: {
   // The gate TEACHES: the FULL list of unmet criteria goes to the ledger (and the
   // PR comment below) — the status description names only the first (length-capped).
   // W1-T14581: an ops task's reasons and findings stay on the host, in one record per head its row links.
-  const opsRecord = task.catalog !== "ops" ? undefined
-    : writeOpsReviewRecord(dirname(args.ledgerPath), { owner, repo, prNumber: reviewPrNumber(prUrl), headSha },
-      opsReviewRecord({ taskId: task.id, prUrl, headSha, state: verdict.state, decisionDigest, criteria: verdict.criteria,
-        reasons, findings: findingCapture.findings }));
+  const opsRecordBody = task.catalog !== "ops" ? undefined : opsReviewRecord({ taskId: task.id, prUrl, headSha,
+    state: verdict.state, decisionDigest, criteria: verdict.criteria, reasons, findings: findingCapture.findings });
+  const opsRecord = opsRecordBody === undefined ? undefined
+    : writeOpsReviewRecord(dirname(args.ledgerPath), { owner, repo, prNumber: reviewPrNumber(prUrl), headSha }, opsRecordBody);
   if (opsRecord !== undefined && "error" in opsRecord) log("review.record_write_failed", { pr_number: reviewPrNumber(prUrl), head_sha: headSha, reason: opsRecord.error });
   const reviewPostedRow = {
     context: REVIEW_CONTEXT,
@@ -2399,6 +2468,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     readChecksGreenReviewed: (_url: string, head: string) => readChecksGreenReviewedAtHead(owner, repo, head) };
   // W1-T9549: AWAITED. The daemon runs this review (`trackInFlightReview`), so the arm's gh and git leave its loop free.
   await armIfVerdictPermitsAsync(verdict, armCtx, { arm: args.arm });
+  await landFindings(false);
   // Record after both authoritative posting and auto-merge eligibility. The recorder
   // swallows telemetry write failures; replay returns above before reaching this call.
   if (planOnlySkip) log("review.plan_only_phases", { head_sha: headSha, ...planOnlyPhaseFields(phases, systemClock.now(), args.materializeMs) });
@@ -2962,6 +3032,10 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // returns the `gh --json` shape and passes through untouched. Both arms yield the SAME five
   // fields, so nothing downstream of `body` can tell which transport served it.
   const args = reviewViewArgs(owner, repo, prArg);
+  // W1-T15037: the own-start reading comes before the first gh read, whose read-cadence lock can wait for many
+  // minutes; main moving during that wait is the same case as the W1-T9727 admission wait, not stale code.
+  const ownStartReading = deps.reviewStartFreshness ??
+    (deps.judgeAtOwnStart === true ? await ownStartFreshness(reviewerCodeFreshnessDep) : undefined);
   const raw = await (deps.fetchView ?? ghJsonAsync)(args);
   exit.step = "setup";
   // The sweep's open-PR snapshot can age while earlier reviews run. The numeric arm already
@@ -3384,8 +3458,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // transient lifecycle-read failure) degrades the SAME way `runReview`'s own call site does —
   // best-effort legibility, never a reason this command fails to review the PR at all.
   // W1-T9727: a fresh-tree child reads at its own start, before a memory-admission wait lets main move past it.
-  const startFreshness = deps.reviewStartFreshness ??
-    (deps.judgeAtOwnStart === true ? await ownStartFreshness(reviewerCodeFreshnessDep) : undefined);
+  const startFreshness = ownStartReading;
   // The start reading could not prove freshness: say so, then fall back to the JIT read.
   if (startFreshness?.status === "unreadable") {
     log("review.reviewer_freshness_unreadable_at_start", {
