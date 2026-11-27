@@ -1675,8 +1675,11 @@ export async function runReview(host: ReviewCommandHost, args: {
       proofAuditUnavailable = reason;
       return undefined;
     });
-  const judge: PreparedReview["judge"] = hostedProofs === undefined ? preparedDecision.judge :
-    evidence => hostedProofs.judge(preparedDecision.judge, evidence);
+  if (hostedProofs !== undefined) {
+    const hostJudge = preparedDecision.judge;
+    Object.assign(preparedDecision, { judge: (evidence: Parameters<PreparedReview["judge"]>[0]) =>
+      hostedProofs.judge(hostJudge, evidence) });
+  }
   const proofExecutions = hostedProofs?.executions ?? preparedDecision.proofExecutions;
   // W1-T9970: read once per review; a reviewer-image re-review of this head is its own decision.
   const runtimeImageSha = args.runtimeImageSha === undefined ? readRuntimeImageSha() : args.runtimeImageSha ?? undefined;
@@ -1882,7 +1885,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   // The proofs run here when a reviewer follows, else in the binding judge below; either way the CPU work starts now.
   reportPhase("proofs");
   const preliminaryStartedAt = systemClock.now();
-  const preliminaryProofs = attemptReviewer ? await judge(proofEvidence) : undefined;
+  const preliminaryProofs = attemptReviewer ? await preparedDecision.judge(proofEvidence) : undefined;
   const preliminaryProofMs = systemClock.now() - preliminaryStartedAt;
   let reviewerSubtype: string | undefined;
   let reviewerExit: WorkerResult["exit"];
@@ -2171,7 +2174,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   // returned "lint-plan aborted". Judging that would post a binding FAILURE nothing judged (#18803, 2026-11-16).
   const abortedAtLint = laneAbortedResult("plan-lint", planLint);
   if (abortedAtLint !== undefined) return abortedAtLint;
-  const computed = await judge({
+  const computed = await preparedDecision.judge({
     ...proofEvidence, planLint, semantic, semanticClauses, reviewerUnable,
     diff, report,
     target: { owner, repo },
