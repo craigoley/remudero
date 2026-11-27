@@ -6,7 +6,7 @@ import { test } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import { enginePath, enginesRoot } from "#src/lib/engine-tree.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { ADHOC_LANE_REAP_GRACE_MS, reapStaleWorktreesAsync, runAdhocLaneReapRung, unmanagedWorktreeLanes } from "#src/lib/worker.js";
+import { ADHOC_LANE_REAP_GRACE_MS, runAdhocLaneReapRung, unmanagedWorktreeLanes } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 /** Sets every entry's mtime to twice the lane grace, so age alone would remove it. */
@@ -99,8 +99,6 @@ test("W1-T10777: an armed ad-hoc reap pass never removes or sizes an engine tree
     await runAdhocLaneReapRung(config, (step, fields) => lines.push([step, fields]), {
       repoDir: repo,
       enabled: () => true,
-      // W1-T15026: the real reaper, told nobody works in the fixtures instead of reading the host's `/proc`.
-      reap: (root, opts) => reapStaleWorktreesAsync(root, { ...opts, cwdCensus: () => ({ state: "clear", scanned: 0 }) }),
       sizeBytes: (path) => {
         sized.push(path);
         return 0;

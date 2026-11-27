@@ -5,9 +5,6 @@ import { test } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { reapStaleWorktrees, runAdhocLaneReapRung, writeRunLock } from "#src/lib/worker.js";
-import { emptyHostProcessTable } from "#test/helpers/empty-process-table.js";
-
-emptyHostProcessTable(); // W1-T15026: the reapers here decide removals on an owned process table, not the host's
 
 function fixture() {
   const root = makeTempDir("async-lane-size");
