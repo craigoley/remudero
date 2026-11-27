@@ -13,20 +13,32 @@
  * Why: docs/forensics/github-event-wake.md#module-header (W1-T2568). */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   watch as fsWatch,
 } from "node:fs";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { appendFile } from "node:fs/promises";
+import type { ServerResponse } from "node:http";
 import { basename, dirname, join } from "node:path";
-import type { Clock } from "./clock.js";
+import { clockFromDateFn, type Clock } from "./clock.js";
 import { writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
-import { RawBodyTooLargeError, readBoundedRawBody, type Route } from "./service.js";
+import type { ChangedHeadEntry } from "./open-prs-rest.js";
+import {
+  answerGithubDeliveryRequest,
+  createCheckRunCompletedQueue,
+  type CheckRunCompletedInfo,
+  type GithubDeliveryChecks,
+  type GithubDeliveryCount,
+  type GithubDeliveryContext,
+} from "./github-delivery-accept.js";
+import type { Route } from "./service.js";
 
 // ── (i) THE ALLOWLIST — never subscribe to or accept `*` ────────────────────────────────────
 
@@ -92,12 +104,6 @@ export function verifyGithubSignature(rawBody: string, signatureHeader: string, 
   return timingSafeEqual(expected, given);
 }
 
-function firstHeader(req: IncomingMessage, name: string): string | undefined {
-  const raw = req.headers[name];
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  return value && value.length > 0 ? value : undefined;
-}
-
 function extractRepositoryFullName(body: unknown): string | undefined {
   if (typeof body !== "object" || body === null) return undefined;
   const repository = (body as Record<string, unknown>).repository;
@@ -130,14 +136,7 @@ function checkRunHeadIdentity(body: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-/** Verified `check_run:completed` fields for the CI incident consumer; `branch` is absent when GitHub names none. */
-export interface CheckRunCompletedInfo {
-  id: number;
-  sha: string;
-  branch?: string;
-  name: string;
-  conclusion: string;
-}
+export type { CheckRunCompletedInfo };
 
 function extractCheckRunCompletedInfo(body: unknown): CheckRunCompletedInfo | undefined {
   if (typeof body !== "object" || body === null) return undefined;
@@ -341,6 +340,17 @@ export function sweepWakeMarkerPath(root: string): string {
   return join(root, "state", "SWEEP_WAKE_REQUESTED");
 }
 
+/** W1-T14893: `SWEEP_WAKE_LAST_CLOSED`, beside the wake marker, holds the newest accepted pull_request closed
+ *  delivery. Later deliveries coalesce over the wake marker but never overwrite this record. */
+export function lastClosedWakePath(markerPath: string): string {
+  return join(dirname(markerPath), "SWEEP_WAKE_LAST_CLOSED");
+}
+
+/** W1-T14893: a delivery that can change what is merged: a pull request that closed. */
+export function isPullRequestClosedWake(record: Pick<SweepWakeMarker, "event" | "action">): boolean {
+  return record.event === "pull_request" && record.action === "closed";
+}
+
 /** INVARIANT: writes `record` atomically — a same-directory temp file, then `renameSync` over the
  *  real path — so a reader never observes a torn write, and a delivery coalesces rather than queuing.
  *  Why: docs/forensics/github-event-wake.md#writesweepwakemarkeratomic (design iv). */
@@ -479,7 +489,7 @@ export function createWakeCounters(): WakeCounters {
   return { accepted_coalesced: 0, ignored: 0, duplicate: 0, by_event: {} };
 }
 
-function countWake(counters: WakeCounters, kind: "accepted_coalesced" | "ignored" | "duplicate", event?: string, action?: string): void {
+export function countWake(counters: WakeCounters, kind: GithubDeliveryCount, event?: string, action?: string): void {
   counters[kind]++;
   const key = `${event ?? "-"}/${action ?? "-"}`;
   counters.by_event[key] = (counters.by_event[key] ?? 0) + 1;
@@ -518,6 +528,142 @@ export function startWakeSummaryFlush(opts: {
     clearInterval(timer);
     flush();
   };
+}
+
+// ── (iv-b) THE CHANGED-HEADS JOURNAL (W1-T14809) — which head shas a delivery named ─────────
+
+const CHANGED_HEADS_FILE = "github-changed-heads.ndjson";
+const ACKNOWLEDGED_HEADS_FILE = "github-changed-heads.acked.ndjson";
+const HEAD_SHA_PATTERN = /^[0-9a-f]{40}$/;
+
+/** `state/github-changed-heads.ndjson`: one `{sha, event, received_at}` line per accepted delivery naming a head. */
+export function githubChangedHeadsPath(root: string): string {
+  return join(root, "state", CHANGED_HEADS_FILE);
+}
+
+/** `state/github-changed-heads.acked.ndjson`: the entries an accepted sweep's acknowledge claimed, for its read plane. */
+export function githubAcknowledgedHeadsPath(root: string): string {
+  return join(root, "state", ACKNOWLEDGED_HEADS_FILE);
+}
+
+/** The head sha a `check_run`, `status` or `pull_request` delivery names; `undefined` for any other event. */
+export function changedHeadShaOf(event: string, body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null) return undefined;
+  const record = body as Record<string, unknown>;
+  let sha: unknown;
+  if (event === "check_run") sha = (record.check_run as Record<string, unknown> | undefined)?.head_sha;
+  else if (event === "status") sha = record.sha;
+  else if (event === "pull_request") sha = ((record.pull_request as Record<string, unknown> | undefined)?.head as Record<string, unknown> | undefined)?.sha;
+  return typeof sha === "string" && HEAD_SHA_PATTERN.test(sha) ? sha : undefined;
+}
+
+/** One O_APPEND write of one line, so concurrent deliveries never interleave inside an entry. A failed
+ *  append costs only the skip: the gate re-reads the head at `githubEventWake.headRecheckMs`. */
+async function appendChangedHead(stateDir: string, event: string, body: unknown, receivedAt: Date): Promise<void> {
+  const sha = changedHeadShaOf(event, body);
+  if (sha === undefined) return;
+  const entry: ChangedHeadEntry = { sha, event, received_at: receivedAt.toISOString() };
+  try {
+    await appendFile(join(stateDir, CHANGED_HEADS_FILE), `${JSON.stringify(entry)}\n`);
+  } catch (error) {
+    // CLAIM: collapses "journaled" and "lost" into "no delivery named this head" (stderr only, no ledger step). Safe because
+    // the delivery is still accepted and its marker written, and headRecheckMs re-reads every head within one interval.
+    console.error(`github.wake: changed head not journaled (${String((error as Error)?.message ?? error)})`);
+  }
+}
+
+function claimFile(path: string): string | undefined {
+  const claimed = `${path}.consume-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  try {
+    renameSync(path, claimed);
+    return claimed;
+  } catch {
+    // Nothing to claim: absent, or a racing consumer won the rename. Both mean "no entries".
+    return undefined;
+  }
+}
+
+/** Moves the live journal into the acknowledged file, claim-by-rename, so an entry appended during the
+ *  move stays in the live journal for the next acknowledge. A held daemon never acknowledges, so never loses one. */
+export function acknowledgeChangedHeads(root: string): void {
+  const claimed = claimFile(githubChangedHeadsPath(root));
+  if (claimed === undefined) return;
+  try {
+    appendFileSync(githubAcknowledgedHeadsPath(root), readFileSync(claimed));
+    unlinkSync(claimed);
+  } catch (error) {
+    // CLAIM: collapses "acknowledged" and "stranded" into "no delivery named these heads" (stderr only, no ledger step). Safe
+    // because the claimed file stays beside the journal, and headRecheckMs re-reads every head it named within one interval.
+    console.error(`github.wake: changed heads not acknowledged (${String((error as Error)?.message ?? error)})`);
+  }
+}
+
+function parseChangedHeads(text: string): ChangedHeadEntry[] {
+  const entries: ChangedHeadEntry[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line) as Partial<ChangedHeadEntry>;
+      if (typeof parsed.sha === "string" && typeof parsed.event === "string" && typeof parsed.received_at === "string") {
+        entries.push({ sha: parsed.sha, event: parsed.event, received_at: parsed.received_at });
+      }
+    } catch {
+      // A torn or corrupt line names no head; the recheck interval covers whatever it held.
+      continue;
+    }
+  }
+  return entries;
+}
+
+function readChangedHeads(path: string): ChangedHeadEntry[] {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    // CLAIM: collapses "named" and "unreadable" into "no heads named" (stderr only, no ledger step). Safe because an
+    // unreadable journal names no head a read can trust, and headRecheckMs re-reads every head within one interval.
+    console.error(`github.wake: changed heads unreadable (${String((error as Error)?.message ?? error)})`);
+    return [];
+  }
+  return parseChangedHeads(text);
+}
+
+/**
+ * Every head-read gate's look at the changed heads, before it reads: the acknowledged entries AND the live journal.
+ * NON-DESTRUCTIVE: a standby daemon's pre-lock tick read, the active daemon's read plane and its light-pass reads each
+ * keep their own gate, so a take by one would leave another serving a named head's old rollup until headRecheckMs
+ * (fleet review of #21033). Each gate applies an entry once; only the drain-lock holder prunes
+ * ({@link pruneAcknowledgedChangedHeads}). Both files are read because the daemon produces the tick read an accepted
+ * sweep consumes BEFORE `runGatedSweep` acknowledges (daemon.ts).
+ */
+export function peekChangedHeads(root: string): ChangedHeadEntry[] {
+  return [...readChangedHeads(githubAcknowledgedHeadsPath(root)), ...readChangedHeads(githubChangedHeadsPath(root))];
+}
+
+/**
+ * The drain-lock holder's prune of acknowledged entries received before `keepFromMs` (now - headRecheckMs): any kept
+ * read older than such an entry has already aged out, and any newer one reflects it, so no gate needs it. Claim, keep
+ * the recent lines, append them back: an acknowledge appending meanwhile loses nothing.
+ */
+export function pruneAcknowledgedChangedHeads(
+  root: string,
+  keepFromMs: number,
+  append: (path: string, data: string) => void = appendFileSync,
+): void {
+  const path = githubAcknowledgedHeadsPath(root);
+  const claimed = claimFile(path);
+  if (claimed === undefined) return;
+  const recent = readChangedHeads(claimed).filter((entry) => !(Date.parse(entry.received_at) < keepFromMs));
+  rmSync(claimed, { force: true, recursive: true });
+  if (recent.length === 0) return;
+  try {
+    append(path, recent.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+  } catch (error) {
+    // CLAIM: collapses "kept" and "dropped" for the recent entries (stderr only, no ledger step). Safe because a gate
+    // that misses a dropped entry serves that head's kept rollup at most headRecheckMs, then re-reads it.
+    console.error(`github.wake: acknowledged heads not pruned (${String((error as Error)?.message ?? error)})`);
+  }
 }
 
 // ── (v) THE ROUTE — the self-authenticated POST /v1/hooks/github ───────────────────────────
@@ -568,14 +714,53 @@ export interface GithubEventWakeOptions {
  * Why: docs/forensics/github-event-wake.md#creategithubeventwakehandler (design i, ii, iii, vii). */
 export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Route {
   const log = opts.log ?? (() => {});
-  const maxBodyBytes = opts.maxBodyBytes ?? DEFAULT_GITHUB_WEBHOOK_MAX_BODY_BYTES;
-  const now = opts.now ?? (() => new Date());
-  const writeMarker = opts.writeMarker ?? writeSweepWakeMarkerAtomicAsync;
-  const semanticCheckMode = opts.semanticCheckMode ?? DEFAULT_GITHUB_EVENT_WAKE_SEMANTIC_MODE;
-  const aggregateCheckNames =
-    opts.aggregateCheckNames ?? DEFAULT_GITHUB_EVENT_WAKE_AGGREGATE_CHECK_NAMES;
+  const checks = githubDeliveryChecks(opts.aggregateCheckNames, opts.semanticCheckMode);
+  const counters = opts.counters;
+  const deps: Omit<GithubDeliveryContext, "secret"> = {
+    repository: opts.repository,
+    markerPath: opts.markerPath,
+    resolveMarkerPath: opts.resolveMarkerPath,
+    dedup: opts.dedup,
+    semanticCheckMode: opts.semanticCheckMode ?? DEFAULT_GITHUB_EVENT_WAKE_SEMANTIC_MODE,
+    maxBodyBytes: opts.maxBodyBytes ?? DEFAULT_GITHUB_WEBHOOK_MAX_BODY_BYTES,
+    checks,
+    writeMarker: opts.writeMarker ?? writeSweepWakeMarkerAtomicAsync,
+    clock: clockFromDateFn(opts.now),
+    log,
+    ...(counters ? { count: (kind: GithubDeliveryCount, event: string | undefined, action: string | undefined) => countWake(counters, kind, event, action) } : {}),
+  };
+  const onCheckRunCompleted = opts.onCheckRunCompleted;
+  const notify = onCheckRunCompleted ? createCheckRunCompletedQueue(onCheckRunCompleted, log) : undefined;
+
+  return {
+    method: "POST",
+    path: "/v1/hooks/github",
+    scope: "write",
+    // W1-T404: declared for `assertWriteTiersComplete` though `selfAuthenticated` means `enforceWriteTiers` never
+    // consults it — this route writes only a "recheck GitHub" marker, the LOW tier `POST /v1/confirm` (serve.ts) claims.
+    tier: "low",
+    // W1-T2568 (design i): GitHub's HMAC replaces the bearer token for this one route (service.ts's Route.selfAuthenticated).
+    selfAuthenticated: true,
+    // W1-T14986: the fast path is acceptGithubDelivery's (github-delivery-accept.ts), shared with the hook listener.
+    handler: async (req, res) => {
+      const answer = await answerGithubDeliveryRequest(req, { ...deps, secret: opts.secret });
+      sendJson(res, answer.status, answer.body);
+      if (answer.followUp && notify) notify(answer.followUp.checkRunCompleted);
+    },
+  };
+}
+
+/**
+ * W1-T14986: the checks {@link acceptGithubDelivery} runs, with one surface's semantic counts held inside, so the
+ * route and the hook listener run the same allowlist, HMAC and classification.
+ */
+export function githubDeliveryChecks(
+  aggregateCheckNamesOption?: readonly string[],
+  semanticCheckModeOption?: GithubEventWakeSemanticMode,
+): GithubDeliveryChecks {
+  const semanticCheckMode = semanticCheckModeOption ?? DEFAULT_GITHUB_EVENT_WAKE_SEMANTIC_MODE;
+  const aggregateCheckNames = aggregateCheckNamesOption ?? DEFAULT_GITHUB_EVENT_WAKE_AGGREGATE_CHECK_NAMES;
   let semanticCounts = createGithubEventWakeSemanticCounts(aggregateCheckNames);
-  const checkRunCallbackTails = new Map<string, Promise<void>>();
 
   const recordClassification = (classification: GithubEventWakeClassification, body: unknown) => {
     semanticCounts.mode = semanticCheckMode;
@@ -612,162 +797,27 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
     return summary;
   };
 
-  const notifyCheckRunCompleted = (event: string, action: string | undefined, body: unknown): void => {
-    const callback = opts.onCheckRunCompleted;
-    if (event !== "check_run" || action !== "completed" || !callback) return;
-    // The CI-incident consumer reads core's job logs only; another instance's check never reaches it.
-    if (extractRepositoryFullName(body) !== opts.repository) return;
-    const info = extractCheckRunCompletedInfo(body);
-    if (!info) return;
-    // Serialized per head+check so a later pass can't overtake a failure's async log read; the ack never waits.
-    const key = `${info.sha}\u0000${info.name}`;
-    const previous = checkRunCallbackTails.get(key) ?? Promise.resolve();
-    let queued: Promise<void>;
-    queued = previous
-      .then(() => callback(info))
-      .catch((error: unknown) => {
-        log("github.wake.check_run_callback_failed", {
-          check_run_id: info.id,
-          reason: String((error as Error)?.message ?? error),
-        });
-      })
-      .finally(() => {
-        if (checkRunCallbackTails.get(key) === queued) checkRunCallbackTails.delete(key);
-      });
-    checkRunCallbackTails.set(key, queued);
-  };
-
   return {
-    method: "POST",
-    path: "/v1/hooks/github",
-    scope: "write",
-    // W1-T404: declared for `assertWriteTiersComplete` though `selfAuthenticated` means `enforceWriteTiers` never
-    // consults it — this route writes only a "recheck GitHub" marker, the LOW tier `POST /v1/confirm` (serve.ts) claims.
-    tier: "low",
-    // W1-T2568 (design i): GitHub's HMAC replaces the bearer token for this one route (service.ts's Route.selfAuthenticated).
-    selfAuthenticated: true,
-    handler: async (req, res) => {
-      if (!opts.secret) {
-        log("github.wake.unavailable", { reason: "no_secret_configured" });
-        sendJson(res, 503, { error: "webhook_not_configured" });
-        return;
-      }
-
-      let rawBody: string;
-      try {
-        rawBody = await readBoundedRawBody(req, maxBodyBytes);
-      } catch (e) {
-        if (e instanceof RawBodyTooLargeError) {
-          log("github.wake.refused", { reason: "body_too_large" });
-          sendJson(res, 413, { error: "body_too_large" });
-          return;
-        }
-        throw e;
-      }
-
-      const signatureHeader = firstHeader(req, "x-hub-signature-256");
-      if (!signatureHeader || !verifyGithubSignature(rawBody, signatureHeader, opts.secret)) {
-        log("github.wake.refused", { reason: "invalid_signature" });
-        sendJson(res, 401, { error: "invalid_signature" });
-        return;
-      }
-
-      let body: unknown;
-      try {
-        body = rawBody.trim() ? JSON.parse(rawBody) : {};
-      } catch {
-        log("github.wake.refused", { reason: "invalid_json" });
-        sendJson(res, 400, { error: "invalid_json" });
-        return;
-      }
-
-      const repository = extractRepositoryFullName(body);
-      let markerPath: string;
-      let owningRepository: string;
-      if (opts.resolveMarkerPath) {
-        const resolved = repository === undefined ? undefined : opts.resolveMarkerPath(repository);
-        if (resolved === undefined) {
-          // W1-T14806: an organization hook also delivers repositories no daemon manages; a 2xx keeps
-          // GitHub's delivery log clean, and nothing is written for them.
-          if (opts.counters) countWake(opts.counters, "ignored", firstHeader(req, "x-github-event"), extractAction(body));
-          else log("github.wake.ignored", { reason: "unmanaged_repository", repository });
-          sendJson(res, 202, { error: "unmanaged_repository" });
-          return;
-        }
-        markerPath = resolved;
-        owningRepository = repository as string;
-      } else {
-        if (repository !== opts.repository) {
-          log("github.wake.refused", { reason: "repository_mismatch", repository });
-          sendJson(res, 403, { error: "repository_mismatch" });
-          return;
-        }
-        markerPath = opts.markerPath;
-        owningRepository = opts.repository;
-      }
-
-      const event = firstHeader(req, "x-github-event");
-      const action = extractAction(body);
-      if (!event || !(isAllowlistedGithubEvent(event, action) || isOwnerEscalationReply(event, action, body))) {
-        if (opts.counters) countWake(opts.counters, "ignored", event, action);
-        else log("github.wake.ignored", { reason: "unsupported_event_or_action", event, action });
-        sendJson(res, 202, { error: "ignored" });
-        return;
-      }
-
-      const deliveryId = firstHeader(req, "x-github-delivery");
-      if (!deliveryId) {
-        log("github.wake.refused", { reason: "missing_delivery_id" });
-        sendJson(res, 400, { error: "missing_delivery_id" });
-        return;
-      }
-      if (opts.dedup.has(deliveryId)) {
-        if (opts.counters) countWake(opts.counters, "duplicate", event, action);
-        else log("github.wake.duplicate", { delivery_id: deliveryId, event, action });
-        sendJson(res, 202, { duplicate: true });
-        return;
-      }
-
+    verifySignature: verifyGithubSignature,
+    repositoryOf: extractRepositoryFullName,
+    actionOf: extractAction,
+    wakes: (event, action, body) => isAllowlistedGithubEvent(event, action) || isOwnerEscalationReply(event, action, body),
+    classify: (event, action, body) => {
       const classification = classifyGithubEventWake(event, action, body, aggregateCheckNames);
       recordClassification(classification, body);
-      if (semanticCheckMode === "enforce" && !classification.actionable) {
-        await opts.dedup.record(deliveryId);
-        notifyCheckRunCompleted(event, action, body);
-        sendJson(res, 202, { accepted: false, reason: "successful_leaf" });
-        return;
-      }
-
-      const record: SweepWakeMarker = {
-        deliveryId,
-        event,
-        action,
-        repository: owningRepository,
-        receivedAtIso: now().toISOString(),
-      };
-      const armed = readSweepWakeMarker(markerPath) === undefined;
-      if (event === "workflow_run" && action === "completed") {
-        // W1-T14810: written before the marker, so the sweep the marker wakes already sees the run.
-        await writeAtomicAsync(join(dirname(markerPath), basename(workflowRunCompletedPath(""))),
-          JSON.stringify({ deliveryId, repository: owningRepository, receivedAtIso: record.receivedAtIso } satisfies WorkflowRunCompletedRecord));
-      }
-      await writeMarker(markerPath, record);
-      await opts.dedup.record(deliveryId);
-      notifyCheckRunCompleted(event, action, body);
-      if (opts.counters && !armed) {
-        countWake(opts.counters, "accepted_coalesced", event, action);
-        sendJson(res, 202, { accepted: true });
-        return;
-      }
-      const summary = flushSemanticSummary();
-      log("github.wake.accepted", {
-        delivery_id: deliveryId,
-        event,
-        action,
-        repository,
-        ...(summary ? { semantic_check_summary: summary } : {}),
-      });
-      sendJson(res, 202, { accepted: true });
+      return classification.actionable;
     },
+    semanticSummary: flushSemanticSummary,
+    checkRunCompleted: extractCheckRunCompletedInfo,
+    markerPending: (path) => readSweepWakeMarker(path) !== undefined,
+    // W1-T14809: the head this delivery names, journaled beside the marker before the 202.
+    journalChangedHead: (markerPath, event, body, receivedAtIso) => appendChangedHead(dirname(markerPath), event, body, new Date(receivedAtIso)),
+    // W1-T14893: keep the latest accepted closed pull request alongside the coalesced wake marker.
+    closedPullRequestWakePath: (markerPath, record) =>
+      isPullRequestClosedWake(record) ? lastClosedWakePath(markerPath) : undefined,
+    // W1-T14810: the run's own record beside the marker, so the sweep the marker wakes already sees the run.
+    writeWorkflowRunCompleted: (markerPath, record) =>
+      writeAtomicAsync(join(dirname(markerPath), basename(workflowRunCompletedPath(""))), JSON.stringify(record satisfies WorkflowRunCompletedRecord)),
   };
 }
 
@@ -1003,6 +1053,8 @@ export function wireSweepWakeToDaemon(
       // An accepted sweep owns the same reconciliation, so retire and report the collapsed burst.
       finishCheckBurst(false);
       consumeSweepWakeMarker(path);
+      // W1-T14809: the same accepted pass claims the changed heads its read plane will consult.
+      acknowledgeChangedHeads(root);
       const stillPending = readSweepWakeMarker(path);
       observedDeliveryId = stillPending?.deliveryId;
       if (stillPending) scheduleRecord(stillPending);

@@ -81,10 +81,10 @@ const MACHINE: Record<string, string> = {
 // W1-T14825: W1-T606, named only by W1-T605 in the same batch, now joins it instead of waiting a round as public_dependants.
 const EXPECTED_BATCH = ["W1-T602", "W1-T605", "W1-T606", "W1-T607"];
 const EXPECTED_REFUSED = [
-  { id: "W1-T603", reason: "not_open" }, { id: "W1-T604", reason: "reservation_absent" }, { id: "W1-T608", reason: "not_open" },
+  { id: "W1-T603", reason: "not_open" }, { id: "W1-T604", reason: "owned" }, { id: "W1-T608", reason: "not_open" },
 ];
 const HUMAN: Record<string, string> = { "W1-T601": human("W1-T601", 9), "W1-T609": human("W1-T609", 1, "blocked") };
-const prepare = (w: ReturnType<typeof moveWorld>) => { w.pub.origin.git("update-ref", "-d", "refs/rmd-id/W1-T604"); };
+const prepare = (w: ReturnType<typeof moveWorld>) => { w.pub.origin.git("update-ref", "refs/rmd-dispatch/W1-T604", w.main("public")); /* W1-T14993: an unreserved id now moves; a dispatch claim keeps W1-T604 on core */ };
 const byId = (list: Array<{ id: string; reason: string }>) => [...list].sort((a, b) => a.id.localeCompare(b.id));
 
 test("W1-T14425 criterion 3: invariant:a-machine-verified-record-is-selected-as-today — for every record whose verify is not human, the batch, its order and the refusals are origin/main's", async t => {

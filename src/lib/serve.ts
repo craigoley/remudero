@@ -178,6 +178,7 @@ import { asyncGit, checkServiceFreshness } from "./self-sync.js";
 import { boundGitCall, GATEWAY_FETCH_TIMEOUT_MS } from "./git-fetch-retry.js";
 import { reloadServePlan, touchesReloadablePlan, type PlanSourceHolder } from "./serve-plan-reload.js";
 import { publishThreadPlan } from "./thread-plan.js";
+import { serveOnlyAdvanceIn, serveOnlyVerdict, type ServeOnlyAdvanceReader } from "./serve-own-code.js";
 import { changedPathsSince, serveRestartRelevant, touchesPerRequestPath, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
@@ -218,6 +219,8 @@ import {
 import {
   createGitHubEventWakeHandler,
   createPersistentDeliveryDedupStore,
+  DEFAULT_GITHUB_EVENT_WAKE_AGGREGATE_CHECK_NAMES,
+  DEFAULT_GITHUB_EVENT_WAKE_SEMANTIC_MODE,
   createWakeCounters,
   githubDeliveryDedupPath,
   startWakeSummaryFlush,
@@ -237,7 +240,9 @@ import { createServeDrain, exitWithin } from "./serve-drain.js";
 import { publishHostServeEvidence, HOST_SERVE_ERROR_STEP, type HostServePublishOptions } from "./host-serve-evidence.js";
 import { createServeMemoryRegistry, droppableRouteCache, LEGACY_CACHE_VIEWS, readWorkerHeaps, sampleServeMemorySliced, snapshotHolder, startServeMemoryMonitor, viewBodiesHolder,
   withoutRestore, workerThreads, type CgroupHeadroom, type ServeMemoryMonitorOptions, type ServeMemoryRegistry, type TrackedWorker } from "./serve-memory.js";
-import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe, type SwapProbeRequest, type WorkerShedOutcome } from "./serve-generation.js";
+import { githubAuthProbe, gatewayPrimedProbe, onGithubDelivery, planLoadedProbe, processChannel, readModelWarmProbe, startGithubHookConfigPush, supervisedRole,
+  type GenerationChannel, type GithubHookConfig, type ReadinessProbe, type SwapProbeRequest, type WorkerShedOutcome } from "./serve-generation.js";
+import { createCheckRunCompletedQueue } from "./github-delivery-accept.js";
 import type { ConsoleProjectionWorker, FeedbackProjectionInput } from "./console-projection-worker.js";
 import { createConsoleSnapshotStore } from "./console-snapshot-store.js";
 import {
@@ -343,6 +348,38 @@ export function githubWakeMarkerResolver(
   };
 }
 
+/**
+ * W1-T14986: the same resolution as {@link githubWakeMarkerResolver}, as the whole map the hook listener answers with:
+ * core, then each live registry instance whose `state/` is mounted here.
+ */
+export function githubWakeMarkerPaths(
+  coreRepository: string,
+  coreRoot: string,
+  instances: InstanceGatewayOptions | undefined,
+  stateExists: (dir: string) => boolean = existsSync,
+): Record<string, string> {
+  const paths: Record<string, string> = { [coreRepository]: sweepWakeMarkerPath(coreRoot) };
+  if (instances === undefined) return paths;
+  for (const instance of livenessInstances(instances)) {
+    if (paths[instance.repo] === undefined && stateExists(instance.stateDir)) paths[instance.repo] = sweepWakeMarkerPath(dirname(instance.stateDir));
+  }
+  return paths;
+}
+
+/** W1-T14986: the hook config this serve resolved, for the supervisor's listener; undefined when serve takes no webhooks. */
+export function githubHookConfigOf(deps: Pick<ServeDeps, "githubEventWake" | "fleetControlRoot" | "questionsRoot" | "instances">): GithubHookConfig | undefined {
+  const wake = deps.githubEventWake;
+  if (!wake) return undefined;
+  return {
+    repository: wake.repository,
+    markerPaths: githubWakeMarkerPaths(wake.repository, deps.fleetControlRoot, { registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances }),
+    dedupPath: githubDeliveryDedupPath(deps.fleetControlRoot),
+    dedupCapacity: wake.dedupCapacity ?? DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY,
+    semanticCheckMode: wake.semanticCheckMode ?? DEFAULT_GITHUB_EVENT_WAKE_SEMANTIC_MODE,
+    aggregateCheckNames: [...(wake.aggregateCheckNames ?? DEFAULT_GITHUB_EVENT_WAKE_AGGREGATE_CHECK_NAMES)],
+  };
+}
+
 export interface ServeDeps {
   selectedRegistryObservation?: SelectedRegistryConsumerOptions;
   routeReadRollup?: RouteReadRollup;
@@ -438,7 +475,11 @@ export interface ServeDeps {
   /** W1-T4229: defaults to {@link assessGatewayCheckout} over {@link serveRepoDir}. */
   gatewayCheckout?: () => Promise<GatewayCheckoutAssessment>;
   staleExitSeams?: Pick<StaleCodeExitDeps, "scheduleRecheck" | "exit" | "drain">;
-  generation?: { requestHandoff(detail: Record<string, unknown>): void };
+  /**
+   * `channel` (W1-T14986): the supervisor's IPC channel, over which serve pushes its hook config once promoted and
+   * runs the listener's relayed follow-ups. Absent, a supervised standby uses the process's own channel.
+   */
+  generation?: { requestHandoff(detail: Record<string, unknown>): void; channel?: GenerationChannel };
   /**
    * W1-T288: GET /v1/control/status liveness deps (`ControlStatusDeps`, panel-actions.ts).
    * Injectable; defaults to real `readLedgerLines`/`Date.now`/`DEFAULT_LIVENESS_BOUND_MS`.
@@ -1666,6 +1707,9 @@ export interface StaleCodeExitDeps {
    *  on every pass (37 ms on the host, 2026-11-18). */
   pinBootPlan?: boolean;
   requestHandoff?: (detail: Record<string, unknown>) => void;
+  /** W1-T14987: judges bootSha..target off the loop; its verdict rides the ask as `serveOnly`, which the supervisor reads
+   *  to waive its handoff spacing for a merge that changes only serve's own code. Absent, the ask is as before. */
+  serveOnlyAdvance?: ServeOnlyAdvanceReader;
   /** When this generation booted, the first anchor of {@link SERVE_HANDOFF_COALESCE_MS}; defaults to construction. */
   bootedAt?: number;
 }
@@ -1939,7 +1983,10 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
       }
       coalescing = undefined;
       log("serve.handoff_requested", decision);
-      return deps.requestHandoff(decision);
+      if (!deps.serveOnlyAdvance) return deps.requestHandoff(decision);
+      const ask = deps.requestHandoff;
+      void serveOnlyVerdict(deps.serveOnlyAdvance, deps.bootSha, checkout?.targetSha).then((serveOnly) => ask({ ...decision, serveOnly }));
+      return;
     }
     log("serve.stale_code_exit", decision);
     void drainThenExit();
@@ -3187,6 +3234,8 @@ interface ServeRoutesAssembly {
   githubAppReady?: Promise<void>;
   /** W1-T13832: the reader the view routes handed out, read when a swap probe runs. */
   viewProbeReader: () => ViewProbeReader | undefined;
+  /** W1-T14986: runs a hook-listener follow-up through the route's own CI-incident consumer. */
+  checkRunCompleted: (info: CheckRunCompletedInfo) => void;
 }
 
 /** Internal route assembly that keeps the first-mint readiness signal beside the routes it protects. */
@@ -3661,7 +3710,8 @@ function assembleServeRoutes(
   // tier sibling, as the runtime backstop for whatever the compiler cannot see. See
   // `assertRoutesScopeComplete`'s own doc.
   assertRoutesScopeComplete(routes);
-  return { routes, instanceAnalyticsCaches, navBadgeScopes, viewEvents, linkRefusals, githubAppReady: githubAppRefresh.ready, selectedRegistryObserver, viewProbeReader: () => viewProbeReader };
+  const checkRunCompleted = createCheckRunCompletedQueue(onCheckRunCompleted, (step, extra) => deps.log?.(step, extra));
+  return { routes, instanceAnalyticsCaches, navBadgeScopes, viewEvents, linkRefusals, githubAppReady: githubAppRefresh.ready, selectedRegistryObserver, viewProbeReader: () => viewProbeReader, checkRunCompleted };
 }
 
 /** Every REST route `rmd serve` registers — board, panel actions, panel graph, and the shell. */
@@ -3994,7 +4044,7 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
       return drained.then(() => {});
     },
     reloadPlan: (ref) => reloadServePlan(deps.board, serveRepoDir(), ref, { log: deps.log, onReloaded: (at, read) => publishThreadPlan({ path: deps.panelGraph.planPath, repoDir: serveRepoDir(), ref: at }, read, deps.log) }),
-    ...(deps.generation ? { requestHandoff: (detail: Record<string, unknown>) => deps.generation?.requestHandoff(detail) } : {}),
+    ...(deps.generation ? { requestHandoff: (detail: Record<string, unknown>) => deps.generation?.requestHandoff(detail), serveOnlyAdvance: serveOnlyAdvanceIn(serveRepoDir()) } : {}),
     ...deps.staleExitSeams,
   });
   // THE CLOCK PORT, never the legacy signature. clock-signature-census ratchets that shape per
@@ -4194,9 +4244,20 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
     return outcome;
   };
   const swapProbesRun = new Set<string>();
+  // W1-T14986: the supervisor's hook listener answers webhooks off this thread; this generation gives it its config
+  // once promoted, and runs each accepted check run it relays.
+  const hookChannel = deps.generation && (deps.generation.channel ?? (supervisedRole(process.env) ? processChannel() : undefined));
+  let stopHookConfigPush: (() => void) | undefined;
+  if (hookChannel) {
+    onGithubDelivery(hookChannel, routeAssembly.checkRunCompleted);
+    server.setMaxListeners(server.getMaxListeners() + 1).once("close", () => stopHookConfigPush?.());
+  }
   serveGenerations.set(server, {
     handover: (reason) => staleExit.handover(reason),
-    promote: () => readModel?.reload(),
+    promote: () => {
+      readModel?.reload();
+      if (hookChannel && !stopHookConfigPush) stopHookConfigPush = startGithubHookConfigPush(hookChannel, () => githubHookConfigOf(deps), (step, extra) => deps.log?.(step, extra));
+    },
     swapProbe: (request) => void runSwapProbe(request, { reader: routeAssembly.viewProbeReader(), heldKeys: (view) => heldViewKeys(readModel?.bodies, view),
       ledgerPath: deps.ledgerPath, seen: swapProbesRun, log: deps.log }),
     shed: () => analyticsCache.shed(),

@@ -22,7 +22,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statfsSync, statSync, unlinkSync, writeFileSync, writeSync, type Stats } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statfsSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync, type Stats } from "node:fs";
 import { availableParallelism, hostname, loadavg, tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleepAsync } from "node:timers/promises";
@@ -225,6 +225,112 @@ export function pressureWidth(sample: HostPressure | undefined, current: number,
   if (sample.cpuStallPercent !== undefined) return Math.max(1, Math.floor(cores * (1 - sample.cpuStallPercent / 100)));
   if (sample.load1 !== undefined) return Math.max(1, Math.floor(cores - Math.max(0, sample.load1 - inFlight)));
   return kept;
+}
+
+/** W1-T15002: the step one CPU admission wait writes, with its reading, the host-wide in-flight count and its wait. */
+export const PROOF_CPU_ADMISSION_WAIT_STEP = "proof.cpu_admission_wait";
+/** How often a waiting proof re-reads CPU pressure; PSI's avg10 moves within seconds. */
+export const PROOF_CPU_ADMISSION_POLL_MS = 1_000;
+
+/** One reading a proof child's CPU admission rests on (W1-T15002). */
+export interface ProofCpuReading {
+  admit: boolean;
+  /** Undefined when /proc/pressure/cpu could not be read: the child is admitted as before, with no lease. */
+  sample?: HostPressure;
+  /** Live proof and test-child leases host-wide, before this one. */
+  inFlight: number;
+  /** {@link pressureWidth}: the host's unstalled cores at this reading. */
+  width: number;
+}
+
+export interface ProofCpuAdmissionPorts {
+  /** The host-wide lease directory; it defaults beside the shared test slots ({@link resolveTestSlotDir}). */
+  dir?: string;
+  readPressure?: () => HostPressure | undefined;
+  clock?: Clock;
+  sleep?: (ms: number) => Promise<unknown>;
+  pollMs?: number;
+  pid?: number;
+  pidNs?: string;
+  isPidAlive?: (pid: number) => boolean;
+  log?: (step: string, fields: Record<string, unknown>) => void;
+}
+
+/** A held CPU admission; `release` removes its lease and is safe to call twice. */
+export interface ProofCpuAdmission { release(): void }
+
+function proofCpuLeaseDir(ports: ProofCpuAdmissionPorts): string {
+  return ports.dir ?? join(resolveTestSlotDir().dir, "proof-cpu");
+}
+
+/** A lease counts while its holder beats it, and a holder in this pid namespace only while its pid lives. */
+function liveProofCpuLeases(dir: string, ports: ProofCpuAdmissionPorts, nowMs: number): number {
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return 0; /* no lease directory yet: nothing is in flight */ }
+  const silentMs = TEST_SLOT_HEARTBEAT_MS * TEST_SLOT_SILENT_BEATS;
+  const ownNs = ports.pidNs ?? readPidNamespace();
+  const alive = ports.isPidAlive ?? defaultIsPidAlive;
+  let live = 0;
+  for (const name of names) {
+    const path = join(dir, name);
+    try {
+      const held = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown; pidNs?: unknown };
+      const dead = typeof held.pid === "number" && ownNs !== undefined && held.pidNs === ownNs && !alive(held.pid);
+      if (dead || nowMs - statSync(path).mtimeMs > silentMs) { unlinkSync(path); continue; }
+      live++;
+    } catch {
+      // A lease being written or removed right now is skipped, never counted twice and never an error.
+    }
+  }
+  return live;
+}
+
+/** Whether one more proof child starts now: while the host's unstalled cores exceed the live leases (no fixed count). */
+export function readProofCpuAdmission(ports: ProofCpuAdmissionPorts = {}): ProofCpuReading {
+  const sample = (ports.readPressure ?? readHostPressure)();
+  if (sample?.cpuStallPercent === undefined) return { admit: true, inFlight: 0, width: pressureWidth(sample, 1) };
+  const inFlight = liveProofCpuLeases(proofCpuLeaseDir(ports), ports, (ports.clock ?? systemClock).now());
+  const width = pressureWidth(sample, 1);
+  return { admit: width > inFlight, sample, inFlight, width };
+}
+
+function holdProofCpuLease(ports: ProofCpuAdmissionPorts): ProofCpuAdmission {
+  const dir = proofCpuLeaseDir(ports);
+  const path = join(dir, `${ports.pid ?? process.pid}-${randomUUID()}.json`);
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path, JSON.stringify({ pid: ports.pid ?? process.pid, pidNs: ports.pidNs ?? readPidNamespace(), host: hostname() }),
+      { flag: "wx", mode: 0o600 });
+  } catch {
+    // A lease that cannot be written leaves this child uncounted by others; the child itself still runs, as before.
+    return { release() {} };
+  }
+  const beat = setInterval(() => { try { const now = (ports.clock ?? systemClock).date(); utimesSync(path, now, now); } catch { /* removed */ } },
+    TEST_SLOT_HEARTBEAT_MS);
+  beat.unref();
+  return { release() { clearInterval(beat); try { unlinkSync(path); } catch { /* already gone */ } } };
+}
+
+/**
+ * W1-T15002 — a proof sandbox or test child waits while host CPU pressure leaves no unstalled core across every proof
+ * child in flight host-wide, and starts on the first reading that shows one free. Unreadable PSI admits at once.
+ */
+export async function acquireProofCpuAdmission(ports: ProofCpuAdmissionPorts = {}): Promise<ProofCpuAdmission> {
+  const clock = ports.clock ?? systemClock;
+  const startedMs = clock.now();
+  let reading = readProofCpuAdmission(ports);
+  let waited = false;
+  while (!reading.admit) {
+    waited = true;
+    await (ports.sleep ?? sleepAsync)(ports.pollMs ?? PROOF_CPU_ADMISSION_POLL_MS);
+    reading = readProofCpuAdmission(ports);
+  }
+  if (reading.sample === undefined) return { release() {} };
+  if (waited) {
+    ports.log?.(PROOF_CPU_ADMISSION_WAIT_STEP, { cpu_stall_percent: reading.sample.cpuStallPercent, cores: reading.sample.cores,
+      width: reading.width, in_flight: reading.inFlight, wait_ms: clock.now() - startedMs });
+  }
+  return holdProofCpuLease(ports);
 }
 
 /** An UNSLOTTED caller's share divisor: `RMD_TEST_SLOTS`, else one per four cores, at least one. The slot pool itself
@@ -555,6 +661,11 @@ export interface ReservedTreeProbeHost {
   ownerUid?: number;
 }
 
+/** W1-T15112: the kernel's fixed inode for the initial pid namespace (PROC_PID_INIT_INO, 0xEFFFFFFC), as
+ *  `readlink /proc/self/ns/pid` prints it. Only a waiter here can see every namespace's members and starts. A one-entry
+ *  NSpid is not enough: NSpid counts from the namespace of the /proc mount, so any container with its own /proc reads
+ *  one entry while seeing nothing of its siblings. */
+export const INITIAL_PID_NAMESPACE = "pid:[4026531836]";
 const goneProcess = (error: unknown): boolean => ["ENOENT", "ESRCH"].includes(String((error as NodeJS.ErrnoException)?.code));
 const nsPids = (status: string): string[] | undefined => /^NSpid:[ \t]*([0-9]+(?:[ \t]+[0-9]+)*)[ \t]*$/m.exec(status)?.[1]?.split(/[ \t]+/);
 /** Field 22 of a /proc/<pid>/stat line: kernel start ticks since boot, one clock for every pid namespace. */
@@ -583,7 +694,10 @@ export function probeRecordedPidNamespace(held: TestSlotHolder, host: ReservedTr
       `namespace init ${pid} start ${start} ${BigInt(start!) > ownerStart ? ">" : "<="} owner start ${ownerStart}`);
   };
   try {
-    if (read("/proc/self/ns/pid") === held.pidNs) return judgeInit("1");
+    const waiterNs = read("/proc/self/ns/pid");
+    if (waiterNs === held.pidNs) return judgeInit("1");
+    // W1-T15112: a container with its own /proc reads a one-entry NSpid too, yet sees none of a sibling's members.
+    if (waiterNs !== INITIAL_PID_NAMESPACE) return unknown(`waiter is not in the initial pid namespace (${waiterNs}): another namespace's members are invisible from here`);
     const nspid = nsPids(read("/proc/self/status"));
     if (nspid?.length !== 1) return unknown("waiter is not an ancestor of the recorded pid namespace");
     const pids = (host.list ?? (() => readdirSync("/proc")))().filter(name => /^[0-9]+$/.test(name));
@@ -620,8 +734,10 @@ export type ProcessStartScan = { complete: true; starts: ReadonlySet<string> } |
 export function scanProcessStarts(host: ReservedTreeProbeHost = {}): ProcessStartScan {
   const unknown = (reason: string): ProcessStartScan => ({ complete: false, reason });
   if ((host.platform ?? process.platform) !== "linux") return unknown("process start scan requires linux");
-  const read = host.read ?? ((path: string) => readFileSync(path, "utf8"));
+  const read = host.read ?? ((path: string) => path.endsWith("/ns/pid") ? readlinkSync(path) : readFileSync(path, "utf8"));
   try {
+    // W1-T15112: only the initial namespace sees every start on the boot; a sibling container's own /proc does not.
+    if (read("/proc/self/ns/pid") !== INITIAL_PID_NAMESPACE) return unknown("waiter is not in the initial pid namespace");
     if (nsPids(read("/proc/self/status"))?.length !== 1) return unknown("waiter is not in the initial pid namespace");
     const pids = (host.list ?? (() => readdirSync("/proc")))().filter(name => /^[0-9]+$/.test(name));
     // A hidepid mount hides other users' processes, pid 1 among them: an absence there proves nothing.

@@ -876,7 +876,7 @@ import {
 // renderTraceChain/traceForward/traceReverse: only traceCommand read them, and it moved to
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
-import { checkCommitMessage, defaultPreflightSpawn, fitConventionalTitle, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
+import { CONVENTIONAL_LIMITS, checkCommitMessage, defaultPreflightSpawn, fitConventionalTitle, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
 import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "./lib/plan-filing-fix-guard.js";
 import { resolveProjectPreflight, runProjectPreflight } from "./lib/ci-project-preflight.js";
 import { observeSynchronousPreflightPhase, reportPreflightPhase } from "./lib/preflight-phase-progress.js";
@@ -1074,6 +1074,7 @@ import {
   approvePrTitle,
   approveProposal,
   classifyProposal,
+  releasedHumanTaskPredicate,
   SKILL_DRAFT_ID_PREFIX,
   draftsDueOnDaemon,
   indexInboxDraftReceipts,
@@ -3162,6 +3163,7 @@ import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type Inb
 import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
+import { armCliTokenRenewal } from "./lib/cli-token-renewal.js";
 import { withManagedGardenTokenRefresh } from "./lib/managed-garden-token.js";
 import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, planStaleHoldArchive, readDispatchClaimTaskIdsSteps, remoteBranchHeadsSteps, archiveStaleHoldsSteps, staleHoldRestoreCommand, STALE_HOLD_ARCHIVE_CAP, pruneDeletableBranchesSteps, readNamedInSourceSteps, readRemoteBranchTipsSteps, readTipInMainMembershipSteps, remoteBranchNamesSteps, tipInMainFor, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
 // The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
@@ -19230,19 +19232,6 @@ export function readInlinePlanRecords(planPath: string): Array<{ taskId: string;
   return out;
 }
 
-/** Read `plan/tasks.d/*.yaml` as `{ taskId, path, text }`, skipping anything without an `- id:`. */
-function readPlanShards(dir: string): Array<{ taskId: string; path: string; text: string }> {
-  const out: Array<{ taskId: string; path: string; text: string }> = [];
-  for (const name of readdirSync(dir)) {
-    if (!name.endsWith(".yaml")) continue;
-    const path = join(dir, name);
-    const text = readFileSync(path, "utf8");
-    const id = text.match(/^- id: (\S+)/m)?.[1];
-    if (id) out.push({ taskId: id, path, text });
-  }
-  return out;
-}
-
 export function windowShortShards(
   shards: ReadonlyArray<{ taskId: string; text: string }>,
   credited: ReadonlySet<string>,
@@ -19296,7 +19285,7 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
   const reportWindowShort = () => {
     if (windowShort.length === 0) return;
     const names = windowShort.slice(0, 20).join(", ") + (windowShort.length > 20 ? ` (+${windowShort.length - 20} more)` : "");
-    console.error(`### rmd plan-reconcile: WINDOW-SHORT — ${windowShort.length} queued shard(s) are merged on origin/main but their merge subject and changed paths are outside the credit scan windows (subjects: last ${MERGE_SUBJECT_SCAN_LIMIT} commits, paths: last ${MERGED_PATHS_SCAN_LIMIT}) or carry no (#N), so they cannot be judged and were NOT flipped: ${names} — flip them by hand in a plan-only PR`);
+    console.error(`### rmd plan-reconcile: WINDOW-SHORT — ${windowShort.length} queued shard(s) are merged on origin/main but their merge commit carries no (#N) or its changed paths could not be read by sha, so they cannot be judged and were NOT flipped: ${names} — flip them by hand in a plan-only PR`);
     (deps.log ?? (() => {}))("plan.reconcile.window_short", { count: windowShort.length });
   };
   try {
@@ -19342,6 +19331,7 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
     mode: write ? "write" : "dry-run",
     rewritten: summary.rewritten.length,
     skipped: summary.skipped,
+    ...(summary.sharedShards?.length ? { shared_shards: summary.sharedShards } : {}),
     ...(inline && "queued" in inline ? { inline_queued: inline.queued, inline_creditable: inline.creditable.length } : {}),
   });
   console.log(renderPlanReconcile(summary, write, inline));
@@ -19611,6 +19601,8 @@ export function renderPlanReconcile(summary: ReconcileSummary, write: boolean, i
     `### rmd plan-reconcile${write ? " --write" : " (dry run — nothing written)"}\n` +
     `${summary.rewritten.length} shard(s) ${write ? "reconciled" : "would be reconciled"} to status: merged` +
     (skipped ? `\nskipped: ${skipped}` : "") +
+    // W1-T11183: a file holding several records is read but never rewritten; name its records so none is unaccounted.
+    (summary.sharedShards?.length ? `\nleft as they are (their file holds several records): ${summary.sharedShards.join(" ")}` : "") +
     (summary.rewritten.length > 0 && !write ? reviewHint : "") +
     (inline && "unreadable" in inline ? `\nplan/tasks.yaml: unreadable (${inline.unreadable}), its queued records were not counted` : "") +
     (inline && "queued" in inline && inline.queued > 0
@@ -33272,6 +33264,15 @@ export const WORKER_CHANGED_NOTHING_REASON = "the worker changed nothing";
 /** W1-T4450: how much of a report a missing-line refusal carries into the ledger. */
 export const REFUSED_REPORT_TAIL_CHARS = 800;
 
+/** W1-T15109: `message` with every body line over commitlint's body-max-line-length wrapped at spaces
+ *  (lib/commit-message.ts `wrapBodyLines`). The subject and every line that already fits stay byte-for-byte;
+ *  nothing is truncated. A 244-character harness-derived reason once refused every later preflight push. */
+function wrapLongBodyLines(message: string): string {
+  const [subject, ...body] = message.split("\n");
+  return [subject, ...body.flatMap((line) =>
+    line.length > CONVENTIONAL_LIMITS.bodyMaxLineLength ? wrapBodyLines(line) : [line])].join("\n");
+}
+
 export function harnessCommitForShellLessWorker(
   input: Parameters<RunTaskCommandHost["harnessCommitForShellLessWorker"]>[0],
   deps: Parameters<RunTaskCommandHost["harnessCommitForShellLessWorker"]>[1] = {},
@@ -33294,8 +33295,8 @@ export function harnessCommitForShellLessWorker(
     return input.commitCount;
   }
   const message = withAssignmentTrailer(
-    fixRoundCommitMessage(input.report,
-      asked ?? `${input.derivedCommit!.subject}\n\nHarness-derived subject: ${input.derivedCommit!.reason}`),
+    fixRoundCommitMessage(input.report, wrapLongBodyLines(
+      asked ?? `${input.derivedCommit!.subject}\n\nHarness-derived subject: ${input.derivedCommit!.reason}`)),
     input.assignmentId,
   );
   const subjectSource = asked === undefined ? "harness-derived" : input.subjectSource ?? "worker-authored";
@@ -38847,6 +38848,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
       openProposalIds,
       isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
       isDeclined: declinedWithReceipts(ledgerLinesForRatify, join(config.root, "state")),
+      isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLinesForRatify),
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
@@ -38927,6 +38929,7 @@ function loadProposalForRatify(
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
     isDeclined: declinedWithReceipts(ledgerLines, join(inboxRoot, "state")),
+    isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLines),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };
@@ -38969,6 +38972,7 @@ function loadProposalsForRatify(
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
     isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
+    isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLines),
   };
 
   const found: { id: string; proposal: Proposal; classification: InboxClassification }[] = [];
@@ -45331,7 +45335,7 @@ function commandSyntax(name: string): string {
 // (test/run-task.test.ts, test/install-symlink-refusal.test.ts, plus this file's own
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
-import { reconcilePlan, reconcileShardStatus, revertedRequeues, type RevertedRequeue, type ReconcileSummary } from "./lib/plan-reconcile.js";
+import { readPlanShards, reconcilePlan, reconcileShardStatus, revertedRequeues, type RevertedRequeue, type ReconcileSummary } from "./lib/plan-reconcile.js";
 import { PLAN_RECONCILE_LANDING_BODY_BUDGET, PLAN_RECONCILE_LANDING_RECORD_LIMIT, takePlanReconcileBatch } from "./lib/plan-reconcile-batch.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
@@ -45350,7 +45354,7 @@ import {
   escalateRunChildContract, type RunChildContractEscalation, type RunChildModeDecision, type RunChildModeEvidence,
 } from "./lib/run-child-mode.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
-import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, MERGE_SUBJECT_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildBehindMainByPrAsync, buildCreditCandidates, buildEscalationReconcileCandidates, buildEscalationReconcileCandidatesAsync, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger, usesUntaskedReviewMetadata } from "./lib/tick-read-worker.js";
+import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildBehindMainByPrAsync, buildCreditCandidates, buildEscalationReconcileCandidates, buildEscalationReconcileCandidatesAsync, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger, usesUntaskedReviewMetadata } from "./lib/tick-read-worker.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
@@ -46323,11 +46327,11 @@ async function main(
   // cost ~120ms (700/723/734 vs 592/615/592 with GH_TOKEN preset). The mint is AWAITED and carries
   // EXCHANGE_TIMEOUT_MS (20s, src/lib/github-app.ts:66), so on an unreachable network that ceiling
   // stood between the operator and `usage:`.
-  if (!process.env.GH_TOKEN) {
-    await refreshInstallationToken({
-      log: (step, extra) => console.error(`rmd: ${step} ${extra ? JSON.stringify(extra) : ""}`.trim()),
-    });
-  }
+  // W1-T15038: a non-service verb keeps a live token through the shared renewal loop, not a one-hour one-shot mint.
+  await armCliTokenRenewal({
+    cmd, refresh: refreshInstallationToken,
+    log: (step, extra) => console.error(`rmd: ${step} ${extra ? JSON.stringify(extra) : ""}`.trim()),
+  });
   // W1-T79: CLI self-freshness, checked directly after the (mandatory, every-call) help
   // preamble above and BEFORE any command's real dispatch — the #138 incident shape: `rmd
   // correct` existed on origin/main, but the OPERATOR's own invocation was a stale checkout
@@ -46664,7 +46668,6 @@ export {
   MAX_RETAINED_REMEDY_LINES,
   MAX_RETAINED_VERDICT_LINES,
   MERGED_PATHS_SCAN_LIMIT,
-  MERGE_SUBJECT_SCAN_LIMIT,
   RETAINED_POOL_HEADER,
   RETAINED_REMEDY_HEADER,
   RETAINED_RULE_SUITES_HEADER,

@@ -1,0 +1,229 @@
+/**
+ * W1-T14865 — a red required check on an open ops-catalog pull request reaches the operator inbox within an hour.
+ *
+ * The fleet's lanes read only the product repositories, so a red required check on an ops catalog pull request went
+ * unnoticed. `watchOpsPullRequests` lists the ops catalog's open pull requests and escalates each whose required check
+ * failed at least an hour ago on its current head, once per (pull request, head).
+ */
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+
+import { OPS_PR_RED_STALLED_STEP, OPS_PR_WATCH_UNREADABLE_STEP, firstErrorLine, readOpsPrJobLog, watchOpsPullRequests } from "#src/lib/ops-pr-watch.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import { appendLedger, rotateLedger } from "#src/lib/ledger.js";
+import { readLedgerUnionRawLinesAsync, readLedgerUnionRawLinesSync } from "#src/lib/ledger-union.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { prReferentFromIssueText } from "#src/lib/escalate.js";
+
+const REPO = "acme/remudero-ops";
+const NOW = Date.parse("2026-11-25T18:20:00Z");
+const HEAD = "0b39d308c0000000000000000000000000000000";
+
+/** A GET-only api over one open pull request whose ops-gate job concluded failure at `failedAt`. */
+function api(failedAt: string, head = HEAD, calls: string[] = []) {
+  return async (path: string): Promise<unknown> => {
+    calls.push(path);
+    if (path.startsWith(`repos/${REPO}/pulls`)) return [{ number: 748, html_url: `https://github.com/${REPO}/pull/748`, head: { sha: head } }];
+    if (path.endsWith("/protection/required_status_checks")) return { contexts: ["shadow-registry", "ops-gate", "remudero-review"] };
+    if (path.startsWith(`repos/${REPO}/actions/runs?head_sha=`)) return { workflow_runs: [{ id: 11, conclusion: "failure" }, { id: 12, conclusion: "success" }] };
+    if (path === `repos/${REPO}/actions/runs/11/jobs?per_page=100`) return { jobs: [{ id: 21, name: "ops-gate", conclusion: "failure", completed_at: failedAt }] };
+    if (path === `repos/${REPO}/actions/jobs/21/logs`) return "2026-11-24T22:16:40.0Z ##[error]core-lint: superseded_by unknown task\n";
+    throw new Error(`unexpected path ${path}`);
+  };
+}
+
+async function watch(failedAt: string, ledgerLines: string[] = [], head = HEAD) {
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const escalations: Escalation[] = [];
+  const result = await watchOpsPullRequests({ repository: REPO, api: api(failedAt, head),
+    readJobLog: async (path) => String(await api(failedAt, head)(path)), nowMs: NOW, ledgerLines,
+    log: (step, extra) => rows.push({ step, extra }), escalate: (e) => { escalations.push(e); return "https://github.com/acme/remudero/issues/9"; } });
+  return { result, rows, escalations };
+}
+
+test("W1-T14865 criterion 1: a required check that failed over an hour ago on an unchanged head is escalated once", async () => {
+  const { rows, escalations } = await watch("2026-11-24T22:16:41Z");
+  assert.equal(escalations.length, 1, "one operator escalation");
+  assert.match(escalations[0]!.summary, /#748: required check ops-gate/);
+  assert.match(escalations[0]!.detail, /ops catalog pull request 748 in acme\/remudero-ops/i);
+  assert.equal(prReferentFromIssueText(escalations[0]!.detail), undefined,
+    "the ops catalog pull request must not be treated as the product repository's PR 748");
+  assert.equal(escalations[0]!.headSha, HEAD);
+  const red = rows.filter((r) => r.step === OPS_PR_RED_STALLED_STEP);
+  assert.equal(red.length, 1);
+  assert.equal(red[0]!.extra.pr_number, 748);
+  assert.equal(red[0]!.extra.check, "ops-gate");
+  assert.equal(red[0]!.extra.first_error_line, "core-lint: superseded_by unknown task");
+});
+
+test("W1-T14865 criterion 1: a text log read failure is unreadable and cannot produce a partial escalation", async () => {
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let escalations = 0;
+  const result = await watchOpsPullRequests({ repository: REPO, api: api("2026-11-24T22:16:41Z"),
+    readJobLog: async () => { throw new Error("plain-text transport failed"); }, nowMs: NOW, ledgerLines: [],
+    log: (step, extra) => rows.push({ step, extra }), escalate: () => { escalations++; return "https://example.test/escalation"; } });
+  assert.equal(result.escalated.length, 0);
+  assert.equal(escalations, 0);
+  assert.deepEqual(rows.map((row) => row.step), [OPS_PR_WATCH_UNREADABLE_STEP]);
+});
+
+test("W1-T14865 criterion 1: the production job-log adapter preserves the plain-text GitHub response", async () => {
+  const calls: string[][] = [];
+  const body = await readOpsPrJobLog(`repos/${REPO}/actions/jobs/21/logs`, async (_file, args) => {
+    calls.push([...args]);
+    return { stdout: "2026-11-24T22:16:40.0Z ##[error]raw log text\n", stderr: "" };
+  });
+  assert.deepEqual(calls, [["api", `repos/${REPO}/actions/jobs/21/logs`]]);
+  assert.equal(firstErrorLine(body), "raw log text");
+});
+
+test("W1-T14865 criterion 1: production plain-text logs supply the first error in a real watch escalation", async () => {
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const escalations: Escalation[] = [];
+  const result = await watchOpsPullRequests({ repository: REPO, api: api("2026-11-24T22:16:41Z"),
+    readJobLog: (path) => readOpsPrJobLog(path, async () => ({ stdout: "2026-11-24T22:16:40.0Z ##[error]from production transport\n", stderr: "" })),
+    nowMs: NOW, ledgerLines: [], log: (step, extra) => rows.push({ step, extra }),
+    escalate: (value) => { escalations.push(value); return "https://example.test/ops-alert"; } });
+  assert.equal(result.escalated.length, 1);
+  assert.match(escalations[0]!.detail, /First error line: from production transport/);
+  assert.equal(rows.find((row) => row.step === OPS_PR_RED_STALLED_STEP)?.extra.first_error_line,
+    "from production transport");
+});
+
+test("W1-T14865 criterion 1: an escalation without a durable URL does not consume the head", async () => {
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const result = await watchOpsPullRequests({ repository: REPO, api: api("2026-11-24T22:16:41Z"),
+    readJobLog: async (path) => String(await api("2026-11-24T22:16:41Z")(path)), nowMs: NOW, ledgerLines: [],
+    log: (step, extra) => rows.push({ step, extra }), escalate: () => "" });
+  assert.equal(result.escalated.length, 0);
+  assert.equal(rows.filter((row) => row.step === OPS_PR_RED_STALLED_STEP).length, 0);
+});
+
+test("W1-T14865 criterion 2: invariant:once-per-head — a second tick on the same head writes no second escalation", async () => {
+  const first = await watch("2026-11-24T22:16:41Z");
+  const ledger = first.rows.map((r) => JSON.stringify({ step: r.step, ...r.extra }));
+  const second = await watch("2026-11-24T22:16:41Z", ledger);
+  assert.equal(second.escalations.length, 0, "the same head is not escalated twice");
+  assert.equal(second.rows.filter((r) => r.step === OPS_PR_RED_STALLED_STEP).length, 0);
+  const pushed = await watch("2026-11-24T22:16:41Z", ledger, "1111111110000000000000000000000000000000");
+  assert.equal(pushed.escalations.length, 1, "a new head is its own escalation");
+});
+
+test("W1-T14865 criterion 2: once-per-head memory survives a real ledger rotation", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}ops-pr-watch-rotation-`));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ledger = join(dir, "ledger.ndjson");
+  appendLedger(ledger, { step: OPS_PR_RED_STALLED_STEP, run_id: "test-run", task_id: "OPS-PR-748", pr_number: 748, head_sha: HEAD, ts: "2026-11-24T23:30:00Z" },
+    { actor: () => "operator" });
+  const rotation = rotateLedger(ledger, { ceilingBytes: 1, smoothingWindowMs: 0 });
+  assert.equal(rotation.rotated, true, "the fixture must exercise archive rotation");
+  const union = readLedgerUnionRawLinesSync(dir, { keep: (line) => line.includes(OPS_PR_RED_STALLED_STEP), refuseIncomplete: true });
+  assert.equal(union.ok, true);
+  assert.equal(union.rawLines.length, 1, "the durable row is read back from the rotation");
+  const second = await watch("2026-11-24T22:16:41Z", union.rawLines);
+  assert.equal(second.escalations.length, 0);
+  assert.equal(second.rows.filter((row) => row.step === OPS_PR_RED_STALLED_STEP).length, 0);
+  const { opsPullRequestWatchTick } = await import("#src/lib/ops-pr-watch.js");
+  let tickResult: Awaited<ReturnType<typeof watchOpsPullRequests>> | undefined;
+  let archiveReadFinished = false;
+  const tick = opsPullRequestWatchTick({ repository: () => REPO, api: api("2026-11-24T22:16:41Z"),
+    ledgerLines: async () => {
+      const read = await readLedgerUnionRawLinesAsync(dir, { keep: (line) => line.includes(OPS_PR_RED_STALLED_STEP), refuseIncomplete: true });
+      archiveReadFinished = true;
+      assert.equal(read.ok, true);
+      return read.rawLines;
+    }, escalate: () => "https://example.test/should-not-be-created" },
+  { clock: { now: () => NOW }, ledgerLines: () => [], log: () => {}, run: async (input) => (tickResult = await watchOpsPullRequests(input)) });
+  const started = tick();
+  assert.ok(started);
+  assert.equal(archiveReadFinished, false, "archive traversal starts detached from the daemon tick");
+  await started;
+  assert.equal(archiveReadFinished, true);
+  assert.equal(tickResult?.escalated.length, 0, "the daemon tick reads durable per-head memory before watching");
+});
+
+test("W1-T14865 criterion 3: a check that failed under an hour ago, or a pull request pushed since, is not escalated", async () => {
+  const recent = await watch("2026-11-25T17:40:00Z");
+  assert.equal(recent.escalations.length, 0, "40 minutes red is not yet stalled");
+  assert.equal(recent.rows.length, 0);
+  // A push moves the head; the failure on the old head is not on the head the pull request now has.
+  const calls: string[] = [];
+  const fresh = await watchOpsPullRequests({ repository: REPO, nowMs: NOW, ledgerLines: [], log: () => {},
+    api: async (path) => {
+      calls.push(path);
+      if (path.startsWith(`repos/${REPO}/actions/runs?head_sha=`)) return { workflow_runs: [] };
+      return api("2026-11-24T22:16:41Z", "2222222220000000000000000000000000000000")(path);
+    } });
+  assert.equal(fresh.escalated.length, 0, "the new head has no failed run yet");
+});
+
+test("W1-T14865: an unreadable pull request list writes one unreadable row and never escalates", async () => {
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let escalated = 0;
+  const failing = async () => { throw new Error("HTTP 502"); };
+  const first = await watchOpsPullRequests({ repository: REPO, api: failing, nowMs: NOW, ledgerLines: [],
+    log: (step, extra) => rows.push({ step, extra }), escalate: () => { escalated++; } });
+  assert.equal(first.unreadable, "HTTP 502");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.step, OPS_PR_WATCH_UNREADABLE_STEP);
+  const again = await watchOpsPullRequests({ repository: REPO, api: failing, nowMs: NOW,
+    ledgerLines: [JSON.stringify({ step: OPS_PR_WATCH_UNREADABLE_STEP, ...rows[0]!.extra })], log: (step, extra) => rows.push({ step, extra }) });
+  assert.equal(again.unreadable, "HTTP 502");
+  assert.equal(rows.length, 1, "an unchanged failure is not re-written");
+  assert.equal(escalated, 0);
+  assert.equal(firstErrorLine({ not: "text" }), undefined);
+});
+
+test("W1-T14865: without branch protection every failed job counts as required", async () => {
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const base = api("2026-11-24T22:16:41Z");
+  await watchOpsPullRequests({ repository: REPO, nowMs: NOW, ledgerLines: [], log: (step, extra) => rows.push({ step, extra }),
+    escalate: () => "https://github.com/acme/remudero/issues/9",
+    api: async (path) => { if (path.endsWith("/protection/required_status_checks")) throw new Error("HTTP 403"); return base(path); } });
+  const red = rows.filter((r) => r.step === OPS_PR_RED_STALLED_STEP);
+  assert.equal(red.length, 1);
+  assert.equal(red[0]!.extra.required_source, "every_job");
+});
+
+test("W1-T14865: the daemon tick reads at most once per interval and never while a read is in flight", async () => {
+  const { opsPullRequestWatchTick, OPS_PR_WATCH_EVERY_MS } = await import("#src/lib/ops-pr-watch.js");
+  let now = NOW;
+  let runs = 0;
+  let release: () => void = () => {};
+  const rows: string[] = [];
+  const tick = opsPullRequestWatchTick({ repository: () => REPO, api: api("2026-11-24T22:16:41Z") },
+    { clock: { now: () => now }, ledgerLines: () => [], log: (step) => rows.push(step),
+      run: () => { runs++; return new Promise((resolve) => { release = () => resolve({ escalated: [] }); }); } });
+  const first = tick();
+  assert.ok(first, "the first tick starts a read");
+  assert.equal(tick(), undefined, "a read in flight is not started again");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  release(); await first;
+  now += OPS_PR_WATCH_EVERY_MS - 1;
+  assert.equal(tick(), undefined, "within the interval nothing starts");
+  now += 1;
+  const second = tick(); assert.ok(second); await new Promise<void>((resolve) => setImmediate(resolve)); release(); await second;
+  assert.equal(runs, 2);
+  const thrown = opsPullRequestWatchTick({ repository: () => REPO, api: api("x") },
+    { clock: { now: () => now }, ledgerLines: () => [], log: (step) => rows.push(step), run: async () => { throw new Error("boom"); } });
+  await thrown();
+  assert.deepEqual(rows, [OPS_PR_WATCH_UNREADABLE_STEP], "a thrown read writes one unreadable row");
+  const lostRow = opsPullRequestWatchTick({ repository: () => REPO, api: api("x") },
+    { clock: { now: () => now }, ledgerLines: () => [], log: () => { throw new Error("ledger full"); }, run: async () => { throw new Error("boom"); } });
+  await lostRow(); // a log that throws while recording a failed read never escapes the tick
+  assert.equal(opsPullRequestWatchTick(undefined, { clock: { now: () => now }, ledgerLines: () => [], log: () => {}, run: async () => ({ escalated: [] }) })(), undefined);
+  assert.equal(opsPullRequestWatchTick({ repository: () => undefined, api: api("x") },
+    { clock: { now: () => now }, ledgerLines: () => [], log: () => {}, run: async () => ({ escalated: [] }) })(), undefined, "no repository yet, no read");
+});
+
+test("W1-T14865: the daemon hands the watch only its own rows from the ledger", async () => {
+  const { isOpsPullRequestWatchRow } = await import("#src/lib/daemon.js");
+  assert.equal(isOpsPullRequestWatchRow(JSON.stringify({ step: OPS_PR_RED_STALLED_STEP, pr_number: 748 })), true);
+  assert.equal(isOpsPullRequestWatchRow(JSON.stringify({ step: OPS_PR_WATCH_UNREADABLE_STEP })), true);
+  assert.equal(isOpsPullRequestWatchRow(JSON.stringify({ step: "ops_pr.other" })), false);
+  assert.equal(isOpsPullRequestWatchRow(JSON.stringify({ step: "fix.dispatch" })), false);
+  assert.equal(isOpsPullRequestWatchRow("{\"step\":\"ops_pr.red_stalled\""), false, "a torn line is skipped");
+});

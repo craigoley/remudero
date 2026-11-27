@@ -11,6 +11,9 @@
 import { existsSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { BoardSnapshotSource } from "./board.js";
+import type { CheckRunCompletedInfo, GithubHookConfig } from "./github-delivery-accept.js";
+// W1-T14986: the hook config lives beside the fast path, so the baked listener imports nothing that reaches this module.
+export { isGithubHookConfig, type GithubHookConfig } from "./github-delivery-accept.js";
 import { systemClock, type Clock } from "./clock.js";
 import type { GitHub } from "./status.js";
 import type { Plan } from "./plan.js";
@@ -37,6 +40,10 @@ export const GENERATION_MESSAGES = {
   restore_workers: "rmd.restore_workers",
   restore_workers_done: "rmd.restore_workers_done",
   swapProbe: "rmd.swap_probe",
+  /** W1-T14986: supervisor -> active generation, an accepted webhook's post-ack work from the hook listener. */
+  githubDelivery: "rmd.github_delivery",
+  /** W1-T14986: generation -> supervisor, the hook config the listener answers with. */
+  githubHookConfig: "rmd.github_hook_config",
 } as const;
 
 export interface GenerationMessage {
@@ -282,4 +289,51 @@ export async function listenReadiness(server: Server, socketPath: string, probes
   });
   server.setMaxListeners(server.getMaxListeners() + 1).once("close", () => privateServer.close());
   return privateServer;
+}
+
+/** W1-T14986: the supervisor relays a listener-accepted check run; it runs here, on the active generation, after the 202. */
+export function onGithubDelivery(channel: GenerationChannel, handle: (info: CheckRunCompletedInfo) => void): void {
+  channel.onMessage((message) => {
+    if (message.type !== GENERATION_MESSAGES.githubDelivery) return;
+    const info = message.checkRunCompleted as CheckRunCompletedInfo | undefined;
+    if (!info || typeof info !== "object" || typeof info.sha !== "string" || typeof info.name !== "string" || typeof info.id !== "number") return;
+    handle(info);
+  });
+}
+
+/** W1-T14986: how often the active generation re-reads its hook config (an instance onboarded meanwhile adds a marker path). */
+export const GITHUB_HOOK_CONFIG_REFRESH_MS = 60_000;
+
+/**
+ * W1-T14986: pushes `read()` now, then again on each tick whenever it differs from the last one pushed. A read that
+ * throws pushes nothing and is logged; the listener keeps the last config it was given. Returns the stop.
+ */
+export function startGithubHookConfigPush(
+  channel: GenerationChannel,
+  read: () => GithubHookConfig | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  every: (tick: () => void, ms: number) => () => void = (tick, ms) => {
+    const timer = setInterval(tick, ms);
+    timer.unref();
+    return () => clearInterval(timer);
+  },
+): () => void {
+  let last: string | undefined;
+  const push = (): void => {
+    let config: GithubHookConfig | undefined;
+    try {
+      config = read();
+    } catch (error) {
+      // Recorded, never thrown: the listener keeps answering with the config it already holds.
+      log("github.wake.unavailable", { reason: "hook_config_unread", error: String((error as Error)?.message ?? error) });
+      return;
+    }
+    if (config === undefined) return;
+    const text = JSON.stringify(config);
+    if (text === last) return;
+    last = text;
+    channel.send({ type: GENERATION_MESSAGES.githubHookConfig, config });
+  };
+  push();
+  return every(push, GITHUB_HOOK_CONFIG_REFRESH_MS);
 }

@@ -20,7 +20,7 @@ const changeOf = (w: MoveWorld) => {
 test("W1-T14773 criterion 1: a record a public record names as superseded_by stays public, and the rest of the batch moves", async t => {
   const w = moveWorld(t, { "W1-T1": record("W1-T1"), "W1-T2": RETIRED_NAMING("W1-T2", "W1-T1"), "W1-T3": record("W1-T3") });
   // W1-T14825: a namer that can move takes the named record with it; this namer cannot (no reservation), so both stay.
-  w.pub.origin.git("update-ref", "-d", "refs/rmd-id/W1-T2");
+  w.pub.origin.git("update-ref", "refs/rmd-dispatch/W1-T2", w.main("public")); // W1-T14993: an unreserved id now moves; a dispatch claim keeps W1-T2 on core
   const copy = await w.run();
   assert.equal(copy.out.step, "copy", copy.lines.join("\n"));
   assert.equal(changeOf(w), `ops A\t${shard("W1-T3")}`, "THE CLAIM: only the unnamed record is copied");

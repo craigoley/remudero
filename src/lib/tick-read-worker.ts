@@ -27,13 +27,16 @@ import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
 import { escalationTaskId, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText, escalationHeadSha } from "./escalate.js";
-import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, classifyChangesRequested, pullReviewsRestArgs, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation, combinedStatusRestArgs, openPrsRestArgs, MERGE_STATE_HYDRATION_CAP, SCANNER_BLOCKER_HYDRATION_CAP, REVIEW_QUEUE_HOLD_READ_CAP, CODEQL_HEAD_ALERT_HYDRATION_CAP, WORKFLOW_RUN_HYDRATION_CAP, type MergeStateObservation } from "./open-prs-rest.js";
+import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, classifyChangesRequested, pullReviewsRestArgs, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation, combinedStatusRestArgs, openPrsRestArgs, MERGE_STATE_HYDRATION_CAP, SCANNER_BLOCKER_HYDRATION_CAP, REVIEW_QUEUE_HOLD_READ_CAP, CODEQL_HEAD_ALERT_HYDRATION_CAP, WORKFLOW_RUN_HYDRATION_CAP, type MergeStateObservation, createHeadReadGate, recordHeadReadCounts, type HeadReadGate } from "./open-prs-rest.js";
+import { peekChangedHeads, pruneAcknowledgedChangedHeads } from "./github-event-wake.js";
+import { readDrainLock } from "./drain-lock.js";
+import { DEFAULT_GITHUB_EVENT_WAKE_HEAD_RECHECK_MS, loadDefaultPolicy, type Policy } from "./policy.js";
 import { createHash } from "node:crypto";
 import { codeqlAlertsReadDue } from "./pr-blocker.js";
 import { planFilesIdentity } from "./thread-plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import { appendLedger } from "./ledger.js";
-import { fixedClock, systemClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { classifyLogFetchFailure, logFetchRetryAtMs, readCheckRunOutputAsync } from "./ci-incidents.js";
 import { createSizedMemo } from "./ledger-union.js";
 import { type BoardItem } from "./board-review.js";
@@ -263,6 +266,8 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   fetchAsync?: GhApiFetcher;
   pacer?: GhCallPacer;
   log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** W1-T14809: the head-read gate's seams; absent, the real `git ls-remote`, clock and policy answer. */
+  headReads?: HeadReadSweepIo;
 } = {}) {
   const { owner, repo, config, ledgerPath, checkoutRoot } = options;
   const log = io.log ?? (() => {});
@@ -275,6 +280,8 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   let openFiles = files;
   const filingFiles = loadPlanFilingFileCache(join(config.root, "state"));
   const stageReuse = createOpenPrStageReuse();
+  const headReadSweeper = createHeadReadSweeper();
+  const headReadGate = headReadSweeper.gate;
   if (filingFiles.unreadable !== undefined) log("plan_filing_files.store_unreadable", { reason: filingFiles.unreadable });
   let reads = new Map<string, unknown>();
   let generationClock = 0;
@@ -338,11 +345,13 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     github.resetFailureFlags?.();
     let openPrRows: OpenPrRest[] | undefined;
     let openPrError: string | undefined;
-    try { openPrRows = await fetchTickOpenPrs(owner, repo, fetchAsync, pacer); }
+    await headReadSweeper.begin(config.root, checkoutRoot, io.headReads);
+    try { openPrRows = await fetchTickOpenPrs(owner, repo, fetchAsync, pacer, headReadGate); }
     catch (error) {
       openPrError = String(error);
       log("read_plane.open_failed", { reason: openPrError });
     }
+    recordHeadReadCounts(dirname(ledgerPath), headReadGate.counts());
     let prior = request.previousProjection;
     if (!prior) {
       const stored = readFileIfExists(join(config.root, "state", "status.json"));
@@ -472,7 +481,7 @@ export function buildStaleGateWorkflowsByPr(
   owner: string,
   repo: string,
   openPrs: readonly OpenPrView[],
-): Map<number, string[]> {
+): Map<number, readonly string[]> {
   const out = new Map<number, string[]>();
   for (const pr of openPrs) {
     if (pr.checksState !== "red") continue;
@@ -1700,6 +1709,7 @@ function* ciFailuresSteps(
  * cancelledRequiredCheckNames, agreeing with fetchCiFailures/checksStateFromRollup.
  * Resolve jobId from URL or externalId (posted URLs may become /runs/<check-run-id>);
  * unresolved means a named requeueCheck no-op, never a guessed target.
+ * Run-scoped posts can supply an attempt only as aliases of a verified producer job.
  * W1-T2283 (#2794/#2841): requiredContexts must be readable but must not narrow cancellations.
  * ci-gate reports FAILURE when a non-required sibling such as coverage-ratchet is CANCELLED;
  * filtering by required context first would hide that cancellation.
@@ -1713,7 +1723,9 @@ export function cancelledRequiredChecks(
   if (names.size === 0) return [];
   const deduped = dedupeRollupByLatestAttempt(rollup ?? []);
   return deduped
-    .filter((c) => names.has(c.name ?? c.context ?? "unknown"))
+    .filter(c => names.has(c.name ?? c.context ?? "unknown") &&
+      (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase() === "CANCELLED" &&
+      !(c.externalId ?? "").startsWith("run:") && c.outputSummary === undefined)
     .map((c) => {
       const check: CancelledRequiredCheck = { name: c.name ?? c.context ?? "unknown", jobId: checkJobId(c) };
       const producer = c.detailsUrl?.match(/\/actions\/runs\/([1-9]\d*)\/job\/([1-9]\d*)(?:[/?#]|$)/);
@@ -1721,10 +1733,11 @@ export function cancelledRequiredChecks(
       const aliases = deduped.flatMap(posted => {
         const id = posted.externalId?.match(/^run:([1-9]\d*):([1-9]\d*):job:([1-9]\d*)$/);
         const name = posted.name ?? posted.context;
+        const conclusion = (posted.conclusion ?? posted.state ?? "").toUpperCase();
         if (!name || name === check.name || posted.headSha !== headSha || !id ||
             id[1] !== producer[1] || id[3] !== check.jobId || checkJobId(posted) !== check.jobId ||
             !Number.isSafeInteger(posted.checkRunId) || (posted.checkRunId ?? 0) <= 0 || !Number.isSafeInteger(Number(id[2])) ||
-            (posted.conclusion ?? posted.state ?? "").toUpperCase() !== "FAILURE" ||
+            (conclusion !== "FAILURE" && conclusion !== "CANCELLED") ||
             (posted.status ?? "").toUpperCase() !== "COMPLETED" ||
             posted.outputSummary !== `W1-T4399: reported by this job's ${name} step(s) (outcome(s): cancelled)`) return [];
         return [{ name, attempt: Number(id[2]), checkRunId: posted.checkRunId! }];
@@ -2964,9 +2977,9 @@ const TICK_OPEN_PRS_QUERY =
   "pullRequests(states:OPEN,first:100,orderBy:{field:CREATED_AT,direction:DESC}){" +
   "nodes{number url headRefName headRefOid createdAt updatedAt body isDraft autoMergeRequest{enabledAt}}}}}";
 
-async function fetchTickOpenPrs(owner: string, repo: string, read: GhApiFetcher, pacer: GhCallPacer): Promise<OpenPrRest[]> {
+async function fetchTickOpenPrs(owner: string, repo: string, read: GhApiFetcher, pacer: GhCallPacer, gate: HeadReadGate): Promise<OpenPrRest[]> {
   try {
-    return await fetchOpenPrsWithPostedIdsAsync(owner, repo, read, pacer);
+    return await fetchOpenPrsWithPostedIdsAsync(owner, repo, read, pacer, gate);
   } catch (restError) {
     if (!(restError instanceof GhPaceFloorStandDownError) || restError.resource !== "core") throw restError;
     const admission = githubInstallationBudget().admit();
@@ -3003,19 +3016,26 @@ export function fetchOpenPrsWithPostedIdsAsync(
   repo: string,
   read: GhApiFetcher,
   pacer: GhCallPacer | undefined,
+  gate?: HeadReadGate,
 ): Promise<OpenPrRest[]> {
+  const gated = gate ? gate.wrap(read) : read;
   return paceGhEntryAsync(pacer, isGhRateLimitError,
-    () => runStepsAsync(openPrsWithPostedIdsSteps(owner, repo, rollupPrefetchRead(owner, repo, read, pacer))));
+    () => runStepsAsync(openPrsWithPostedIdsSteps(owner, repo, rollupPrefetchRead(owner, repo, gated, pacer, gate))));
 }
 
 /** W1-T12530: when the open-PR list arrives, every head's check-run and status reads start at once,
- *  each through the pacer; the list's own walk then takes each answer in its usual order. */
-function rollupPrefetchRead(owner: string, repo: string, read: GhApiFetcher, pacer: GhCallPacer | undefined): GhApiFetcher {
+ *  each through the pacer; the list's own walk then takes each answer in its usual order.
+ *  W1-T14809: a head read the gate answers from its kept rollup starts no read and waits on no pacer. */
+function rollupPrefetchRead(owner: string, repo: string, read: GhApiFetcher, pacer: GhCallPacer | undefined, gate?: HeadReadGate): GhApiFetcher {
   type Held = Promise<{ ok: true; value: unknown } | { ok: false; error: unknown }>;
   const early = new Map<string, Held>();
   const list = openPrsRestArgs(owner, repo).join("\0");
-  const start = (args: string[]) => early.set(args.join("\0"), paceGhEntryAsync(pacer, isGhRateLimitError, async () => read(args))
-    .then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error })));
+  const start = (args: string[]) => {
+    const kept = gate?.answer(args);
+    if (kept) return early.set(args.join("\0"), Promise.resolve({ ok: true as const, value: kept.value }));
+    return early.set(args.join("\0"), paceGhEntryAsync(pacer, isGhRateLimitError, async () => read(args))
+      .then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error })));
+  };
   return (args, onRateLimit) => {
     const key = args.join("\0");
     const held = early.get(key);
@@ -3037,6 +3057,94 @@ function rollupPrefetchRead(owner: string, repo: string, read: GhApiFetcher, pac
   };
 }
 
+/** W1-T14809: the head-read gate's seams. Absent, `git ls-remote` in the checkout, the system clock and the
+ *  committed policy's `githubEventWake.headRecheckMs` answer. */
+export interface HeadReadSweepIo {
+  lsRemoteHeads?: (checkoutRoot: string) => Promise<ReadonlySet<string>>;
+  clock?: Clock;
+  recheckMs?: number;
+  /** Whether this process holds the instance's drain lock; absent, {@link holdsDrainLock} reads the lock file. */
+  holdsDrainLock?: (root: string) => boolean;
+}
+
+/** Every branch and pull-request head sha on `origin`, from ONE `git ls-remote` (git upload-pack, never the REST quota). */
+export async function lsRemoteHeadShas(checkoutRoot: string): Promise<ReadonlySet<string>> {
+  const out = await planSyncGitRunnerAsync(checkoutRoot, { timeoutMs: 60_000 })(["ls-remote", "origin", "refs/heads/*", "refs/pull/*/head"]);
+  return new Set(out.split("\n").map((line) => line.split(/\s+/)[0]).filter((sha) => /^[0-9a-f]{40}$/.test(sha)));
+}
+
+/** The committed `githubEventWake.headRecheckMs`; the shipped default when that policy cannot be read. */
+export function headRecheckMsFromPolicy(load: () => Pick<Policy, "values"> = loadDefaultPolicy): number {
+  try {
+    return load().values.githubEventWake.headRecheckMs;
+  } catch {
+    // An unreadable committed policy keeps the shipped floor rather than stopping the read plane.
+    return DEFAULT_GITHUB_EVENT_WAKE_HEAD_RECHECK_MS;
+  }
+}
+
+/** True when this process holds `<root>/state/drain.lock`: the lock file names its holder's pid (drain-lock.ts). A
+ *  standby daemon's pre-lock reads, and any read outside a daemon, answer false. */
+export function holdsDrainLock(root: string): boolean {
+  return readDrainLock(join(root, "state", "drain.lock"))?.pid === process.pid;
+}
+
+/** One consumer of the changed-heads journal: its gate, the entries it already applied, and whether it held the lock. */
+export interface HeadReadSweeper {
+  gate: HeadReadGate;
+  /** Starts one sweep: applies each changed head not yet applied, then ONE ls-remote. A failed ls-remote reads every
+   *  head over REST this sweep, and its reason rides the counts onto `sweep.summary`. */
+  begin(root: string, checkoutRoot: string | undefined, io?: HeadReadSweepIo): Promise<void>;
+}
+
+/**
+ * W1-T14809 (fleet review of #21033): every consumer PEEKS the journal and applies each entry once, so a standby's
+ * pre-lock read, the read plane and a light pass never take an entry from one another. A sweeper that has just taken
+ * the drain lock first drops every rollup it kept before the lock, so a promoted standby re-reads each head; only the
+ * lock holder prunes entries older than headRecheckMs, which no gate needs.
+ */
+export function createHeadReadSweeper(gate: HeadReadGate = createHeadReadGate()): HeadReadSweeper {
+  let locked = false;
+  const applied = new Map<string, number>();
+  return {
+    gate,
+    async begin(root, checkoutRoot, io = {}) {
+      const nowMs = (io.clock ?? systemClock).now();
+      const recheckMs = io.recheckMs ?? headRecheckMsFromPolicy();
+      const holds = (io.holdsDrainLock ?? holdsDrainLock)(root);
+      if (holds && !locked) {
+        gate.reset();
+        applied.clear();
+      }
+      locked = holds;
+      if (holds) pruneAcknowledgedChangedHeads(root, nowMs - recheckMs);
+      for (const [key, receivedMs] of applied) if (!(nowMs - receivedMs < recheckMs)) applied.delete(key);
+      const changed = peekChangedHeads(root).filter((entry) => {
+        const receivedMs = Date.parse(entry.received_at);
+        // An entry as old as the floor is a no-op: a read kept before it has aged out, and one kept after reflects it.
+        if (!(nowMs - receivedMs < recheckMs)) return false;
+        const key = `${entry.sha}\0${entry.event}\0${entry.received_at}`;
+        if (applied.has(key)) return false;
+        applied.set(key, receivedMs);
+        return true;
+      });
+      let heads: ReadonlySet<string> | undefined;
+      let unguardedReason: string | undefined;
+      try {
+        if (checkoutRoot === undefined) throw new Error("no target checkout to read origin's heads from");
+        heads = await (io.lsRemoteHeads ?? lsRemoteHeadShas)(checkoutRoot);
+      } catch (error) {
+        // Not "no heads": an unknown head set turns every skip off, so this sweep reads each head over REST.
+        unguardedReason = `ls-remote failed: ${String((error as Error)?.message ?? error).slice(0, 200)}`;
+      }
+      gate.beginSweep({ heads, changed, nowMs, recheckMs, ...(unguardedReason === undefined ? {} : { unguardedReason }) });
+    },
+  };
+}
+
+/** The light pass's own sweepers, one per instance and repository in this thread, so its kept reads outlive one pass. */
+const lightPassSweepers = new Map<string, HeadReadSweeper>();
+
 /** W1-T6591: {@link buildOpenPrViews} in ONE pass, every remote read awaited at its own step. */
 export function buildOpenPrViewsAsync(
   owner: string,
@@ -3046,6 +3154,8 @@ export function buildOpenPrViewsAsync(
     fetchAsync?: GhApiFetcher;
     fetchCiFailureEvidenceAsync?: OpenPrCiFailureRead;
     readRequiredContextsAsync?: (owner: string, repo: string) => Promise<RequiredContextsRead>;
+    /** W1-T14809: the light pass's head-read sweeper and its seams; absent, this thread's own one for the instance. */
+    headReads?: { sweeper?: HeadReadSweeper; io?: HeadReadSweepIo };
   } = {},
 ): Promise<ClassifiedOpenPrView[]> {
   const transport: GhApiFetcher = deps.fetchAsync ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit));
@@ -3056,7 +3166,18 @@ export function buildOpenPrViewsAsync(
     read: paced,
     concurrent: true,
     dependencyIdentityRead: paced,
-    openPrRows: () => fetchOpenPrsWithPostedIdsAsync(owner, repo, transport, deps.pacer),
+    openPrRows: async () => {
+      // W1-T14809: a light pass's own open-PR read is gated like the tick read's, by this thread's sweeper.
+      const stateDir = dirname(ledgerPath);
+      const key = `${stateDir}\0${owner}/${repo}`;
+      const sweeper = deps.headReads?.sweeper ?? lightPassSweepers.get(key) ?? lightPassSweepers.set(key, createHeadReadSweeper()).get(key)!;
+      await sweeper.begin(dirname(stateDir), deps.ciGateSource?.checkoutRoot, deps.headReads?.io);
+      try {
+        return await fetchOpenPrsWithPostedIdsAsync(owner, repo, transport, deps.pacer, sweeper.gate);
+      } finally {
+        recordHeadReadCounts(stateDir, sweeper.gate.counts());
+      }
+    },
     ciFailures: (o, r, rollup) => paceGhEntryAsync(deps.pacer, isGhRateLimitError, async () => ciFailures(o, r, rollup)),
     requiredContexts: deps.readRequiredContextsAsync ?? readRequiredStatusCheckContextsAsync,
     baseTip: async () => {
@@ -3081,7 +3202,11 @@ export function buildOpenPrViewsAsync(
  */
 type MergeLogReadOptions = {
   ref?: string;
-  cache?: { mergedPathsByPr?: Map<number, string[]>; mergeSubjects?: Map<number, string> };
+  cache?: { mergedPathsByPr?: Map<number, string[]>; mergeSubjects?: Map<number, string>; mergeShas?: Map<number, string> };
+  /** W1-T15031: read exactly these merge commits by sha instead of the recent window; the cache is bypassed. */
+  shas?: readonly string[];
+  /** W1-T15031: receives each PR's merge commit sha, read in the same subject pass. */
+  shaByPr?: Map<number, string>;
 };
 
 /**
@@ -3095,12 +3220,16 @@ type MergeLogReadOptions = {
 export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PATHS_SCAN_LIMIT, opts: MergeLogReadOptions = {}): Map<number, string[]> {
   const byPr = new Map<number, string[]>();
   if (root === undefined) return byPr;
-  if (opts.cache?.mergedPathsByPr) return opts.cache.mergedPathsByPr;
+  const bySha = opts.shas !== undefined;
+  if (bySha && opts.shas!.length === 0) return byPr;
+  if (!bySha && opts.cache?.mergedPathsByPr) return opts.cache.mergedPathsByPr;
   try {
+    // W1-T15031: by sha, `--no-walk --stdin` reads exactly the named merge commits, however old.
     const out = execFileSync(
       "git",
-      ["log", opts.ref ?? "origin/main", "--first-parent", "--name-only", "--format=%x00%s", "-n", String(limit)],
-      { cwd: root, encoding: "utf8", maxBuffer: 1 << 26 },
+      bySha ? ["log", "--no-walk=unsorted", "--stdin", "--first-parent", "--name-only", "--format=%x00%s"]
+        : ["log", opts.ref ?? "origin/main", "--first-parent", "--name-only", "--format=%x00%s", "-n", String(limit)],
+      { cwd: root, encoding: "utf8", maxBuffer: 1 << 26, ...(bySha ? { input: opts.shas!.join("\n") + "\n" } : {}) },
     );
     let current: number | undefined;
     for (const raw of out.split("\n")) {
@@ -3117,7 +3246,7 @@ export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PAT
       // twice means a re-merge, whose newest paths are the ones credit was derived from.
       if (files && files.length < MERGED_PATHS_PER_PR_CAP) files.push(path);
     }
-    if (opts.cache) {
+    if (opts.cache && !bySha) {
       opts.cache.mergedPathsByPr = byPr;
       if (mergeLogEvidenceByRoot.get(root) === opts.cache) mergeLogEvidenceByRoot.set(root, mergeLogEvidenceByRoot.get(root)!);
     }
@@ -3137,19 +3266,32 @@ export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PAT
 function readMergeSubjectsByPr(root: string | undefined, opts: MergeLogReadOptions = {}): Map<number, string> {
   const byPr = new Map<number, string>();
   if (root === undefined) return byPr;
-  if (opts.cache?.mergeSubjects) return opts.cache.mergeSubjects;
+  if (opts.cache?.mergeSubjects) {
+    for (const [pr, sha] of opts.cache.mergeShas ?? []) opts.shaByPr?.set(pr, sha);
+    return opts.cache.mergeSubjects;
+  }
+  const shas = new Map<number, string>();
   try {
-    const out = execFileSync("git", ["log", opts.ref ?? "origin/main", "--format=%s", "-n", String(MERGE_SUBJECT_SCAN_LIMIT)], {
+    // W1-T15031: the whole history, not a recent window: a subject line is cheap (MEASURED 0.4 s, 1.9 MB over
+    // 15223 commits at b23b26575), and each PR's sha lets its changed paths be read by sha.
+    const out = execFileSync("git", ["log", opts.ref ?? "origin/main", "--format=%H%x00%s"], {
       cwd: root,
       encoding: "utf8",
-      maxBuffer: 1 << 24,
+      maxBuffer: 1 << 26,
     });
-    for (const line of out.split("\n")) {
+    for (const record of out.split("\n")) {
+      const [sha, line] = record.split("\u0000");
+      if (sha === undefined || line === undefined) continue;
       const m = line.match(/\(#(\d+)\)\s*$/);
-      if (m && !byPr.has(Number(m[1]))) byPr.set(Number(m[1]), line);
+      if (m && !byPr.has(Number(m[1]))) {
+        byPr.set(Number(m[1]), line);
+        shas.set(Number(m[1]), sha);
+      }
     }
+    for (const [pr, sha] of shas) opts.shaByPr?.set(pr, sha);
     if (opts.cache) {
       opts.cache.mergeSubjects = byPr;
+      opts.cache.mergeShas = shas;
       if (mergeLogEvidenceByRoot.get(root) === opts.cache) mergeLogEvidenceByRoot.set(root, mergeLogEvidenceByRoot.get(root)!);
     }
   } catch {
@@ -3166,9 +3308,6 @@ export const MERGED_PATHS_SCAN_LIMIT = 4000;
  *  1,000-file merge does not need 1,000 strings held to decide it. */
 const MERGED_PATHS_PER_PR_CAP = 200;
 
-/** How far back {@link readMergeSubjectsByPr} scans. A BACKSTOP on cost, not a correctness bound:
- *  a credit older than this window reads UNKNOWN and therefore declines, which is the safe side. */
-export const MERGE_SUBJECT_SCAN_LIMIT = 5000;
 
 export const mergeLogEvidenceByRoot = createSizedMemo<string, NonNullable<MergeLogReadOptions["cache"]> & { sha: string }>();
 
@@ -3362,9 +3501,12 @@ export function buildCreditCandidates(
   // W1-T3063 — ONE local `git log` for the whole pass, never one per candidate and never a GitHub
   // call: W1-T2794 promised this rung adds no new read, and that promise is kept. A squash merge
   // puts `(#N)` in the subject, which is what maps a credit back to what earned it.
-  const mergeSubjects = readMergeSubjectsByPr(evidenceRoot, mergeLog);
+  const shaByPr = new Map<number, string>();
+  const mergeSubjects = readMergeSubjectsByPr(evidenceRoot, { ...mergeLog, shaByPr });
   const projection = projectPlan(plan, deps);
   observeProjection?.(projection);
+  // W1-T15031: a credited merge older than the recent path window is read by its own sha, so no window decides it.
+  const mergedPaths = withCreditedMergePaths(evidenceRoot, projection.values(), deps.mergedPathsByPr ?? new Map(), shaByPr);
   // W1-T4078 — `buildBatchedGithub` already has each merged PR body in the same cache that fed
   // the projection. Read those bodies by PR number so the measured prerequisite-only split can
   // be refused without adding a GitHub request or weakening ordinary commit-trailer credit.
@@ -3385,7 +3527,28 @@ export function buildCreditCandidates(
     }
     return mergedByTask.get(taskId) ?? [];
   };
-  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies, deps.mergedPathsByPr, mergedCreditsFor, plan.byId);
+  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies, mergedPaths, mergedCreditsFor, plan.byId);
+}
+
+/** W1-T15031: the recent-window paths plus, read by sha, the paths of every credited merge the window missed. */
+export function withCreditedMergePaths(
+  root: string | undefined,
+  projections: Iterable<Pick<StatusProjection, "merged" | "prNumber">>,
+  windowPaths: ReadonlyMap<number, readonly string[]>,
+  shaByPr: ReadonlyMap<number, string>,
+  readBySha: (root: string | undefined, shas: readonly string[]) => ReadonlyMap<number, readonly string[]> =
+    (r, shas) => readMergedPathsByPr(r, MERGED_PATHS_SCAN_LIMIT, { shas }),
+): Map<number, readonly string[]> {
+  const shas = new Set<string>();
+  for (const p of projections) {
+    if (!p.merged || p.prNumber === undefined || windowPaths.has(p.prNumber)) continue;
+    const sha = shaByPr.get(p.prNumber);
+    if (sha !== undefined) shas.add(sha);
+  }
+  const out = new Map<number, readonly string[]>(windowPaths);
+  if (shas.size === 0) return out;
+  for (const [pr, paths] of readBySha(root, [...shas])) if (!out.has(pr)) out.set(pr, paths);
+  return out;
 }
 
 /**
