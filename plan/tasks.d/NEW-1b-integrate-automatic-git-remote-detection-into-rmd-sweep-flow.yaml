@@ -12,7 +12,9 @@
   
     spans runner and sweep concerns
   priority: 4
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire NEW-1b — It depends on NEW-1a, which will never be built (W1-T9292 named this retire pass its owner). Retired 2026-11-26 by the operator session: its unminted id made every measurement cadence run fail in proof-debt minting since 03:56Z (mechanicalAskPurpose rejects it), so no plan status reconcile landed.
   # backlog gardener: band=4 evidence=bbda018dc72f52c1
   attempts: 0
   files:

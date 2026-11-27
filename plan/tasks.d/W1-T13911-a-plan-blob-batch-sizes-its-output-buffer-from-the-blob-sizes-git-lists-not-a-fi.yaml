@@ -19,7 +19,7 @@
     - test/plan-blob-batch-sizes-its-buffer-from-the-catalog.test.ts
     - test/next-task-id-reserve.test.ts
     - test/plan/every-ref-read-asks-git-for-blob-ids.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: invariant:bound-from-listing — readBlobsAtRef and readBlobsAtRefAsync list blob ids with `ls-tree -l` and pass the `cat-file --batch` call a maxBuffer equal to the sum, over the requested paths, of each listed blob's size plus its header and trailing newline bytes (oid length + ' blob ' + the size's digits + 2); when any requested path is not listed as a blob (it is asked as `<ref>:<path>`), the batch passes no bound and the runner keeps its present bound; a real git repository whose shards total more than 64 MiB loads through loadPlanAtRef and loadPlanAtRefAsync with the default runners
@@ -99,7 +99,3 @@
     At origin/main criterion 1 fails: a fixture over 64 MiB refuses with "stdout maxBuffer length exceeded".
     Drop the header bytes from the bound: criterion 2's exact-size fixture refuses. Make the third
     runner argument required: criterion 3's two-argument fake fails to typecheck or read.
-  needs_input:
-    question: "Pull request https://github.com/craigoley/remudero/pull/19697 (task W1-T13824) cannot merge without your input. What it needs: fix needs design at this exact head (round work-fix-dispatch-W1-T13824-1795143069296-1fd8:1:1795143350099) — Hosted CI requires a merged scope amendment. The fix harness routes test-only NEEDS_SCOPE reports to commit, which would republish the refused path."
-    source_pr: https://github.com/craigoley/remudero/pull/19697
-    asked_at: 2026-11-20T03:04:45.410Z

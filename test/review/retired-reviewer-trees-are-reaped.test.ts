@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import { ReviewerWorktreeLeasedError, withReviewerWorktreeLease } from "#src/lib/reviewer-worktree-lease.js";
@@ -15,13 +15,15 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 const reaperModule = existsSync(join(REPO_ROOT, "src", "lib", "reviewer-tree-reaper.ts"))
   ? await import("#src/lib/reviewer-tree-reaper.js") : undefined;
 type Reap = typeof import("#src/lib/reviewer-tree-reaper.js").reapRetiredReviewerTreesAsync;
-const reap: Reap = (...args) => {
+// W1-T14886: the reaper also walks the cut directory beside the code checkout; a fixture names its own code root so
+// a pass never reads the real checkout's neighbours.
+const reap: Reap = (config, log, opts = {}) => {
   assert.ok(reaperModule, "the production reviewer tree reaper must exist");
-  return reaperModule.reapRetiredReviewerTreesAsync(...args);
+  return reaperModule.reapRetiredReviewerTreesAsync(config, log, { codeRoot: join(config.root, "code"), ...opts });
 };
 
 interface Row { step: string; extra?: Record<string, unknown> }
-interface Reaped { root: string; removed: { name: string; bytes: number }[]; bytes_freed: number;
+interface Reaped { roots: string[]; unreadable_roots: { root: string; error: string }[]; removed: { name: string; bytes: number }[]; bytes_freed: number;
   kept: { name: string; reason: string }[] }
 
 const OLD_MS = DEFAULT_WORKTREE_REAP_GRACE_MS * 2;
@@ -99,7 +101,7 @@ test("W1-T14148 criterion 2: an idle tree at an old sha is removed through git a
   assert.ok(rows[0].removed[0].bytes > 0, "the tree's own bytes are measured");
   assert.equal(rows[0].bytes_freed, rows[0].removed.reduce((sum, r) => sum + r.bytes, 0));
   assert.ok(rows[0].bytes_freed > 0);
-  assert.equal(rows[0].root, f.trees);
+  assert.ok(rows[0].roots.includes(f.trees), "the legacy engines/worktrees root is still walked");
   assert.deepEqual(summary.removed, rows[0].removed);
   assert.equal(existsSync(`${tree}.lock`), false, "the pass releases its own claim");
 });
@@ -210,10 +212,64 @@ test("W1-T14148: a missing or unreadable root is an empty pass, and one pass run
   const fileRoot = ownedFixtureDir(t, "t14148-file-root").dir;
   mkdirSync(join(fileRoot, "state", "engines"), { recursive: true });
   writeFileSync(join(fileRoot, "state", "engines", "worktrees"), "not a directory");
-  assert.deepEqual((await reap({ root: fileRoot } as Config, log)).kept, []);
-  assert.equal(rows.length, 0);
+  assert.equal(rows.length, 0, "a missing root writes no row");
+  const unreadable = await reap({ root: fileRoot } as Config, log);
+  assert.deepEqual(unreadable.kept, []);
+  // W1-T14886: a root that exists but cannot be listed is reported, never skipped silently.
+  assert.deepEqual(unreadable.unreadable_roots.map((u) => u.root), [join(fileRoot, "state", "engines", "worktrees")]);
+  assert.equal(reapedRows(rows).length, 1);
+  rows.length = 0;
   const a = reap({ root: missing } as Config, log);
   const b = reap({ root: missing } as Config, log);
   assert.equal(a, b, "a second caller gets the pass already running");
   await a;
+});
+
+/** W1-T14886: a fixture whose code checkout sits at `<root>/slots/a`, so reviews cut trees in `<root>/slots/worktrees`. */
+function slotFixture(t: TestContext) {
+  const f = fixture(t);
+  const codeRoot = join(f.config.root, "slots", "a");
+  mkdirSync(codeRoot, { recursive: true });
+  const slotTrees = join(f.config.root, "slots", "worktrees");
+  mkdirSync(slotTrees, { recursive: true });
+  return { ...f, codeRoot, slotTrees };
+}
+
+test("W1-T14886 a retired reviewer tree in the slots worktrees directory is reaped", async (t) => {
+  const f = slotFixture(t);
+  const name = `reviewer-${sha12(f.oldSha)}`;
+  const tree = cut(f.repo, f.slotTrees, name, f.oldSha); age(tree);
+  const summary = await reap(f.config, f.log, { codeRoot: f.codeRoot });
+  assert.equal(existsSync(tree), false, "the retired tree in the cut directory is gone");
+  assert.doesNotMatch(f.repo.git("worktree", "list", "--porcelain"), new RegExp(name), "git no longer lists it");
+  assert.deepEqual(summary.removed.map((r) => r.name), [name]);
+  assert.ok(summary.removed[0].bytes > 0 && summary.bytes_freed === summary.removed[0].bytes, "its bytes are reported");
+  const rows = reapedRows(f.rows);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].bytes_freed, summary.bytes_freed, "the ledger row carries the bytes freed");
+});
+
+test("W1-T14886 the current-main and leased reviewer trees are kept", async (t) => {
+  const f = slotFixture(t);
+  const current = cut(f.repo, f.slotTrees, `reviewer-${sha12(f.mainSha)}`, f.mainSha); age(current, OLD_MS * 100);
+  const leased = cut(f.repo, f.slotTrees, `reviewer-${sha12(f.oldSha)}-4242-0badcafe`, f.oldSha); age(leased);
+  const summary = await withReviewerWorktreeLease(leased, () => reap(f.config, f.log, { codeRoot: f.codeRoot }));
+  assert.deepEqual([...summary.kept].sort((a, b) => a.name.localeCompare(b.name)), [
+    { name: `reviewer-${sha12(f.mainSha)}`, reason: "current-main" },
+    { name: `reviewer-${sha12(f.oldSha)}-4242-0badcafe`, reason: "leased" },
+  ].sort((a, b) => a.name.localeCompare(b.name)));
+  assert.equal(summary.removed.length, 0);
+  assert.equal(existsSync(current), true, "the tree at origin/main survives");
+  assert.equal(existsSync(leased), true, "a leased tree survives");
+});
+
+test("W1-T14886 the reaper walks the directory a reviewer tree is cut in", async (t) => {
+  assert.ok(reaperModule, "the production reviewer tree reaper must exist");
+  const { reviewerTreeCutRoot } = reaperModule;
+  assert.equal(typeof reviewerTreeCutRoot, "function", "the cut directory is named by one exported function");
+  const f = slotFixture(t);
+  assert.equal(reviewerTreeCutRoot(f.codeRoot), join(f.codeRoot, "..", "worktrees"));
+  const summary = await reap(f.config, f.log, { codeRoot: f.codeRoot });
+  assert.equal(summary.roots[0], resolve(reviewerTreeCutRoot(f.codeRoot)), "the cut directory is the first root walked");
+  assert.ok(summary.roots.includes(resolve(f.trees)), "the legacy engines/worktrees root is walked as well");
 });

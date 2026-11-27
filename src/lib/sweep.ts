@@ -417,7 +417,8 @@ import {
   type MainRunGapHistory,
 } from "./main-run-gaps.js";
 import { mutationVerdictRunIdsFromLedger, pullMutationVerdicts, readMutationVerdictZip } from "./mutation-verdict-pull.js";
-import { FOLD_DEBT_PULL_ERROR_STEP, foldDebtRunIdsFromLedger, landFoldDebt, pullFoldDebtEntries } from "./fold-debt-pull.js";
+import { readWorkflowRunCompleted, workflowRunCompletedPath } from "./github-event-wake.js";
+import { artifactListingDue, FOLD_DEBT_PULL_ERROR_STEP, foldDebtRunIdsFromLedger, landFoldDebt, pullFoldDebtEntries, type ArtifactListingKind, type ArtifactListingState } from "./fold-debt-pull.js";
 import {
   REFUSAL_AMENDMENT_MAX_AGE_MS,
   REFUSAL_AMENDMENT_STEP,
@@ -2490,6 +2491,9 @@ export async function readSessionOwnershipViaGit(
 /** W1-T2927: artifact ids already read; process-lifetime because effects are rebuilt every poll. */
 const settledMutationVerdictArtifacts = new Set<number>();
 const settledFoldDebtArtifacts = new Set<number>(); // W1-T7853, the same per-process settle
+/** W1-T14810: each instance's last artifact listing, by `<state root>\0<owner>/<repo>`; process-lifetime
+ *  like the sets above, so a restarted daemon lists once on its first sweep. */
+const artifactListings = new Map<string, ArtifactListingState>();
 /** W1-T6022: changed-file sources by `<owner>/<repo>@<head>:<path>`, process-lifetime like the set above. */
 const prFileSources = new Map<string, string>();
 
@@ -2569,6 +2573,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readFleetState",
   "pullMutationVerdicts",
   "pullFoldDebt",
+  "artifactListingDue", // W1-T14810
   "readStaleRedWorkflowRuns",
   "runStaleRedLocalRoute",
   "releaseStaleRed",
@@ -2903,6 +2908,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readFleetState"
   | "pullMutationVerdicts"
   | "pullFoldDebt"
+  | "artifactListingDue"
   | "readStaleRedWorkflowRuns"
   | "runStaleRedLocalRoute"
   | "releaseStaleRed"
@@ -3255,6 +3261,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // use everywhere else in this file (see e.g. sweepCommand's own `inflightDir`, above) — the fix
   // rung's per-(repo, branch) exclusive claim (dispatchFix, below) reuses this directory rather
   // than a second lock location.
+  /** W1-T14810: this poll's due listings, so a failed one can restore its stamp. */
+  const listingRollbacks = new Map<ArtifactListingKind, () => void>();
   const inflightDir = join(config.root, "state", "inflight");
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
   const openEscalationIssues = issuesImpl ?? ghIssueGatewayAsync(owner, repo);
@@ -4837,7 +4845,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         return await runPlanScopedFixRound({ pr: { ...pr, headRefName: live.head.ref, ciFailures }, task, worktreePath,
           title: live.title, body: live.body, runId, admission: config.contributorAdmission,
           conflict: pr.mergeState === "dirty",
-          lastRefusal: parseLedger(ledgerPath).findLast((l) => l.step === "sweep.plan_round.refused" &&
+          lastRefusal: parseLedger(await fs.promises.readFile(ledgerPath, "utf8").catch((error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return "";
+            throw error;
+          })).findLast((l) => l.step === "sweep.plan_round.refused" &&
             l.pr_number === pr.prNumber && l.head_sha === pr.headSha)?.reason,
           deps: roundEffects,
         });
@@ -6550,9 +6561,28 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         for (const u of unread) log("sweep.mutation_verdict_pull.error", { phase: "artifact", ...u });
         return rows;
       } catch (e) {
+        // W1-T14810: a failed listing restores its stamp, so the next sweep lists again.
+        listingRollbacks.get("mutation_verdict")?.();
         log("sweep.mutation_verdict_pull.error", { phase: "list", error: String((e as Error)?.message ?? e) });
         return [];
       }
+    },
+
+    // W1-T14810 — the two artifact listings wait for a completed workflow run, with a freshness floor.
+    artifactListingDue: (kind) => {
+      listingRollbacks.delete(kind);
+      const key = `${config.root}\0${owner}/${repo}`;
+      let state = artifactListings.get(key);
+      if (state === undefined) artifactListings.set(key, (state = new Map()));
+      const run = readWorkflowRunCompleted(workflowRunCompletedPath(config.root));
+      const runCompletedAtMs = run === undefined ? undefined : Date.parse(run.receivedAtIso);
+      const rollback = artifactListingDue(state, kind, {
+        nowMs: nowMsImpl(),
+        runCompletedAtMs: Number.isFinite(runCompletedAtMs) ? runCompletedAtMs : undefined,
+        recheckMs: POLICY_GITHUB_EVENT_WAKE.artifactRecheckMs,
+      });
+      if (rollback) listingRollbacks.set(kind, rollback);
+      return rollback !== undefined;
     },
 
     // W1-T7853 — fold debt a CI run filed, written into this checkout's plan/feedback and landed.
@@ -6572,6 +6602,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         };
         return await landFoldDebt(await pullFoldDebtEntries(input), input);
       } catch (e) {
+        listingRollbacks.get("fold_debt")?.(); // W1-T14810: as for the mutation-verdict listing above
         log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "list", error: String((e as Error)?.message ?? e) });
         return [];
       }
@@ -8793,7 +8824,7 @@ export interface SweepPolicy {
  *  default, never to unbounded spend, and the cost ceiling bounds RUNAWAY spend, not a budget.
  *  Several rows are COLLECTED from `plan/policy.yaml` rather than written as source literals, each a
  *  RELOCATION and never a retune. // Why: FROZEN AT IMPORT (W1-T331) — docs/forensics/sweep.md. */
-const { sweep: POLICY_SWEEP, sweepWallClockBoundMs: POLICY_SWEEP_WALL_CLOCK_BOUND_MS, fix: POLICY_FIX } = loadDefaultPolicy().values;
+const { sweep: POLICY_SWEEP, sweepWallClockBoundMs: POLICY_SWEEP_WALL_CLOCK_BOUND_MS, fix: POLICY_FIX, githubEventWake: POLICY_GITHUB_EVENT_WAKE } = loadDefaultPolicy().values;
 
 /** W1-T1049 — reads `plan/policy.yaml`'s `sweep.reviewLanes` row DIRECTLY, never through
  *  `policy.ts`'s schema, which is outside this task's declared files. Validated like every other
@@ -18475,6 +18506,9 @@ export interface SweepDeps {
   pullMutationVerdicts?: (recorded: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
   /** W1-T7853 — pulls the fold debt CI filed (see fold-debt-pull.ts); returns the rows to append. */
   pullFoldDebt?: (ingested: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
+  /** W1-T14810 — whether this full pass lists `kind`'s artifacts (see fold-debt-pull.ts's
+   *  `artifactListingDue`); a `true` stamps the listing. Omitted, every full pass lists, as before. */
+  artifactListingDue?: (kind: ArtifactListingKind) => boolean;
   /** W1-T2620 — RELEASE the one base-caused stand-down chosen this pass: never a loop, the same
    *  AT-MOST-ONCE shape the update-branch dep uses. THE LEAF IS THE ONE THAT EXISTS, never a second
    *  outward path. Omitted, the target still stands down with the ordinary sentence; a THROW is
@@ -25254,7 +25288,7 @@ async function runSweepPinned(
   deps.markPrelude?.("fleet_state", false, fleetStateParts && { fleet_state_parts: fleetStateParts });
   if (endsForRestart("fleet_state")) return endedEarly();
   // Full passes only: one paced list per pass, deduped on the ledger's own run_ids.
-  if (deps.pullMutationVerdicts && deps.repairAdmissionSurface !== "light") {
+  if (deps.pullMutationVerdicts && deps.repairAdmissionSurface !== "light" && (deps.artifactListingDue?.("mutation_verdict") ?? true)) {
     try {
       const pulled = await deps.pullMutationVerdicts(mutationVerdictRunIdsFromLedger(ledgerLines));
       for (const row of pulled) appendLine(deps.ledgerPath, row as Parameters<typeof appendLine>[1]);
@@ -25266,7 +25300,7 @@ async function runSweepPinned(
   deps.markPrelude?.("mutation_verdicts");
   if (endsForRestart("mutation_verdicts")) return endedEarly();
   // W1-T7853: the same full passes, deduped on the workflow runs the ledger already settled.
-  if (deps.pullFoldDebt && deps.repairAdmissionSurface !== "light") {
+  if (deps.pullFoldDebt && deps.repairAdmissionSurface !== "light" && (deps.artifactListingDue?.("fold_debt") ?? true)) {
     try {
       for (const row of await deps.pullFoldDebt(foldDebtRunIdsFromLedger(ledgerLines))) {
         appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", ...row } as Parameters<typeof appendLine>[1]);
@@ -30702,7 +30736,9 @@ async function runSweepPinned(
       };
       if (await valueGate.settle(requested, request.pr, "request", request.requestId)) target = requested;
     }
-    if (target) {
+    // The value check can yield long enough for another sweep to claim the selected head's review.
+    if (target && !(target.updateReason?.startsWith("distance") &&
+      inFlightReviewKeys.has(reviewOutcomeKeyForPr(viewOf(target))))) {
       // W1-T1212: a `StaleGatePr` (never `armedButStalled`'s own shape) carries the ONE extra
       // fact `deps.updatedForWorkflow`'s next read needs to remember this exact pair.
       const staleWorkflow = "staleWorkflow" in target ? (target as StaleGatePr).staleWorkflow : undefined;

@@ -16,6 +16,9 @@ import {
   unmanagedWorktreeLanes,
 } from "#src/lib/worker.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { emptyHostProcessTable } from "#test/helpers/empty-process-table.js";
+
+emptyHostProcessTable(); // W1-T15026: the reapers here decide removals on an owned process table, not the host's
 
 /**
  * test/adhoc-lane-reap.test.ts — W1-T2847, the REAP half.
