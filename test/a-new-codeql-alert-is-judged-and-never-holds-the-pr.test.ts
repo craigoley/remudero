@@ -402,6 +402,34 @@ test("a fix ruling the fleet cannot admit now holds the head without dispatching
   }
 });
 
+test("a scanner preparation deferred for an exact-head review retries when the verdict posts", async () => {
+  const h = harness(async () => ({ ruling: "fix", reason: "the scanner finding needs a repair" }), { detachFixWait: true });
+  const reviewRun = "REVIEW-SCANNER-5633";
+  const pending = { step: "review.pending_posted", run_id: reviewRun, task_id: `W1-T${N}`, pr_number: N,
+    pr_url: pr().prUrl, head_sha: HEAD };
+  const posted = { step: "review.posted", run_id: reviewRun, task_id: `W1-T${N}`, pr_number: N,
+    pr_url: pr().prUrl, head_sha: HEAD, state: "failure" };
+  try {
+    h.lines.push(pending);
+    writeFileSync(h.deps.ledgerPath, `${JSON.stringify(pending)}\n`);
+    sweepModule.registerChildWork({ runId: reviewRun, kind: "review", taskId: `W1-T${N}`, prNumber: N,
+      headSha: HEAD, reviewKey: `W1-T${N}@${HEAD}` });
+    await sweepModule.runSweep([pr()], h.deps);
+    assert.equal(h.fixes.length, 0, "an exact-head review holds the scanner fix before the worker starts");
+    assert.equal(rows(h, sweepModule.CODE_SCANNING_FIX_DISPATCH_STEP).at(-1)?.phase, "deferred_review",
+      "the preparation is retired as retryable instead of hanging on the current boot");
+
+    sweepModule.settleChildWork(reviewRun);
+    h.lines.push(posted);
+    writeFileSync(h.deps.ledgerPath, `${JSON.stringify(pending)}\n${JSON.stringify(posted)}\n`);
+    await sweepModule.runSweep([pr()], h.deps);
+    assert.equal(h.fixes.length, 1, "the posted verdict releases the scanner fix on the next pass");
+  } finally {
+    sweepModule.settleChildWork(reviewRun);
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
 test("a head is settled for hydration only by its own false-positive or fix-dispatch row", () => {
   const settled = sweepModule.codeScanningHeadSettled;
   const fp = { step: sweepModule.CODE_SCANNING_FALSE_POSITIVE_STEP, pr_number: N, head_sha: HEAD };

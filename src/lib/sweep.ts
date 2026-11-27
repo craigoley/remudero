@@ -17875,7 +17875,8 @@ function codeqlBlockerDispatched(lines: ReadonlyArray<Record<string, unknown>>, 
   for (const line of lines) {
     if (line.dedupe_key !== key) continue;
     if (line.step === CODEQL_BLOCKER_DISPATCH_STEP) dispatched = true;
-    else if (isDetachedFixDispatchFailure(line)) dispatched = false;
+    else if (isDetachedFixDispatchFailure(line) ||
+      line.step === FIX_DEFERRED_REVIEW_IN_FLIGHT_STEP) dispatched = false;
   }
   return dispatched;
 }
@@ -19784,6 +19785,9 @@ function codeScanningDispatchRead(
     line.pr_number === prNumber && line.head_sha === headSha);
   if (at < 0) return { kind: "none" };
   const intent = lines[at];
+  if (intent.phase === "deferred_review") {
+    return { kind: "retry", reason: "the exact-head review ended before the code-scanning fix rung started" };
+  }
   const taskId = typeof intent.task_id === "string" ? fixLedgerTaskIdFor({ taskId: intent.task_id, prNumber }) : undefined;
   const ownerRunId = typeof intent.run_id === "string" && intent.run_id !== "" ? intent.run_id : undefined;
   if (intent.escalated === true || !taskId || !ownerRunId ||
@@ -26000,7 +26004,11 @@ async function runSweepPinned(
       evidence = decideReviewInFlight(pr, evidence, deps.ledgerPath);
       const reviewRun = evidence.reviewInFlight?.reviewRun;
       if (reviewRun !== undefined) {
-        log(FIX_DEFERRED_REVIEW_IN_FLIGHT_STEP, { pr_number: pr.prNumber, head: pr.headSha, review_run: reviewRun });
+        const fields = { pr_number: pr.prNumber, head: pr.headSha, head_sha: pr.headSha, review_run: reviewRun,
+          ...(dedupeKey === undefined ? {} : { dedupe_key: dedupeKey }) };
+        log(FIX_DEFERRED_REVIEW_IN_FLIGHT_STEP, fields);
+        if (dedupeKey !== undefined) appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+          step: FIX_DEFERRED_REVIEW_IN_FLIGHT_STEP, ...fields });
         claim.release();
         releaseFixCapacity(pr);
         return `fix round waits: review ${reviewRun} of head ${pr.headSha} is in flight`;
@@ -28343,6 +28351,12 @@ async function runSweepPinned(
                 const fixEvidence = { unmetCriteria: [], ciFailures: fixRoute.ciFailures };
                 if (deps.detachFixWait) {
                   const refusal = await detachFixDispatch(pr, (onPhase, decided) => fixClaim.run(() => deps.dispatchFix(pr, decided ?? fixEvidence, onPhase, fixClaim.control)), fixClaim, undefined, fixEvidence);
+                  if (refusal?.startsWith("fix round waits: review ") && fixRoute.dispatchRow !== undefined) {
+                    appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+                      step: CODE_SCANNING_FIX_DISPATCH_STEP, pr_number: pr.prNumber, pr_url: pr.prUrl,
+                      head_sha: pr.headSha, dispatched: false, phase: "deferred_review", reason: refusal,
+                      ...fixRoute.dispatchRow });
+                  }
                   if (refusal) [acted, standDownReason] = [false, refusal];
                   break;
                 }
