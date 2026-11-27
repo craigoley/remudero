@@ -4424,11 +4424,11 @@ function inboxRegistryHas(deps: PanelGraphDeps, proposalId: string): boolean {
 async function approveCatalogDeps(deps: PanelGraphDeps, proposalId: string): Promise<PanelGraphDeps> {
   const taskId = deriveTaskReferent(proposalId);
   if (deps.inboxReferentPlan || taskId === undefined) return deps;
-  let publicPlan: Plan | undefined;
-  try { publicPlan = approvePlanReader(deps)(deps.planPath); } catch { return deps; }
+  // A plan read error surfaces as before: classifyAllProposals reads the same plan with the same reader.
+  const publicPlan = approvePlanReader(deps)(deps.planPath);
   if (publicPlan.byId.has(taskId)) return deps;
   const read = deps.readInboxCatalog ?? ((pub: () => Plan | undefined) => readBoardCatalogs(pub, dirname(deps.ledgerPath)));
-  const context = await read(() => publicPlan).catch(() => undefined);
+  const context = await read(() => publicPlan);
   const combined = context?.outcome === "ok" ? context.plan : undefined;
   return combined ? { ...deps, inboxReferentPlan: () => combined } : deps;
 }
