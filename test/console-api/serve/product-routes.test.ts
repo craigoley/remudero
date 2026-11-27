@@ -1393,7 +1393,7 @@ setTimeout(() => process.exit(2), 30000).unref();
     .map(line => JSON.parse(line) as Record<string, unknown>) : [];
   // The served children still running. A wait ends when its state is observed or no served child is left to reach
   // it, never at a fixed deadline (W1-T14786): under the flake screen's load a healthy boot took past the 20 s this
-  // once allowed. The test's own timeout stays the backstop for a child that hangs.
+  // once allowed. The runner's --test-timeout stays the backstop for a child that hangs; this test sets none.
   const serving = new Set<ReturnType<typeof spawn>>();
   const wait = async (ready: () => boolean) => {
     while (!ready() && serving.size > 0) await new Promise(resolve => setTimeout(resolve, 25));
