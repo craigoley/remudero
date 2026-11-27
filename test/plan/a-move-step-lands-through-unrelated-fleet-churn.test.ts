@@ -375,6 +375,48 @@ test("W1-T14993 criterion 3: an unreserved record a public file still cites stay
   assert.match(removed.out, /^ {2}W1-T1$/m, "the real check names W1-T1 unresolved once its shard is gone");
 });
 
+test("W1-T14993 criterion 3: a copied unreserved record cited after its copy is rolled back, and the other copies still move", async t => {
+  // OBSERVED 2026-11-27 (review of 2bd6c9ec9): a citation merged to core after COPY made REMOVE fail the real gate on
+  // every pass, and converge returned that step before any new move.
+  const w = moveWorld(t, { "W1-T1": record("W1-T1"), "W1-T2": record("W1-T2") });
+  unreserve(w, "W1-T1");
+  const copyRun = await w.run();
+  assert.equal(copyRun.out.step, "copy", copyRun.lines.join("\n"));
+  w.merge(w.pulls.at(-1)!);
+  w.commitTo("public", { "src/cites-w1-t1.ts": "// Follows W1-T1.\nexport {};\n" }, "chore: cite W1-T1 after its copy");
+  const rolled = await w.run();
+  assert.equal(rolled.out.step, "rollback", rolled.lines.join("\n"));
+  assert.equal(rolled.out.id, "W1-T1", "THE CLAIM: the cited unreserved copy is rolled back");
+  assert.equal((rolled.out.evidence as Record<string, unknown>).owner, "public_citations", JSON.stringify(rolled.out.evidence));
+  w.merge(w.pulls.at(-1)!);
+  const removal = await w.run();
+  assert.equal(removal.out.step, "remove", removal.lines.join("\n"));
+  assert.equal(removal.out.id, "W1-T2", "THE CLAIM: the uncited copy still moves");
+  w.merge(w.pulls.at(-1)!);
+  assert.ok(w.holds("public", "W1-T1") && !w.holds("ops", "W1-T1") && w.holds("ops", "W1-T2") && !w.holds("public", "W1-T2"), "W1-T1 stays public, W1-T2 moved");
+  const gate = taskIdExistence(w, w.main("public"));
+  assert.equal(gate.status, 0, `the real task-id-existence check passes the public tree: ${gate.out}`);
+});
+
+test("W1-T14993 criterion 3: a stale-proof drop of a citer also drops the unreserved record it cites, and the rest of the copy proceeds", async t => {
+  // OBSERVED 2026-11-27 (review of 2bd6c9ec9): the drop could leave a cited unreserved record copied while its citer stayed public.
+  const citer = record("W1-T2", "  note: |\n    Follows W1-T1.\n").replace("grep: fixture in test/fixture.test.ts", "grep: stale in test/stale.test.ts");
+  const w = moveWorld(t, { "W1-T2": citer, "W1-T3": record("W1-T3") });
+  w.commitTo("public", { [shard("W1-T1")]: record("W1-T1") }, "chore: file W1-T1 after its citer");
+  const staleLine = `shard proof ${JSON.stringify("grep: stale in test/stale.test.ts")} passes at origin/main too`;
+  let calls = 0;
+  const run = await w.run(true, { preflight: async () => (++calls === 1
+    ? { ok: false, failures: [{ check: "proof-discrimination", firstLine: staleLine }], unreadable: [] }
+    : { ok: true, failures: [], unreadable: [] }) });
+  assert.equal(run.out.step, "copy", run.lines.join("\n"));
+  const opened = w.ledger.at(-1) as { outcome?: string; dropped?: Array<{ id: string; proof: string }> };
+  assert.equal(opened.outcome, "opened", JSON.stringify(opened));
+  assert.deepEqual((opened.dropped ?? []).map(d => [d.id, d.proof]).sort(),
+    [["W1-T1", "citation_unresolved"], ["W1-T2", "grep: stale in test/stale.test.ts"]], "THE CLAIM: the cited record leaves the copy with its citer");
+  const copy = w.pulls.at(-1)!;
+  assert.deepEqual(copy.files.sort(), [shard("W1-T3")], "only the uncited record is copied");
+});
+
 test("W1-T14982 criterion 1: an open pull request that only edits code a record's files lists does not own it, and the record moves", async t => {
   // OBSERVED 2026-11-26: unrelated open pull requests on shared files (src/lib/review.ts) pinned 30 open core records.
   const w = moveWorld(t, { "W1-T1": record("W1-T1", "  files:\n    - src/lib/moved-task-code.ts\n") });
