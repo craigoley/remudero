@@ -547,4 +547,8 @@ function publishResult({ payload, mergeBase, source, judged, root, executorDiges
   if (resultPath) writeResult(resultPath, `${JSON.stringify(record, null, 2)}\n`);
 }
 
-if (isMainModule(import.meta.url)) process.exitCode = await mainConcurrent(process.argv.slice(2));
+if (isMainModule(import.meta.url)) {
+  mainConcurrent(process.argv.slice(2)).then((code) => {
+    process.exitCode = code;
+  });
+}
