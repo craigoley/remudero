@@ -3873,7 +3873,7 @@ function updateLockedProposalRegistry(registryPath: string, update: (current: Pr
       const prior = current.find(before => before.id === p.id)?.automaticRetirement;
       if (p.automaticRetirement && JSON.stringify(p.automaticRetirement) !== JSON.stringify(prior) &&
         (!isMechanicalProducerObject(p) || !mechanicalAskPurpose(p)))
-        throw new Error("mechanical retirement purpose requires the maintained proof-audit producer");
+        throw new Error(`mechanical retirement purpose requires the maintained proof-audit producer (proposal ${p.id})`);
       const oldVerification = current.find(before => before.id === p.id)?.verificationAsk;
       if (p.verificationAsk && JSON.stringify(p.verificationAsk) !== JSON.stringify(oldVerification) && !isVerificationProducerObject(p))
         throw new Error("verification ask purpose requires the maintained verification producer");
