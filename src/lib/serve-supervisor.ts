@@ -31,8 +31,9 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { systemClock, type Clock } from "./clock.js";
+import type { GithubHookListenerHandle } from "./github-hook-listener.js";
 import type { ServeOnlyVerdict } from "./serve-own-code.js";
-import { GENERATION_MESSAGES, SERVE_READY_PATH, SERVE_READY_SOCKET_ENV, SERVE_ROLE_ENV, type GenerationMessage, type SwapProbeTrigger } from "./serve-generation.js";
+import { GENERATION_MESSAGES, SERVE_READY_PATH, SERVE_READY_SOCKET_ENV, SERVE_ROLE_ENV, isGithubHookConfig, type GenerationMessage, type GithubHookConfig, type SwapProbeTrigger } from "./serve-generation.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
 
 export const SERVE_HANDOFF_ENV = "RMD_SERVE_HANDOFF";
@@ -434,6 +435,11 @@ export interface ServeSupervisorOptions {
    * own port and host; an object names them (tests); absent, the gap is left unanswered as before.
    */
   restartingAnswer?: boolean | { port: number; host?: string };
+  /**
+   * W1-T14986: the webhook listener thread (github-hook-listener.ts). The active generation's pushed hook config is
+   * forwarded to it, and each accepted delivery's follow-up is relayed to the active generation. Absent, none runs.
+   */
+  hookListener?: GithubHookListenerHandle;
 }
 
 /** W1-T9570: the free-memory reads after a tier-2 shed: the first, the one judged, how many, and what ended them. */
@@ -461,6 +467,8 @@ interface Generation {
   shed?: boolean;
   /** W1-T8873: when it terminated its worker threads for a handoff that has not yet replaced it; absent once restored. */
   workersShedAt?: number;
+  /** W1-T14986: the hook config it last pushed, forwarded to the listener while it is active. */
+  hookConfig?: GithubHookConfig;
 }
 
 /** What a handoff ask says about itself. */
@@ -926,6 +934,11 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     const exited = new Promise<void>((resolve) => proc.onExit(() => ((alive = false), resolve())));
     const generation: Generation = { id, slot, socketPath, process: proc, exited, isAlive: () => alive, startedAt: clock.now(), asked: false };
     proc.onMessage((message) => {
+      if (message.type === GENERATION_MESSAGES.githubHookConfig && isGithubHookConfig(message.config)) {
+        generation.hookConfig = message.config;
+        if (generation === active) opts.hookListener?.configure(message.config);
+        return;
+      }
       if (message.type !== GENERATION_MESSAGES.handoffRequest) return;
       const ask: HandoffAsk = { ...(typeof message.targetSha === "string" ? { targetSha: message.targetSha } : {}), ...readServeOnlyVerdict(message.serveOnly) };
       if (generation === active) void supervisor.requestHandoff(Object.keys(ask).length > 0 ? ask : undefined);
@@ -1116,6 +1129,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
 
   const activate = (generation: Generation): void => {
     active = generation;
+    if (generation.hookConfig) opts.hookListener?.configure(generation.hookConfig);
     startProbing();
     if (generation.asked) void supervisor.requestHandoff(generation.askedWith);
   };
@@ -1556,6 +1570,19 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     generation.process.send({ type: GENERATION_MESSAGES.restore, reason: "handoff_abandoned" });
   };
 
+  // W1-T14986: the listener's rows go on the supervisor's ledger; a follow-up runs on the active generation, after the 202.
+  opts.hookListener?.onMessage((message) => {
+    if (message.kind === "log") return opts.log(message.step, message.extra);
+    if (message.kind !== "followUp") return;
+    const generation = active;
+    const info = message.followUp.checkRunCompleted;
+    if (!generation || !generation.isAlive()) {
+      // The marker already wakes the daemon; only the CI-incident consumer misses this check run.
+      return opts.log("github.wake.check_run_callback_failed", { check_run_id: info.id, reason: "no_active_generation" });
+    }
+    generation.process.send({ type: GENERATION_MESSAGES.githubDelivery, checkRunCompleted: info });
+  });
+
   const supervisor: ServeSupervisor = {
     activeSha: () => active?.slot.sha,
     start: async () => {
@@ -1603,6 +1630,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       stopProbing?.();
       budget.stop();
       await restarting?.close();
+      await opts.hookListener?.stop();
       const generation = active;
       if (generation) await drainOld(generation, reason);
       exit(0);

@@ -876,7 +876,7 @@ import {
 // renderTraceChain/traceForward/traceReverse: only traceCommand read them, and it moved to
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
-import { checkCommitMessage, defaultPreflightSpawn, fitConventionalTitle, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
+import { CONVENTIONAL_LIMITS, checkCommitMessage, defaultPreflightSpawn, fitConventionalTitle, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
 import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "./lib/plan-filing-fix-guard.js";
 import { resolveProjectPreflight, runProjectPreflight } from "./lib/ci-project-preflight.js";
 import { observeSynchronousPreflightPhase, reportPreflightPhase } from "./lib/preflight-phase-progress.js";
@@ -1074,6 +1074,7 @@ import {
   approvePrTitle,
   approveProposal,
   classifyProposal,
+  releasedHumanTaskPredicate,
   SKILL_DRAFT_ID_PREFIX,
   draftsDueOnDaemon,
   indexInboxDraftReceipts,
@@ -33263,6 +33264,15 @@ export const WORKER_CHANGED_NOTHING_REASON = "the worker changed nothing";
 /** W1-T4450: how much of a report a missing-line refusal carries into the ledger. */
 export const REFUSED_REPORT_TAIL_CHARS = 800;
 
+/** W1-T15109: `message` with every body line over commitlint's body-max-line-length wrapped at spaces
+ *  (lib/commit-message.ts `wrapBodyLines`). The subject and every line that already fits stay byte-for-byte;
+ *  nothing is truncated. A 244-character harness-derived reason once refused every later preflight push. */
+function wrapLongBodyLines(message: string): string {
+  const [subject, ...body] = message.split("\n");
+  return [subject, ...body.flatMap((line) =>
+    line.length > CONVENTIONAL_LIMITS.bodyMaxLineLength ? wrapBodyLines(line) : [line])].join("\n");
+}
+
 export function harnessCommitForShellLessWorker(
   input: Parameters<RunTaskCommandHost["harnessCommitForShellLessWorker"]>[0],
   deps: Parameters<RunTaskCommandHost["harnessCommitForShellLessWorker"]>[1] = {},
@@ -33285,8 +33295,8 @@ export function harnessCommitForShellLessWorker(
     return input.commitCount;
   }
   const message = withAssignmentTrailer(
-    fixRoundCommitMessage(input.report,
-      asked ?? `${input.derivedCommit!.subject}\n\nHarness-derived subject: ${input.derivedCommit!.reason}`),
+    fixRoundCommitMessage(input.report, wrapLongBodyLines(
+      asked ?? `${input.derivedCommit!.subject}\n\nHarness-derived subject: ${input.derivedCommit!.reason}`)),
     input.assignmentId,
   );
   const subjectSource = asked === undefined ? "harness-derived" : input.subjectSource ?? "worker-authored";
@@ -38840,6 +38850,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
       openProposalIds,
       isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
       isDeclined: declinedWithReceipts(ledgerLinesForRatify, join(config.root, "state")),
+      isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLinesForRatify),
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
@@ -38920,6 +38931,7 @@ function loadProposalForRatify(
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
     isDeclined: declinedWithReceipts(ledgerLines, join(inboxRoot, "state")),
+    isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLines),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };
@@ -38962,6 +38974,7 @@ function loadProposalsForRatify(
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
     isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
+    isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLines),
   };
 
   const found: { id: string; proposal: Proposal; classification: InboxClassification }[] = [];

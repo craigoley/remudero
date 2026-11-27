@@ -27,13 +27,16 @@ import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
 import { escalationTaskId, issueUrlRepository, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText, escalationHeadSha } from "./escalate.js";
-import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, classifyChangesRequested, pullReviewsRestArgs, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation, combinedStatusRestArgs, openPrsRestArgs, MERGE_STATE_HYDRATION_CAP, SCANNER_BLOCKER_HYDRATION_CAP, REVIEW_QUEUE_HOLD_READ_CAP, CODEQL_HEAD_ALERT_HYDRATION_CAP, WORKFLOW_RUN_HYDRATION_CAP, type MergeStateObservation } from "./open-prs-rest.js";
+import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, classifyChangesRequested, pullReviewsRestArgs, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation, combinedStatusRestArgs, openPrsRestArgs, MERGE_STATE_HYDRATION_CAP, SCANNER_BLOCKER_HYDRATION_CAP, REVIEW_QUEUE_HOLD_READ_CAP, CODEQL_HEAD_ALERT_HYDRATION_CAP, WORKFLOW_RUN_HYDRATION_CAP, type MergeStateObservation, createHeadReadGate, recordHeadReadCounts, type HeadReadGate } from "./open-prs-rest.js";
+import { peekChangedHeads, pruneAcknowledgedChangedHeads } from "./github-event-wake.js";
+import { readDrainLock } from "./drain-lock.js";
+import { DEFAULT_GITHUB_EVENT_WAKE_HEAD_RECHECK_MS, loadDefaultPolicy, type Policy } from "./policy.js";
 import { createHash } from "node:crypto";
 import { codeqlAlertsReadDue } from "./pr-blocker.js";
 import { planFilesIdentity } from "./thread-plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import { appendLedger } from "./ledger.js";
-import { fixedClock, systemClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { classifyLogFetchFailure, logFetchRetryAtMs, readCheckRunOutputAsync } from "./ci-incidents.js";
 import { createSizedMemo } from "./ledger-union.js";
 import { type BoardItem } from "./board-review.js";
@@ -263,6 +266,8 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   fetchAsync?: GhApiFetcher;
   pacer?: GhCallPacer;
   log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** W1-T14809: the head-read gate's seams; absent, the real `git ls-remote`, clock and policy answer. */
+  headReads?: HeadReadSweepIo;
 } = {}) {
   const { owner, repo, config, ledgerPath, checkoutRoot } = options;
   const log = io.log ?? (() => {});
@@ -275,6 +280,8 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   let openFiles = files;
   const filingFiles = loadPlanFilingFileCache(join(config.root, "state"));
   const stageReuse = createOpenPrStageReuse();
+  const headReadSweeper = createHeadReadSweeper();
+  const headReadGate = headReadSweeper.gate;
   if (filingFiles.unreadable !== undefined) log("plan_filing_files.store_unreadable", { reason: filingFiles.unreadable });
   let reads = new Map<string, unknown>();
   let generationClock = 0;
@@ -338,11 +345,13 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     github.resetFailureFlags?.();
     let openPrRows: OpenPrRest[] | undefined;
     let openPrError: string | undefined;
-    try { openPrRows = await fetchTickOpenPrs(owner, repo, fetchAsync, pacer); }
+    await headReadSweeper.begin(config.root, checkoutRoot, io.headReads);
+    try { openPrRows = await fetchTickOpenPrs(owner, repo, fetchAsync, pacer, headReadGate); }
     catch (error) {
       openPrError = String(error);
       log("read_plane.open_failed", { reason: openPrError });
     }
+    recordHeadReadCounts(dirname(ledgerPath), headReadGate.counts());
     let prior = request.previousProjection;
     if (!prior) {
       const stored = readFileIfExists(join(config.root, "state", "status.json"));
@@ -2968,9 +2977,9 @@ const TICK_OPEN_PRS_QUERY =
   "pullRequests(states:OPEN,first:100,orderBy:{field:CREATED_AT,direction:DESC}){" +
   "nodes{number url headRefName headRefOid createdAt updatedAt body isDraft autoMergeRequest{enabledAt}}}}}";
 
-async function fetchTickOpenPrs(owner: string, repo: string, read: GhApiFetcher, pacer: GhCallPacer): Promise<OpenPrRest[]> {
+async function fetchTickOpenPrs(owner: string, repo: string, read: GhApiFetcher, pacer: GhCallPacer, gate: HeadReadGate): Promise<OpenPrRest[]> {
   try {
-    return await fetchOpenPrsWithPostedIdsAsync(owner, repo, read, pacer);
+    return await fetchOpenPrsWithPostedIdsAsync(owner, repo, read, pacer, gate);
   } catch (restError) {
     if (!(restError instanceof GhPaceFloorStandDownError) || restError.resource !== "core") throw restError;
     const admission = githubInstallationBudget().admit();
@@ -3007,19 +3016,26 @@ export function fetchOpenPrsWithPostedIdsAsync(
   repo: string,
   read: GhApiFetcher,
   pacer: GhCallPacer | undefined,
+  gate?: HeadReadGate,
 ): Promise<OpenPrRest[]> {
+  const gated = gate ? gate.wrap(read) : read;
   return paceGhEntryAsync(pacer, isGhRateLimitError,
-    () => runStepsAsync(openPrsWithPostedIdsSteps(owner, repo, rollupPrefetchRead(owner, repo, read, pacer))));
+    () => runStepsAsync(openPrsWithPostedIdsSteps(owner, repo, rollupPrefetchRead(owner, repo, gated, pacer, gate))));
 }
 
 /** W1-T12530: when the open-PR list arrives, every head's check-run and status reads start at once,
- *  each through the pacer; the list's own walk then takes each answer in its usual order. */
-function rollupPrefetchRead(owner: string, repo: string, read: GhApiFetcher, pacer: GhCallPacer | undefined): GhApiFetcher {
+ *  each through the pacer; the list's own walk then takes each answer in its usual order.
+ *  W1-T14809: a head read the gate answers from its kept rollup starts no read and waits on no pacer. */
+function rollupPrefetchRead(owner: string, repo: string, read: GhApiFetcher, pacer: GhCallPacer | undefined, gate?: HeadReadGate): GhApiFetcher {
   type Held = Promise<{ ok: true; value: unknown } | { ok: false; error: unknown }>;
   const early = new Map<string, Held>();
   const list = openPrsRestArgs(owner, repo).join("\0");
-  const start = (args: string[]) => early.set(args.join("\0"), paceGhEntryAsync(pacer, isGhRateLimitError, async () => read(args))
-    .then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error })));
+  const start = (args: string[]) => {
+    const kept = gate?.answer(args);
+    if (kept) return early.set(args.join("\0"), Promise.resolve({ ok: true as const, value: kept.value }));
+    return early.set(args.join("\0"), paceGhEntryAsync(pacer, isGhRateLimitError, async () => read(args))
+      .then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error })));
+  };
   return (args, onRateLimit) => {
     const key = args.join("\0");
     const held = early.get(key);
@@ -3041,6 +3057,94 @@ function rollupPrefetchRead(owner: string, repo: string, read: GhApiFetcher, pac
   };
 }
 
+/** W1-T14809: the head-read gate's seams. Absent, `git ls-remote` in the checkout, the system clock and the
+ *  committed policy's `githubEventWake.headRecheckMs` answer. */
+export interface HeadReadSweepIo {
+  lsRemoteHeads?: (checkoutRoot: string) => Promise<ReadonlySet<string>>;
+  clock?: Clock;
+  recheckMs?: number;
+  /** Whether this process holds the instance's drain lock; absent, {@link holdsDrainLock} reads the lock file. */
+  holdsDrainLock?: (root: string) => boolean;
+}
+
+/** Every branch and pull-request head sha on `origin`, from ONE `git ls-remote` (git upload-pack, never the REST quota). */
+export async function lsRemoteHeadShas(checkoutRoot: string): Promise<ReadonlySet<string>> {
+  const out = await planSyncGitRunnerAsync(checkoutRoot, { timeoutMs: 60_000 })(["ls-remote", "origin", "refs/heads/*", "refs/pull/*/head"]);
+  return new Set(out.split("\n").map((line) => line.split(/\s+/)[0]).filter((sha) => /^[0-9a-f]{40}$/.test(sha)));
+}
+
+/** The committed `githubEventWake.headRecheckMs`; the shipped default when that policy cannot be read. */
+export function headRecheckMsFromPolicy(load: () => Pick<Policy, "values"> = loadDefaultPolicy): number {
+  try {
+    return load().values.githubEventWake.headRecheckMs;
+  } catch {
+    // An unreadable committed policy keeps the shipped floor rather than stopping the read plane.
+    return DEFAULT_GITHUB_EVENT_WAKE_HEAD_RECHECK_MS;
+  }
+}
+
+/** True when this process holds `<root>/state/drain.lock`: the lock file names its holder's pid (drain-lock.ts). A
+ *  standby daemon's pre-lock reads, and any read outside a daemon, answer false. */
+export function holdsDrainLock(root: string): boolean {
+  return readDrainLock(join(root, "state", "drain.lock"))?.pid === process.pid;
+}
+
+/** One consumer of the changed-heads journal: its gate, the entries it already applied, and whether it held the lock. */
+export interface HeadReadSweeper {
+  gate: HeadReadGate;
+  /** Starts one sweep: applies each changed head not yet applied, then ONE ls-remote. A failed ls-remote reads every
+   *  head over REST this sweep, and its reason rides the counts onto `sweep.summary`. */
+  begin(root: string, checkoutRoot: string | undefined, io?: HeadReadSweepIo): Promise<void>;
+}
+
+/**
+ * W1-T14809 (fleet review of #21033): every consumer PEEKS the journal and applies each entry once, so a standby's
+ * pre-lock read, the read plane and a light pass never take an entry from one another. A sweeper that has just taken
+ * the drain lock first drops every rollup it kept before the lock, so a promoted standby re-reads each head; only the
+ * lock holder prunes entries older than headRecheckMs, which no gate needs.
+ */
+export function createHeadReadSweeper(gate: HeadReadGate = createHeadReadGate()): HeadReadSweeper {
+  let locked = false;
+  const applied = new Map<string, number>();
+  return {
+    gate,
+    async begin(root, checkoutRoot, io = {}) {
+      const nowMs = (io.clock ?? systemClock).now();
+      const recheckMs = io.recheckMs ?? headRecheckMsFromPolicy();
+      const holds = (io.holdsDrainLock ?? holdsDrainLock)(root);
+      if (holds && !locked) {
+        gate.reset();
+        applied.clear();
+      }
+      locked = holds;
+      if (holds) pruneAcknowledgedChangedHeads(root, nowMs - recheckMs);
+      for (const [key, receivedMs] of applied) if (!(nowMs - receivedMs < recheckMs)) applied.delete(key);
+      const changed = peekChangedHeads(root).filter((entry) => {
+        const receivedMs = Date.parse(entry.received_at);
+        // An entry as old as the floor is a no-op: a read kept before it has aged out, and one kept after reflects it.
+        if (!(nowMs - receivedMs < recheckMs)) return false;
+        const key = `${entry.sha}\0${entry.event}\0${entry.received_at}`;
+        if (applied.has(key)) return false;
+        applied.set(key, receivedMs);
+        return true;
+      });
+      let heads: ReadonlySet<string> | undefined;
+      let unguardedReason: string | undefined;
+      try {
+        if (checkoutRoot === undefined) throw new Error("no target checkout to read origin's heads from");
+        heads = await (io.lsRemoteHeads ?? lsRemoteHeadShas)(checkoutRoot);
+      } catch (error) {
+        // Not "no heads": an unknown head set turns every skip off, so this sweep reads each head over REST.
+        unguardedReason = `ls-remote failed: ${String((error as Error)?.message ?? error).slice(0, 200)}`;
+      }
+      gate.beginSweep({ heads, changed, nowMs, recheckMs, ...(unguardedReason === undefined ? {} : { unguardedReason }) });
+    },
+  };
+}
+
+/** The light pass's own sweepers, one per instance and repository in this thread, so its kept reads outlive one pass. */
+const lightPassSweepers = new Map<string, HeadReadSweeper>();
+
 /** W1-T6591: {@link buildOpenPrViews} in ONE pass, every remote read awaited at its own step. */
 export function buildOpenPrViewsAsync(
   owner: string,
@@ -3050,6 +3154,8 @@ export function buildOpenPrViewsAsync(
     fetchAsync?: GhApiFetcher;
     fetchCiFailureEvidenceAsync?: OpenPrCiFailureRead;
     readRequiredContextsAsync?: (owner: string, repo: string) => Promise<RequiredContextsRead>;
+    /** W1-T14809: the light pass's head-read sweeper and its seams; absent, this thread's own one for the instance. */
+    headReads?: { sweeper?: HeadReadSweeper; io?: HeadReadSweepIo };
   } = {},
 ): Promise<ClassifiedOpenPrView[]> {
   const transport: GhApiFetcher = deps.fetchAsync ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit));
@@ -3060,7 +3166,18 @@ export function buildOpenPrViewsAsync(
     read: paced,
     concurrent: true,
     dependencyIdentityRead: paced,
-    openPrRows: () => fetchOpenPrsWithPostedIdsAsync(owner, repo, transport, deps.pacer),
+    openPrRows: async () => {
+      // W1-T14809: a light pass's own open-PR read is gated like the tick read's, by this thread's sweeper.
+      const stateDir = dirname(ledgerPath);
+      const key = `${stateDir}\0${owner}/${repo}`;
+      const sweeper = deps.headReads?.sweeper ?? lightPassSweepers.get(key) ?? lightPassSweepers.set(key, createHeadReadSweeper()).get(key)!;
+      await sweeper.begin(dirname(stateDir), deps.ciGateSource?.checkoutRoot, deps.headReads?.io);
+      try {
+        return await fetchOpenPrsWithPostedIdsAsync(owner, repo, transport, deps.pacer, sweeper.gate);
+      } finally {
+        recordHeadReadCounts(stateDir, sweeper.gate.counts());
+      }
+    },
     ciFailures: (o, r, rollup) => paceGhEntryAsync(deps.pacer, isGhRateLimitError, async () => ciFailures(o, r, rollup)),
     requiredContexts: deps.readRequiredContextsAsync ?? readRequiredStatusCheckContextsAsync,
     baseTip: async () => {

@@ -376,6 +376,7 @@ import {
   prFilesRestArgs,
   rollupFromRest,
   rollupForAsync,
+  takeHeadReadCounts,
   needsWorkflowIdentity,
   singlePrRestArgs,
   runsForHeadRestArgs,
@@ -30663,6 +30664,8 @@ async function runSweepPinned(
     actions_taken: actionsTaken,
     actions_failed: actionsFailed,
     ...openEscalationHistoryHeldFields(deps.ledgerPath),
+    // W1-T14809: the read plane's head reads made and skipped since the previous summary.
+    ...takeHeadReadCounts(dirname(deps.ledgerPath)),
     // W1-T11171: only a gated (light) pass has conflict shares to report.
     ...(deps.actionable !== undefined ? { light_conflict_acted: lightConflictActed, light_conflict_deferred: lightConflictDeferred } : {}),
   });
