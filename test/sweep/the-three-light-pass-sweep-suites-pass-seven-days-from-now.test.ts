@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runSuitesShifted } from "#src/lib/gate-gardener.js";
+import { testRunArgv, unwrapLowPriority } from "#src/lib/test-slot.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // W1-T15078. The suites' fixture dates derive from Date.now, so their age stays stable when that clock shifts.
@@ -14,8 +15,17 @@ const FILES = [
   "test/sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views.test.ts",
 ] as const;
 
+/** runSuitesShifted's own child (its batch, clock shift, judge and reporters), started at this test's priority with
+ *  one worker per suite. The gardener's run is niced and gets one worker on a loaded host, so the suites (44 s, 15 s
+ *  and 7.7 s in the tier manifest) ran one after another at nice 10. On a loaded host the proof then ran longer than
+ *  the reviewer's 180 s bound twice. */
+const atTestPriority: NonNullable<NonNullable<Parameters<typeof runSuitesShifted>[3]>["execFile"]> = (command, args, options) => {
+  const child = unwrapLowPriority(command, args);
+  return execFileSync(child.file, testRunArgv(child.args, FILES.length), options);
+};
+
 function failures(shiftDays: number): string[] {
-  const results = runSuitesShifted(REPO_ROOT, FILES, shiftDays);
+  const results = runSuitesShifted(REPO_ROOT, FILES, shiftDays, { execFile: atTestPriority });
   assert.equal(results.size, FILES.length, "every suite reported its own result");
   return [...results].flatMap(([file, r]) => {
     if ("error" in r) return [`${file}: ${r.error.message}`];
@@ -25,7 +35,7 @@ function failures(shiftDays: number): string[] {
 }
 
 /** The three suites at the real clock, in a child started BEFORE the shifted run and written to a file (never a
- *  pipe the blocked event loop would leave full). It uses one test worker while the shifted batch runs. */
+ *  pipe the blocked event loop would leave full). Like the shifted batch, it runs one worker per suite. */
 function realClockRun(): Promise<{ code: number | null; tap: string }> {
   const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t15078-"));
   const out = join(dir, "real-clock.tap"), fd = openSync(out, "w");
@@ -34,7 +44,7 @@ function realClockRun(): Promise<{ code: number | null; tap: string }> {
   // As the shifted child does: this run is not part of an enclosing coverage measurement.
   env.NODE_OPTIONS = (env.NODE_OPTIONS ?? "").replace(/(^|\s)--experimental-test-coverage(?=\s|$)/g, "$1").trim();
   if (!env.NODE_OPTIONS) delete env.NODE_OPTIONS;
-  const child = spawn(process.execPath, ["--test", "--test-concurrency=1", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", ...FILES],
+  const child = spawn(process.execPath, ["--test", `--test-concurrency=${FILES.length}`, "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", ...FILES],
     { cwd: REPO_ROOT, env, stdio: ["ignore", fd, fd] });
   closeSync(fd);
   return new Promise((done, fail) => {
@@ -45,7 +55,8 @@ function realClockRun(): Promise<{ code: number | null; tap: string }> {
   });
 }
 
-test("W1-T15078 criterion 1: the three light-pass suites pass seven days from now", async () => {
+// Its own bound, kept by every tier (scripts/test-tier-manifest.mjs): two runs of three suites, beyond a derived 120 s.
+test("W1-T15078 criterion 1: the three light-pass suites pass seven days from now", { timeout: 600_000 }, async () => {
   for (const file of FILES) assert.ok(existsSync(join(REPO_ROOT, file)), `${file} exists — a ghost path would read as a clean pass`);
   const real = realClockRun();
   assert.deepEqual(failures(7), [], "every suite passes with Date.now shifted +7 days");
