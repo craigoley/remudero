@@ -10,6 +10,11 @@
  * Score = BM25(proposal text, row title and rationale) + IDF-weighted shared `files:` paths (a shared parent
  * directory counts half) + IDF-weighted shared `plan_refs` (a row whose plan_refs name an id the proposal names
  * shares that ref too). IDF keeps a path every task touches, like src/run-task.ts, from outranking a rare one.
+ *
+ * ONE HOP (MEASURED 2026-11-27 on the same plan, 150 recent architect tasks as proxy proposals, their W1-T ids
+ * stripped): the top k alone kept 0.604 of each task's real open depends_on at k=80 (24K chars median) and 0.739 at
+ * k=200 (59K); adding the open depends_on of every kept row kept 0.851 at k=80 (28K) and 0.910 at k=200 (67K). A
+ * dependency is usually a neighbour's dependency too, so {@link withOneHopDependencies} follows one hop, never two.
  */
 
 /** One open plan row, reduced to what the score reads. */
@@ -20,6 +25,8 @@ export interface DependsOnCandidateRow {
   body?: string;
   files: readonly string[];
   planRefs: readonly string[];
+  /** The row's own depends_on ids, which {@link withOneHopDependencies} follows; never scored. */
+  dependsOn?: readonly string[];
 }
 
 /** What the score reads from one proposal. */
@@ -31,7 +38,11 @@ export interface DependsOnCandidateQuery {
   namedIds: ReadonlySet<string>;
 }
 
-export const DEFAULT_DEPENDS_ON_SHORTLIST_K = 80;
+/** config.json `inboxDraftTopK` when absent: k=200 with one hop measured 0.910 recall at a 67K-char median. */
+export const DEFAULT_DEPENDS_ON_SHORTLIST_K = 200;
+/** inbox.draft_shortlist_recall names at most this many missed ids, so one row stays small; `cited - in_shortlist` still
+ *  counts them all. PRIMARY CONTROL of the row's size, not a fallback: no other bound trims `missed`. */
+export const SHORTLIST_RECALL_MISSED_CAP = 20;
 
 const BM25_K1 = 1.2;
 const BM25_B = 0.75;
@@ -126,6 +137,42 @@ export function dependsOnShortlist(rows: readonly DependsOnCandidateRow[], query
     .slice(0, Math.max(0, Math.floor(k)));
   const kept = new Set(ranked.map(({ i }) => i));
   return rows.filter((row, i) => kept.has(i) || query.namedIds.has(row.id)).map((row) => row.id);
+}
+
+/**
+ * One hop, in PLAN ORDER: the `kept` ids plus every row of `rows` that a kept row's `dependsOn` names. Only an id
+ * among `rows` can join, so a caller that passes the open rows (and the named ones) never gains a landed row; a joined
+ * row's own dependencies are not followed. A kept id that is not among `rows` is dropped.
+ */
+export function withOneHopDependencies(rows: readonly DependsOnCandidateRow[], kept: Iterable<string>): string[] {
+  const keptIds = new Set(kept);
+  const present = new Set(rows.map((row) => row.id));
+  const joined = new Set<string>();
+  for (const row of rows) {
+    if (!keptIds.has(row.id)) continue;
+    for (const dep of row.dependsOn ?? []) if (present.has(dep) && !keptIds.has(dep)) joined.add(dep);
+  }
+  return rows.filter((row) => keptIds.has(row.id) || joined.has(row.id)).map((row) => row.id);
+}
+
+/** The shortlist an inbox draft carries: {@link dependsOnShortlist} (named rows plus the top `k`), then one hop. */
+export function dependsOnShortlistWithDependencies(rows: readonly DependsOnCandidateRow[], query: DependsOnCandidateQuery,
+  k: number = DEFAULT_DEPENDS_ON_SHORTLIST_K): string[] {
+  return withOneHopDependencies(rows, dependsOnShortlist(rows, query, k));
+}
+
+/** How much of what a draft cited the shortlist held: `missed` in citation order, capped at {@link SHORTLIST_RECALL_MISSED_CAP}. */
+export interface ShortlistRecall {
+  cited: number;
+  in_shortlist: number;
+  missed: string[];
+}
+
+/** Compare the distinct `cited` ids with `shortlist`; the caller filters `cited` to real open plan rows first. */
+export function shortlistRecall(cited: Iterable<string>, shortlist: ReadonlySet<string>): ShortlistRecall {
+  const distinct = [...new Set(cited)];
+  const missed = distinct.filter((id) => !shortlist.has(id));
+  return { cited: distinct.length, in_shortlist: distinct.length - missed.length, missed: missed.slice(0, SHORTLIST_RECALL_MISSED_CAP) };
 }
 
 /** Repo-relative path tokens in free text: at least one slash, a file-ish last segment, no URL scheme. */

@@ -46,7 +46,7 @@ import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedMode
   OpenWeightRequestTooLargeError, OPENWEIGHT_MAX_COMPLETION_TOKENS, type CashDraftFit, type CashDraftFitInput } from "./worker-provider.js";
 import { mechanicalAskPurpose, inboxMechanicalTaskDigest, inboxMechanicalProposalDigest, isMechanicalProducerObject, isVerificationProducerObject, type MechanicalAskPurpose, type InboxRetirementView } from "./inbox-retirement.js";
 import { inboxDismissalReceipt } from "./inbox-dismissal-audit.js";
-import { dependsOnShortlist, pathsInText, type DependsOnCandidateRow } from "./depends-on-candidates.js";
+import { DEFAULT_DEPENDS_ON_SHORTLIST_K, dependsOnShortlistWithDependencies, pathsInText, shortlistRecall, type DependsOnCandidateRow, type ShortlistRecall } from "./depends-on-candidates.js";
 
 /**
  * Ratification core (MASTER-PLAN P25(i), W1-T110; docs/forensics/inbox.md): only READY surfaces
@@ -1821,17 +1821,50 @@ function dependsOnIndexFor(proposal: Proposal, rows: readonly ProjectedPlanRow[]
   return dependsOnIndexFromRows(rows, proposalNamedTaskIds(proposal));
 }
 
-/** The "topk" index: the open rows {@link dependsOnShortlist} keeps for this proposal, plus every row it names (a
- *  named landed row too, as the full index keeps it). Rows keep the full index's text and plan order. */
-function dependsOnShortlistIndexFor(proposal: Proposal, rows: readonly ProjectedPlanRow[], k?: number): PlanDependsOnIndex {
+/** The rows the shortlist may draw on (every open row, and a landed one the proposal names) and the ids it keeps:
+ *  the named rows, the top `k` scored, and every open row one of those depends on (one hop). */
+function shortlistFor(proposal: Proposal, rows: readonly ProjectedPlanRow[], k?: number): { open: ProjectedPlanRow[]; kept: Set<string> } {
   const named = proposalNamedTaskIds(proposal);
   const text = proposalText(proposal);
   const paths = pathsInText(text);
   const open = rows.filter((row) => !row.landed || named.has(row.id));
-  const kept = new Set(dependsOnShortlist(open.map((row) => row.candidate),
+  const kept = new Set(dependsOnShortlistWithDependencies(open.map((row) => row.candidate),
     { text, files: paths, planRefs: [...named, ...paths], namedIds: new Set(open.filter((row) => named.has(row.id)).map((row) => row.id)) }, k));
+  return { open, kept };
+}
+
+/** The "topk" index: the rows {@link shortlistFor} keeps, a named landed row too (as the full index keeps it). Rows
+ *  keep the full index's text and plan order. */
+function dependsOnShortlistIndexFor(proposal: Proposal, rows: readonly ProjectedPlanRow[], k?: number): PlanDependsOnIndex {
+  const { open, kept } = shortlistFor(proposal, rows, k);
   const shortlisted = open.filter((row) => kept.has(row.id));
   return { text: shortlisted.map((row) => row.text).join("\n"), omitsLanded: open.length < rows.length, shortlist: true };
+}
+
+/** The fragment's depends_on ids that are real OPEN plan rows, in citation order: a NEW-n placeholder, a landed id
+ *  and an id the plan lacks all drop. Throws on a fragment that does not parse; the caller logs nothing then. */
+function fragmentOpenDependsOn(fragmentYaml: string, rows: readonly ProjectedPlanRow[]): string[] {
+  const open = new Set(rows.filter((row) => !row.landed).map((row) => row.id));
+  const records = parseYaml(fragmentYaml) as unknown;
+  const cited: string[] = [];
+  for (const record of Array.isArray(records) ? records : []) {
+    const deps = record !== null && typeof record === "object" ? (record as { depends_on?: unknown }).depends_on : undefined;
+    for (const dep of stringList(deps)) if (open.has(dep)) cited.push(dep);
+  }
+  return cited;
+}
+
+/** inbox.draft_shortlist_recall's evidence for one lint-clean fragment, in either index mode: what the shortlist at
+ *  `k` would hold for this proposal against what the fragment cited. Undefined when it cannot be computed (an
+ *  unparseable fragment, say): the row is evidence only, and the draft it describes is cached either way. */
+function draftShortlistRecallFromRows(proposal: Proposal, rows: readonly ProjectedPlanRow[], fragmentYaml: string, k: number): ShortlistRecall | undefined {
+  try {
+    return shortlistRecall(fragmentOpenDependsOn(fragmentYaml, rows), shortlistFor(proposal, rows, k).kept);
+  } catch {
+    // Deliberate: the recall row is optional evidence beside a draft the rung caches regardless; an absent row and a
+    // failed computation both mean "no evidence for this draft", so nothing is logged and the rung carries on.
+    return undefined;
+  }
 }
 
 /** The index a draft prompt carries under `mode`; "full" (and an absent mode) is {@link dependsOnIndexFor} unchanged. */
@@ -1869,7 +1902,7 @@ function projectPlanRows(planText: string): ProjectedPlanRow[] {
     }
     rows.push({ id, landed: statusHasLanded(record["status"]), text: lines.join("\n"), candidate: { id,
       title: typeof record["title"] === "string" ? record["title"] : "", body: typeof record["rationale"] === "string" ? record["rationale"] : undefined,
-      files: stringList(record["files"]), planRefs: stringList(record["plan_refs"]) } });
+      files: stringList(record["files"]), planRefs: stringList(record["plan_refs"]), dependsOn: stringList(record["depends_on"]) } });
   }
   if (rows.length === 0) throw new PlanProjectionError("the plan projected to zero tasks");
   return rows;
@@ -2320,6 +2353,9 @@ export interface DraftRungDeps {
   cashResumes?: DraftCashResumes;
   /** config.json `inboxDraftIndex`; absent is "full", the index every open task appears in. */
   indexMode?: InboxDraftIndexMode;
+  /** config.json `inboxDraftTopK`: the shortlist's scored rows under "topk", and the k the recall row measures in
+   *  both modes; absent is {@link DEFAULT_DEPENDS_ON_SHORTLIST_K}. */
+  topK?: number;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -2876,8 +2912,8 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
     let lastRequestedModel: string | null = null;
     try {
       // The plan is parsed once per rung; each proposal keeps the landed tasks its own text names.
-      planRows ??= projectPlanRows(currentPlanText);
-      const planIndex = draftPlanIndexFromRows(proposal, planRows, deps.indexMode);
+      const rows = planRows ??= projectPlanRows(currentPlanText);
+      const planIndex = draftPlanIndexFromRows(proposal, rows, deps.indexMode, deps.topK);
       const planIndexChars = planIndex.text.length;
       const initialPrompt = inboxDraftPrompt(proposal, currentPlanText, runId, planIndex);
       const generation = snapshot?.generation;
@@ -3080,6 +3116,13 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         stampLine: parsed.stampLine,
         anchorFingerprint: anchorFingerprint(proposal.evidenceAnchors),
       };
+      if (violations.length === 0 && !parsed.releaseTaskId) {
+        // The evidence the operator flips inboxDraftIndex on: under "full", what a shortlist at this k would have
+        // missed; under "topk", a dependency the drafter found by its own search.
+        const k = deps.topK ?? DEFAULT_DEPENDS_ON_SHORTLIST_K;
+        const recall = draftShortlistRecallFromRows(proposal, rows, parsed.fragmentYaml, k);
+        if (recall) deps.log("inbox.draft_shortlist_recall", { proposal_id: proposal.id, mode: deps.indexMode ?? "full", k, ...recall });
+      }
       // A still-dirty draft after the bounded retries is cached anyway and surfaces NOT-READY, but the unresolved set
       // is named on the ledger so the retro sees what the rung could not fix.
       if (!deps.causalScope) deps.log("inbox.drafted", { proposal_id: proposal.id, draft_input_key: draftInputKey(proposal), ...draftModelFields(lastWorker), lint_clean: violations.length === 0, unresolved_violations: violations.map((v) => v.message) });

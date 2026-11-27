@@ -139,13 +139,13 @@ test("the depends_on shortlist returns ids in plan order, not score order", () =
 test("the depends_on shortlist holds at most K scored rows plus the named ones, and never pads with a zero scorer", () => {
   const rows = Array.from({ length: 200 }, (_, i) => row(`R${i}`, i % 2 === 0 ? `inbox variant ${i}` : `billing variant ${i}`));
   const q = query("inbox", { namedIds: new Set(["R1", "R3"]) });
-  assert.equal(DEFAULT_DEPENDS_ON_SHORTLIST_K, 80);
-  const kept = dependsOnShortlist(rows, q);
+  const kept = dependsOnShortlist(rows, q, 80);
   assert.equal(kept.length, 80 + 2, "80 scored rows plus the two named ones");
   assert.ok(kept.includes("R1") && kept.includes("R3"), "both named rows are kept");
   assert.deepEqual(kept.filter((id) => Number(id.slice(1)) % 2 === 1), ["R1", "R3"], "no other zero-scoring row is kept");
   assert.equal(dependsOnShortlist(rows, q, 10).length, 12, "a smaller K bounds the scored rows to it");
   assert.equal(dependsOnShortlist(rows, q, 1000).length, 100 + 2, "a K above the scorers keeps every scorer and no zero row");
+  assert.equal(dependsOnShortlist(rows, q).length, Math.min(DEFAULT_DEPENDS_ON_SHORTLIST_K, 100) + 2, "the default K bounds it the same way");
 });
 
 test("the depends_on shortlist reads repo paths from the proposal text, never a URL", () => {

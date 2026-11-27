@@ -82,6 +82,7 @@ test("CONFIG_SCHEMA declares the config field shape as metadata", () => {
     "selectedRegistryMode",
     "inboxGardenerMode",
     "inboxDraftIndex",
+    "inboxDraftTopK",
     "root",
     "diskArtifactScanRoots",
     "installRoot",

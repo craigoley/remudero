@@ -38082,6 +38082,7 @@ export async function draftProposalBatch(
         causalScope,
         lane,
         indexMode: config.inboxDraftIndex,
+        topK: config.inboxDraftTopK,
         spawn: async (proposal, prompt, ctx) => {
           const spawnArgs = { ...buildInboxDraftSpawnArgs({
             cwd: worktreePath,
