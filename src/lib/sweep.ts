@@ -264,6 +264,7 @@ import {
   resolvePlanCriteriaAtHeadAsync,
   UNFILED_RUN_SENTINEL,
   unknownReservationReads,
+  proofConcludedNothing,
 } from "./review.js";
 import { withTempDir } from "./tmp.js";
 import { fetchPrDiff, prDiffSourceAsync } from "./pr-diff.js";
@@ -18853,8 +18854,12 @@ export function inconclusiveLoadLowered(
   if (pr.reviewPendingSince && typeof row.ts === "string" && Date.parse(pr.reviewPendingSince) > Date.parse(row.ts)) return false;
   const verdict = row.decision_verdict as ReviewVerdict | undefined;
   const inconclusive = verdict?.criteria?.filter(criterion => criterion.proof_exec === "inconclusive_load") ?? [];
-  if (inconclusive.length === 0 || verdict?.cannotEvaluate === true || verdict?.promisedFollowUpObservation?.state === "unknown") return false;
-  if (verdict?.criteria.some(c => !c.met && c.proof_exec !== "inconclusive_load") || verdict?.testTheater || verdict?.criteriaTampered) return false;
+  // W1-T15100: a proof whose sandbox never started learned nothing about load, so it is re-reviewed on the next pass.
+  const startFailed = verdict?.criteria?.filter(criterion => criterion.proof_exec === "sandbox_start_failed") ?? [];
+  if (inconclusive.length + startFailed.length === 0 || verdict?.cannotEvaluate === true ||
+    verdict?.promisedFollowUpObservation?.state === "unknown") return false;
+  if (verdict?.criteria.some(c => !c.met && !proofConcludedNothing(c.proof_exec)) || verdict?.testTheater || verdict?.criteriaTampered) return false;
+  if (inconclusive.length === 0) return true;
   const recorded = inconclusive.map(criterion => recordedLoad1(criterion.load)).filter((n): n is number => n !== undefined);
   if (recorded.length !== inconclusive.length) return false;
   const now = sample().load1;
