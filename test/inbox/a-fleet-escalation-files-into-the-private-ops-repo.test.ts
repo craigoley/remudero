@@ -291,15 +291,18 @@ test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery close
   assert.deepEqual(asked, [`repos/${OPS}/issues/9`]);
   // The board lists ops and legacy code-repository issues, each from its own delta: equal numbers never collide.
   const listed: string[] = [];
+  // Stamped from the clock: the board's delta is a stop test on these, and a fixed date would age past sweep.staleDays.
+  const day = (n: number) => new Date(Math.floor(Date.now() / 86_400_000) * 86_400_000 - n * 86_400_000).toISOString();
+  const [opsNew, opsOld, codeOld, codeNew] = [day(1), day(2), day(8), day(7)];
   const row = (repo: string, n: number, updated: string) => ({ number: n, html_url: `https://github.com/${repo}/issues/${n}`, state: "open", title: `${repo}#${n}`, updated_at: updated });
   const fetch = (args: string[]) => {
     listed.push(args[1]!.split("?")[0]!);
-    return args[1]!.startsWith(`repos/${OPS}/`) ? [row(OPS, 2, "2026-11-27T02:00:00Z"), row(OPS, 1, "2026-11-27T01:00:00Z")]
-      : [row(code, 3, "2026-11-21T00:00:00Z")];
+    return args[1]!.startsWith(`repos/${OPS}/`) ? [row(OPS, 2, opsNew), row(OPS, 1, opsOld)]
+      : [row(code, 3, codeNew)];
   };
-  const known = [{ number: 1, url: `https://github.com/${OPS}/issues/1`, state: "open", updatedAt: "2026-11-27T01:00:00Z" },
-    { number: 1, url: `https://github.com/${code}/issues/1`, state: "closed", updatedAt: "2026-11-20T00:00:00Z" },
-    { number: 3, url: `https://github.com/${code}/issues/3`, state: "open", updatedAt: "2026-11-21T00:00:00Z" }];
+  const known = [{ number: 1, url: `https://github.com/${OPS}/issues/1`, state: "open", updatedAt: opsOld },
+    { number: 1, url: `https://github.com/${code}/issues/1`, state: "closed", updatedAt: codeOld },
+    { number: 3, url: `https://github.com/${code}/issues/3`, state: "open", updatedAt: codeNew }];
   const fetched = withEnv(OPS, () => fetchEscalationIssuesRest(CODE.owner, CODE.repo, fetch as never, known));
   assert.deepEqual(listed, [`repos/${OPS}/issues`, `repos/${code}/issues`]);
   assert.deepEqual(fetched.rows.map((r) => `${r.url} ${r.state}`).sort(), [`https://github.com/${OPS}/issues/1 open`, `https://github.com/${OPS}/issues/2 open`,
