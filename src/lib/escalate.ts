@@ -2435,15 +2435,12 @@ export function issueUrlRepository(url: string): string | undefined {
   return /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/\d+\/?$/.exec(url.trim())?.[1];
 }
 
-/** W1-T14998 — the `**Code-Repository:** <owner>/<name>` machine field a routed gateway writes on each issue it files,
- *  naming the code repository the escalation is about. One escalation repository is a pool every routed daemon (core,
- *  site, console, `rmd review --repo`) files in, so this field is what keeps one repository's listing, dedup and
- *  close off another's issues. */
-export const CODE_REPOSITORY_LINE_RE = /^\*\*Code-Repository:\*\*\s*(\S+)\s*$/m;
-
-/** W1-T14998 — the code repository an issue body records, read from its machine fields, or undefined. */
+/** W1-T14998 — the code repository an issue body records in its `**Code-Repository:** <owner>/<name>` machine field,
+ *  or undefined. A routed gateway writes that field on each issue it files: one escalation repository is a pool every
+ *  routed daemon (core, site, console, `rmd review --repo`) files in, so the field is what keeps one repository's
+ *  listing, dedup and close off another's issues. */
 export function escalationCodeRepository(body: string | undefined): string | undefined {
-  return CODE_REPOSITORY_LINE_RE.exec(normalizeCandidateBody(escalationBodyInLegacyOrder(body) ?? ""))?.[1];
+  return /^\*\*Code-Repository:\*\*\s*(\S+)\s*$/m.exec(normalizeCandidateBody(escalationBodyInLegacyOrder(body) ?? ""))?.[1];
 }
 
 /** W1-T14998 — the `<owner>/<name>` of the PR referent {@link prReferentFromIssueText} reads (the first `/pull/<n>`),
