@@ -265,6 +265,8 @@ import {
   UNFILED_RUN_SENTINEL,
   unknownReservationReads,
   reviewClaimHeartbeat,
+  reviewClaimCheckoutVanished,
+  reviewClaimLedgerRows,
 } from "./review.js";
 import { withTempDir } from "./tmp.js";
 import { fetchPrDiff, prDiffSourceAsync } from "./pr-diff.js";
@@ -7401,7 +7403,7 @@ type SweepPrView = OpenPrView & PendingHeartbeatFact & { reviewPendingOwnerPidPr
 /** W1-T14872 — sweep-local like `reviewPendingOwnerPidProven`, never set by a producer: {@link reviewHeartbeatView} reads the
  *  pending claim's reviewer heartbeat off the ledger against the measured silence bound. `fresh` holds the claim past the
  *  pending ceiling, `silent` releases it before; absent (no heartbeat, or no measurable bound) keeps the ceiling. */
-export interface PendingHeartbeatFact { reviewPendingHeartbeat?: "fresh" | "silent" }
+export interface PendingHeartbeatFact { reviewPendingHeartbeat?: "fresh" | "silent" | "checkout-vanished" }
 
 /** W1-T13945 — the withheld-verdict ladder the sweep derived for this view. Sweep-local like `reviewPendingOwnerPidProven`:
  *  it is derived from the ledger inside the sweep, never assigned by an `OpenPrView` producer, so it is not an `OpenPrView`
@@ -7424,9 +7426,9 @@ function producerProvedOwnerDead(
  *  proof says its owner is dead (invariant live-claim-waits). The producer sets that proof only when the live status is the
  *  judged run's own post, so the flag alone suffices here and a status of another or an unknown run never carries it. */
 function pendingClaimOwnerProvenDead(
-  pr: Pick<SweepPrView, "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerGone" | "reviewPendingOwnerPidProven">,
+  pr: Pick<SweepPrView, "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerGone" | "reviewPendingOwnerPidProven" | "reviewPendingHeartbeat">,
 ): boolean {
-  return pr.reviewState === "pending" && producerProvedOwnerDead(pr);
+  return pr.reviewState === "pending" && pr.reviewPendingHeartbeat !== "fresh" && producerProvedOwnerDead(pr);
 }
 
 /** W1-T14035 — a dead claim is re-run alongside CI unless the input's loop facts, where read, show it looping (the
@@ -13650,10 +13652,14 @@ function reviewPendingAgeMinutes(pr: OpenPrView, now: number): number | undefine
  *  re-push remedy's caution, because a redundant pending post is a no-op. */
 function reviewPendingIsStale(pr: OpenPrView & PendingHeartbeatFact, policy: SweepPolicy, now: number): boolean {
   // W1-T14872 (invariant live-claim-waits): a measured heartbeat decides before the ceiling, in both directions.
-  if (pr.reviewPendingHeartbeat === "silent") return true;
+  if (pr.reviewPendingHeartbeat === "silent" || pr.reviewPendingHeartbeat === "checkout-vanished") return true;
   if (pr.reviewPendingHeartbeat === "fresh") return false;
   const age = reviewPendingAgeMinutes(pr, now);
   return age === undefined || age >= policy.pendingCeilingMinutes;
+}
+
+function reviewPendingCanRerun(pr: SweepPrView, policy: SweepPolicy, now: number): boolean {
+  return pr.reviewPendingHeartbeat !== "fresh" && (pr.reviewPendingOwnerDead === true || reviewPendingIsStale(pr, policy, now));
 }
 
 /** W1-T1018 — the ELAPSED-TIME BACKOFF replacing permanent cessation: has enough wall-clock time
@@ -14113,7 +14119,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     disposition: "post-review",
     when: (pr, policy, _ageDays, now, facts) => dependabotRouted(pr, facts) && facts?.reviewVerdictDelivered !== true &&
       (pr.reviewState === "none" || (pr.reviewState === "pending" &&
-        (pr.reviewPendingOwnerDead === true || reviewPendingIsStale(pr, policy, now)))),
+        reviewPendingCanRerun(pr, policy, now))),
     blocker: "awaiting-review",
     reason: (pr) => `dependabot PR refused by the dep-review lane with no owned-build proposal — running the full review on #${pr.prNumber}`,
   },
@@ -14781,9 +14787,12 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       pr.requiredContextsUnreadable !== true &&
       (pr.reviewState === "none" ||
         (pr.reviewState === "pending" &&
-          (pr.reviewPendingOwnerDead === true || reviewPendingIsStale(pr, policy, now)))),
+          reviewPendingCanRerun(pr, policy, now))),
     reason: (pr, policy, _ageDays, now) => {
       if (pr.reviewState === "pending") {
+        if ((pr as SweepPrView).reviewPendingHeartbeat === "checkout-vanished") {
+          return `checks green, the pending review's checkout vanished — re-running the review lane on #${pr.prNumber}`;
+        }
         if (pr.reviewPendingOwnerDead === true) {
           if (pr.reviewPendingOwnerGone === "refused-after-pending") {
             return `checks green, the pending review's post was refused after it began (${pr.reviewPendingOwnerGoneReason}) — re-running the review lane on #${pr.prNumber}`;
@@ -14831,6 +14840,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     when: (pr) => pr.checksState === "green" && pr.reviewState === "pending",
     blocker: "awaiting-review",
     reason: (pr, policy, _ageDays, now) => {
+      if ((pr as SweepPrView).reviewPendingHeartbeat === "fresh") return "checks green, the pending reviewer's heartbeat is fresh — waiting";
       const age = reviewPendingAgeMinutes(pr, now);
       return (
         `checks green, remudero-review pending ${age !== undefined ? `${Math.floor(age)}m` : "0m"} ` +
@@ -18957,7 +18967,8 @@ function reviewStartFailures(pr: SweepPrView, lines: ReadonlyArray<Record<string
 }
 
 function promiseHarvestRetryView(
-  view: SweepPrView, lines: ReadonlyArray<Record<string, unknown>>, sample: () => HostLoadSample = sampleHostLoad,
+  view: SweepPrView, lines: ReadonlyArray<Record<string, unknown>>, ledgerPath: string, nowMs: number,
+  sample: () => HostLoadSample = sampleHostLoad,
 ): SweepPrView {
   // W1-T13380: the sweep runs each review in process, so this process's code sha is the next review's (as W1-T13193's producer).
   const started = reviewStartFailures(view, lines, runningReviewerCodeSha());
@@ -18980,16 +18991,19 @@ function promiseHarvestRetryView(
   // W1-T13945: a pending status with no live owner and a repeated withheld verdict at this input climbs the ladder.
   const ladder = result.reviewState === "pending" ? reviewWithheldLadder(result, lines) : undefined;
   const laddered = ladder === undefined ? result : { ...result, reviewWithheld: ladder };
-  return reviewHeartbeatView(laddered, lines, systemClock.now());
+  return reviewHeartbeatView(laddered, lines, nowMs, ledgerPath);
 }
 
-/** W1-T14872 — the pending claim's heartbeat read off the ledger already in hand: the claim's own run at this head. */
+/** W1-T14872 — look up the live status writer's claim by run and head. */
 export function reviewHeartbeatView<V extends OpenPrView>(
-  view: V, lines: ReadonlyArray<Record<string, unknown>>, nowMs: number,
+  view: V, lines: ReadonlyArray<Record<string, unknown>>, nowMs: number, ledgerPath?: string,
 ): V & PendingHeartbeatFact {
-  if (view.reviewState !== "pending") return view;
-  const beat = reviewClaimHeartbeat(lines, view.reviewPendingOwnerRunId, view.headSha, nowMs);
-  return beat === undefined ? view : { ...view, reviewPendingHeartbeat: beat.state };
+  const runId = view.reviewPendingStatusRunId ?? view.reviewPendingOwnerRunId;
+  if (view.reviewState !== "pending" || runId === undefined) return view;
+  const rows = ledgerPath === undefined ? lines : reviewClaimLedgerRows(ledgerPath, lines);
+  const beat = reviewClaimHeartbeat(rows, runId, view.headSha, nowMs);
+  const state = reviewClaimCheckoutVanished(rows, runId, view.headSha) ? "checkout-vanished" : beat?.state;
+  return state === undefined && (view as SweepPrView).reviewPendingHeartbeat === undefined ? view : { ...view, reviewPendingHeartbeat: state };
 }
 
 function completedRefusalRetryView(pr: SweepPrView, prior: PriorActions): SweepPrView {
@@ -19124,7 +19138,7 @@ export function postReviewFailureHistoryDisposition(
     pr.requiredContextsUnreadable !== true &&
     (pr.reviewState === "none" ||
       (pr.reviewState === "pending" &&
-        (pr.reviewPendingOwnerDead === true || reviewPendingIsStale(pr, policy, now))));
+        reviewPendingCanRerun(pr, policy, now)));
   if (!eligible) return undefined;
 
   const reviewKey = reviewOutcomeKeyForPr(pr);
@@ -24203,7 +24217,7 @@ async function runSweepPinned(
   const progressWitness = (pr: OpenPrView): FixProgressWitness => ({ reviewInputDigest: pr.reviewInputDigest,
     contractRevision: pr.taskId === undefined || pr.taskId === "unfiled" || pr.taskId === `PR-${pr.prNumber}`
       ? null : readWitnessContractRevision(pr.taskId) });
-  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines, deps.sampleLoad));
+  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines, deps.ledgerPath, now, deps.sampleLoad));
   // W1-T9970: the running reviewer image, read at most once per pass and only when a blocked-fixable PR asks.
   let runningImage: { sha: string | undefined } | undefined;
   // W1-T9124: a body-only edit leaves the head-keyed status on the old verdict; queue one re-review of the new input.
@@ -25686,7 +25700,9 @@ async function runSweepPinned(
       let stale: string | undefined;
       if (!(deliveredDedups || durableRefusal || retryBackoff !== undefined)) {
         const liveRun = deadOwnerProofSuperseded(pr, freshLines);
-        if (liveRun !== undefined) stale = `the fresh ledger holds a live claim by ${liveRun} on this head`;
+        const currentClaim = reviewHeartbeatView(pr, freshLines, deps.now?.() ?? systemClock.now(), deps.ledgerPath);
+        if (currentClaim.reviewPendingHeartbeat === "fresh") stale = "the pending reviewer's heartbeat is fresh";
+        else if (liveRun !== undefined) stale = `the fresh ledger holds a live claim by ${liveRun} on this head`;
         else if (pr.reviewState === "pending" && pr.reviewPendingStatusConflict === true) {
           stale = "GitHub reads disagree on the live remudero-review post";
         } else if (pr.reviewPendingStatusRunId !== undefined && pr.reviewPendingStatusRunId !== pr.reviewPendingOwnerRunId &&
@@ -26388,7 +26404,8 @@ async function runSweepPinned(
     // zero-check-run remedies, and the ledgered row itself. Without this, `pr.mergeState` stayed
     // `undefined` on a lazy-recompute miss and a conflicted PR (zero check runs, by construction)
     // fell through to the checks-none rules meant for a genuinely mergeable-but-quiet head.
-    let { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines, mainTipSha);
+    const { pr: inheritedView, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines, mainTipSha);
+    let pr: SweepPrView = inheritedView;
     noteHeadObservation(pr.prNumber, pr.headSha, passClockMs());
     const loopDecision = loopDecisions.has(pr.prNumber) ? undefined : decideLoopOutcome({
       taskId: pr.taskId, prNumber: pr.prNumber, prUrl: pr.prUrl, headSha: pr.headSha,
@@ -26493,9 +26510,9 @@ async function runSweepPinned(
       ledgerLines, reviewOutcomeKeyForPr(pr));
     if (settledView !== undefined) pr = settledView.view;
     const hostGapRefusal = prior.reviewHostGapRefusals.get(reviewOutcomeKeyForPr(pr));
-    const dispositionView = promiseHarvestRetryView(completedRefusalRetryView(pr, prior), ledgerLines, deps.sampleLoad);
+    const dispositionView = promiseHarvestRetryView(completedRefusalRetryView(pr, prior), ledgerLines, deps.ledgerPath, actNowMs, deps.sampleLoad);
     pr = { ...pr, reviewPendingOwnerGone: dispositionView.reviewPendingOwnerGone,
-      reviewPendingOwnerGoneReason: dispositionView.reviewPendingOwnerGoneReason };
+      reviewPendingOwnerGoneReason: dispositionView.reviewPendingOwnerGoneReason, reviewPendingHeartbeat: dispositionView.reviewPendingHeartbeat };
     // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.
     const unknownWaits = mergeabilityUnknownWaits.get(pr.prNumber);
     const dispositionFacts: DispositionFacts = {
@@ -31770,7 +31787,7 @@ export function observeLightPassReviewEligibility(
   if (openPrs.length === 0 || deps.dryRun) return [];
   const now = deps.now ? deps.now() : systemClock.now();
   const lines = (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath);
-  const retryViews = openPrs.map(pr => promiseHarvestRetryView(pr, lines, deps.sampleLoad));
+  const retryViews = openPrs.map(pr => promiseHarvestRetryView(pr, lines, deps.ledgerPath, now, deps.sampleLoad));
   const prior = priorActionsFromLedger(lines, retryViews, deps.sampleLoad);
   const views = retryViews.map(pr => completedRefusalRetryView(pr, prior));
   const freshnessBackoffs = new Set<string>();
@@ -32002,7 +32019,7 @@ async function runSweepLightPassCore(
   const ownNumbers = new Set(openPrs.map((pr) => pr.prNumber));
   let queuePrs = deps.snapshotOpenPrs === undefined ? openPrs
     : [...openPrs, ...deps.snapshotOpenPrs.filter((pr) => !ownNumbers.has(pr.prNumber))];
-  queuePrs = queuePrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad));
+  queuePrs = queuePrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines, deps.ledgerPath, now, deps.sampleLoad));
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines, queuePrs, deps.sampleLoad);
   queuePrs = queuePrs.map(pr => completedRefusalRetryView(pr, selectionPrior));
   openPrs = queuePrs.filter((pr) => ownNumbers.has(pr.prNumber));
@@ -32434,7 +32451,9 @@ async function runSweepLightPassCore(
       return;
     }
     refillViewReadAtMs = deps.now ? deps.now() : systemClock.now();
-    const freshViews = fresh.map(pr => completedRefusalRetryView(promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad), selectionPrior));
+    const refillLines = readLedger(deps.ledgerPath);
+    const freshViews = fresh.map(pr => completedRefusalRetryView(
+      promiseHarvestRetryView(pr, refillLines, deps.ledgerPath, refillViewReadAtMs, deps.sampleLoad), selectionPrior));
     const refillCandidates = freshViews.filter((pr) => {
       const key = lightPassHeadKey(pr);
       if (refilledHeads.has(key) || lightPassReservedHeads.has(key)) return false;

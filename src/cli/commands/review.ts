@@ -43,7 +43,7 @@ import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/moun
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import type { ReviewTriagePullRequest } from "../../lib/review-triage.js";
-import { REVIEWER_CHECKOUT_VANISHED_REASON, reviewHeartbeat, watchReviewerCheckout } from "../../lib/review.js";
+import { REVIEWER_CHECKOUT_VANISHED_REASON, REVIEW_HEARTBEAT_STEP, reviewHeartbeat, watchReviewerCheckout } from "../../lib/review.js";
 import { isTestRunner } from "../../lib/live-write-guard.js";
 import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, markUnbackedBodyGuards, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, postUnreadTaskHoldGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type CriterionVerdict, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure, type ReviewAdmission } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
@@ -1112,6 +1112,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   repo: string;
   prUrl: string;
   onPhase?: (phase: string) => void;
+  readProofRecord?: typeof readProofDiscriminationRecord;
   /** W1-T10269: judge, then stop before any arm, status or comment — the reviewer-health shadow. */
   shadow?: boolean;
   /** W1-T12145: a calibration case review. Its shadow judge never starts, so a case spends nothing outside the pass's
@@ -1367,9 +1368,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     });
     // W1-T14872: this run owns the claim when it posted it, or when its own reviewCommand already did (a same-run no-op).
     if (pending.posted || pending.heldByRun === args.runId) {
-      // Each beat is one review.heartbeat ledger row naming this run, its head and the phase.
-      heartbeat = reviewHeartbeat(({ step: _step, ...fields }) => log("review.heartbeat", fields),
-        () => systemClock.now(), { runId: args.runId, headSha });
+      heartbeat = reviewHeartbeat(({ step: _step, ...fields }) => log(REVIEW_HEARTBEAT_STEP, fields),
+        () => systemClock.now(), { runId: args.runId, headSha, prNumber: reviewPrNumber(prUrl) });
       heartbeat("claimed");
     }
     if (!pending.posted && pending.lifecycle !== undefined) {
@@ -1557,6 +1557,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     });
     return { ...held, headSha, reviewerOutcome: "not_attempted_decision_in_flight", reviewDecisionDigest: decisionDigest, decisionDisposition: "in_flight" };
   }
+  let proofReuseRead: Promise<ProofDiscriminationRecordRead> | undefined;
   try {
 
   let priorReviewSnapshot: ReturnType<typeof readLedgerLines> | undefined;
@@ -1621,8 +1622,8 @@ export async function runReview(host: ReviewCommandHost, args: {
   const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
   // W1-T11157 (shadow): CI's record for this head is read beside the host's proof run; nothing reads it before the
   // binding verdict below is built, and the comparison only ledgers agreement.
-  const proofReuseRead = args.headCheckoutDir !== undefined && discriminationProofs(criteria).length > 0
-    ? readProofDiscriminationRecord({ owner, repo, headSha }).catch((error: unknown): ProofDiscriminationRecordRead =>
+  proofReuseRead = args.headCheckoutDir !== undefined && discriminationProofs(criteria).length > 0
+    ? (args.readProofRecord ?? readProofDiscriminationRecord)({ owner, repo, headSha }).catch((error: unknown): ProofDiscriminationRecordRead =>
       ({ kind: "ineligible", reason: `record unreadable: ${String((error as Error)?.message ?? error).slice(0, 300)}` }))
     : undefined;
   const hostedCiFilePassed = await reviewHostedCiFileEvidence({ owner, repo, headSha, criteria,
@@ -2116,7 +2117,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     // W1-T4414: an unreadable reservation holds the verdict — no terminal status, the same channel every caller honours.
     log("review.post_refused", withheldReviewRefusalRow({ headSha, prUrl, reason: verdict.taskIdOwnershipWithheld, ownership: verdict.taskIdOwnership, inputDigest }));
     // W1-T11151: a withheld verdict is terminal (its review.post_refused row is written), so it reports `posted`.
-    (args.onPhase ?? reportReviewPhase)("posted");
+    reportPhase("posted");
     say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${verdict.taskIdOwnershipWithheld}`);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
@@ -2188,7 +2189,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   phases.post = systemClock.now();
   // W1-T11151: `posted` releases admission once the outcome is terminal: posted, refused (review.post_refused) or a
   // replayed terminal. Only a publication that threw (review.post_failed) holds its slot until the review settles.
-  if (!poster.failed()) (args.onPhase ?? reportReviewPhase)("posted");
+  if (!poster.failed()) reportPhase("posted");
   decisionDigest = posted.effectiveReviewDecisionDigest ?? decisionDigest;
   if (posted.effectiveVerdict) verdict = { ...verdict, ...posted.effectiveVerdict, state: posted.effectiveState ?? posted.effectiveVerdict.state };
   if (dispute !== undefined && posted.effectiveState === "pending") {
@@ -2535,6 +2536,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   };
   } finally {
     decisionClaim.release();
+    await proofReuseRead;
   }
 }
 
@@ -3471,6 +3473,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       fetchStatus: checkedStatus === undefined ? undefined : () => checkedStatus.combined,
     });
     claimPosted = claim?.posted === true;
+    if (claimPosted) log(REVIEW_HEARTBEAT_STEP, { pr_number: view.number, head_sha: view.headRefOid, phase: "materialize" });
     if (claim !== undefined) claimHeld = pendingClaimHeldByAnotherRun(claim, runId, claimLedger, view.headRefOid);
   } catch (e) {
     log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });

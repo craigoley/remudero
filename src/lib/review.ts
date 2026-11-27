@@ -34,7 +34,7 @@ import { defaultGitRunnerAsync, loadPlanAtRef, MOVED_FROM_VALUE, withoutOneMoved
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
-import { readLedgerUnionRawLinesAsync, readLedgerUnionRecords, readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, rotationStampIso, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
+import { createLedgerRotationMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecords, readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, rotationStampIso, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { isFullReviewerCodeSha, probeReviewerCodeFreshnessAsync } from "./self-sync.js";
@@ -14404,13 +14404,35 @@ export const REVIEW_HEARTBEAT_SILENCE_FLOOR_MS = 5 * 60_000;
  *  pending ceiling. BACKSTOP against a bound sized from a handful of reviews. */
 export const REVIEW_HEARTBEAT_MIN_GAP_SAMPLE = 20;
 
+const reviewClaimHistorySteps = [REVIEW_HEARTBEAT_STEP, "review.posted", ...REVIEW_CLAIM_SETTLING_STEPS];
+const reviewClaimHistory = createLedgerRotationMemo(rows => rows.filter(row => reviewClaimHistorySteps.includes(String(row.step))));
+const reviewClaimSnapshots = new WeakMap<ReadonlyArray<Record<string, unknown>>, { path: string; rows: Record<string, unknown>[] }>();
+
+/** Use the live snapshot already read by the caller, plus recent rotations. Read at least the last 48 cuts
+ *  for gap samples and every cut within the claim TTL to cover bursts of rotation. */
+export function reviewClaimLedgerRows(
+  ledgerPath: string, liveRows: ReadonlyArray<Record<string, unknown>>,
+): ReadonlyArray<Record<string, unknown>> {
+  const cached = reviewClaimSnapshots.get(liveRows);
+  if (cached?.path === ledgerPath) return cached.rows;
+  const pass = reviewClaimHistory.pass({ parseMissing: true });
+  const read = readLedgerUnionRecordsSync(dirname(ledgerPath), {
+    step: reviewClaimHistorySteps, rotationWindowMs: REVIEW_LOCK_TTL_MS, minRotations: 48, dedupe: false,
+    pattern: /"step"\s*:\s*"(?:review\.(?:heartbeat|posted|stood_down|post_refused|replay_input|skipped_closed_lifecycle))"/,
+    rotationRecords: pass.rotationRecords,
+    readLiveRecords: () => liveRows,
+  });
+  pass.complete();
+  if (read.unread.length === 0) reviewClaimSnapshots.set(liveRows, { path: ledgerPath, rows: read.rows });
+  return read.rows;
+}
+
 /** W1-T14872: the heartbeat a review run writes — at its pending post, at every phase change and while its judge streams
  *  output, at most once per {@link REVIEW_HEARTBEAT_MIN_INTERVAL_MS} for an unchanged phase. `write` appends one ledger row;
  *  `nowMs` is the clock port's reading. */
 export function reviewHeartbeat(
   write: (row: Record<string, unknown>) => void, nowMs: () => number,
-  // The row names its run and head only: a pr_url would make it a priced step the config garden must read.
-  identity: { runId: string; headSha: string },
+  identity: { runId: string; headSha: string; prNumber?: number },
 ): (phase: string) => boolean {
   let lastPhase: string | undefined;
   let lastAt = Number.NEGATIVE_INFINITY;
@@ -14419,29 +14441,41 @@ export function reviewHeartbeat(
     if (phase === lastPhase && at - lastAt < REVIEW_HEARTBEAT_MIN_INTERVAL_MS) return false;
     lastPhase = phase;
     lastAt = at;
-    write({ step: REVIEW_HEARTBEAT_STEP, run_id: identity.runId, head_sha: identity.headSha, phase });
+    write({ step: REVIEW_HEARTBEAT_STEP, run_id: identity.runId, pr_number: identity.prNumber, head_sha: identity.headSha, phase });
     return true;
   };
 }
 
 /** W1-T14872: one pass over a ledger read: each run's newest heartbeat per head, and the measured silence bound. Cached per
  *  array, so a sweep that asks for every open PR's claim scans its ledger once. */
-interface ReviewHeartbeatIndex { newest: Map<string, number>; settled: Set<string>; boundMs: number | undefined }
+interface ReviewHeartbeatIndex {
+  newest: Map<string, number>;
+  settled: Set<string>;
+  vanished: Set<string>;
+  boundMs: number | undefined;
+}
 const heartbeatIndexes = new WeakMap<ReadonlyArray<Record<string, unknown>>, ReviewHeartbeatIndex>();
 
 function reviewHeartbeatIndex(lines: ReadonlyArray<Record<string, unknown>>): ReviewHeartbeatIndex {
   const cached = heartbeatIndexes.get(lines);
   if (cached !== undefined) return cached;
   const beats = new Map<string, number[]>();
+  const seenBeats = new Set<string>();
   const settled = new Set<string>();
+  const vanished = new Set<string>();
   for (const line of lines) {
-    if (line.step !== REVIEW_HEARTBEAT_STEP && line.step !== "review.posted" && !REVIEW_CLAIM_SETTLING_STEPS.has(String(line.step))) continue;
-    const key = `${String(line.run_id)}|${String(line.head_sha)}`;
+    if (!reviewClaimHistorySteps.includes(String(line.step)) || typeof line.run_id !== "string" || typeof line.head_sha !== "string") continue;
+    const key = `${line.run_id}|${line.head_sha}`;
     if (line.step === REVIEW_HEARTBEAT_STEP) {
       const at = Date.parse(String(line.ts ?? ""));
-      if (Number.isFinite(at)) (beats.get(key) ?? beats.set(key, []).get(key)!).push(at);
+      // A rotation can carry a copy of a beat also present in another archive or the live file.
+      const beatKey = `${key}|${at}|${String(line.phase)}`;
+      if (!Number.isFinite(at) || seenBeats.has(beatKey)) continue;
+      seenBeats.add(beatKey);
+      (beats.get(key) ?? beats.set(key, []).get(key)!).push(at);
     } else if (line.step !== "review.posted" || postedReviewStatusRecord(line) !== undefined) {
       settled.add(key);
+      if (line.reason === REVIEWER_CHECKOUT_VANISHED_REASON) vanished.add(key);
     }
   }
   const newest = new Map<string, number>();
@@ -14458,7 +14492,7 @@ function reviewHeartbeatIndex(lines: ReadonlyArray<Record<string, unknown>>): Re
     const p99 = gaps[Math.min(gaps.length - 1, Math.ceil(gaps.length * 0.99) - 1)]!;
     boundMs = Math.max(REVIEW_HEARTBEAT_SILENCE_FLOOR_MS, p99 * 2);
   }
-  const index = { newest, settled, boundMs };
+  const index = { newest, settled, vanished, boundMs };
   heartbeatIndexes.set(lines, index);
   return index;
 }
@@ -14471,8 +14505,8 @@ export function reviewHeartbeatSilenceBoundMs(lines: ReadonlyArray<Record<string
 }
 
 /** W1-T14872: is the claim of `runId` at `headSha` held by a reviewer whose heartbeat is fresh, or orphaned by one gone
- *  silent past the measured bound? Undefined when the run wrote no heartbeat or no bound is measurable: the caller keeps
- *  its pending-ceiling path (invariant live-claim-waits: only a measured silence releases a claim early). */
+ *  silent past the measured bound? Without enough samples, the floor can establish freshness. Early release requires a
+ *  measured bound. */
 export function reviewClaimHeartbeat(
   lines: ReadonlyArray<Record<string, unknown>>, runId: string | undefined, headSha: string, nowMs: number,
 ): { state: "fresh" | "silent"; silentMs: number; boundMs: number } | undefined {
@@ -14482,14 +14516,22 @@ export function reviewClaimHeartbeat(
   // A run that already settled its claim at this head holds nothing, so its silence orphans nothing.
   if (index.settled.has(key)) return undefined;
   const newest = index.newest.get(key);
-  if (newest === undefined || index.boundMs === undefined) return undefined;
+  if (newest === undefined) return undefined;
   const silentMs = nowMs - newest;
-  return { state: silentMs >= index.boundMs ? "silent" : "fresh", silentMs, boundMs: index.boundMs };
+  const boundMs = index.boundMs ?? REVIEW_HEARTBEAT_SILENCE_FLOOR_MS;
+  if (index.boundMs === undefined && silentMs >= boundMs) return undefined;
+  return { state: silentMs >= boundMs ? "silent" : "fresh", silentMs, boundMs };
 }
 
 /** W1-T14872: the row a review writes when its reviewer checkout disappears mid-judge. `review.stood_down` settles the run's
  *  claim (it is in {@link REVIEW_CLAIM_SETTLING_STEPS}), so the next sweep may re-run the head at once. */
 export const REVIEWER_CHECKOUT_VANISHED_REASON = "reviewer-checkout-vanished";
+
+export function reviewClaimCheckoutVanished(
+  lines: ReadonlyArray<Record<string, unknown>>, runId: string, headSha: string,
+): boolean {
+  return reviewHeartbeatIndex(lines).vanished.has(`${runId}|${headSha}`);
+}
 
 /** W1-T14872: watches the reviewer's checkout while the judge runs and calls `onVanished` once, the first time `exists`
  *  reports it gone. Polled every `everyMs`; the timer never holds the process open. Returns the stop function. */
@@ -14581,6 +14623,8 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     }
   }
   const lines = readLiveLedgerRecords(opts.ledgerPath);
+  let claimHistory: ReadonlyArray<Record<string, unknown>> | undefined;
+  const claimRows = () => claimHistory ??= reviewClaimLedgerRows(opts.ledgerPath, lines);
   const hasInputIdentity = opts.prUrl !== undefined && opts.reviewInputDigest !== undefined;
   const priorTerminal = hasInputIdentity
     ? lastPostedReviewStatusForInput(lines, opts.taskId, opts.prUrl!, opts.sha, opts.reviewInputDigest!)
@@ -14621,6 +14665,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
   // claim holds unless its owner is proven dead; an unreadable age always holds.
   let takenOverFrom: PendingReviewStatusRecord | undefined;
   let ownerProvenDead = false;
+  let checkoutVanished = false;
   // W1-T14872: a claim whose reviewer heartbeat went silent past the measured bound is orphaned, however young.
   let heartbeatSilent: { silentMs: number; boundMs: number } | undefined;
   let liveStatus: { state?: string; description?: string } = {};
@@ -14635,10 +14680,11 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     ownerProvenDead = ageMs !== undefined && ageMs < REVIEW_LOCK_TTL_MS && assessOwner(priorPending) === "dead";
     // W1-T14872 (invariant live-claim-waits): where the claim's run wrote a heartbeat and a bound is measurable, the heartbeat
     // decides — a fresh one holds past the TTL, a silent one releases before it. Otherwise the TTL path is unchanged.
-    const beat = reviewClaimHeartbeat(lines, priorPending.runId, opts.sha, (opts.clock ?? systemClock).now());
-    const holds = beat === undefined
+    const beat = reviewClaimHeartbeat(claimRows(), priorPending.runId, opts.sha, (opts.clock ?? systemClock).now());
+    checkoutVanished = reviewClaimCheckoutVanished(claimRows(), priorPending.runId, opts.sha);
+    const holds = !checkoutVanished && (beat === undefined
       ? ageMs === undefined || (ageMs < REVIEW_LOCK_TTL_MS && !ownerProvenDead)
-      : beat.state === "fresh" && !ownerProvenDead;
+      : beat.state === "fresh");
     if (beat?.state === "silent") heartbeatSilent = beat;
     if (holds) {
       return {
@@ -14678,11 +14724,12 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
         const foreignPending = foreignLine && pendingReviewStatusRecord(foreignLine);
         ownerProvenDead = Number.isFinite(ageMs) && ageMs < REVIEW_LOCK_TTL_MS &&
           foreignPending !== undefined && assessOwner(foreignPending) === "dead";
-        const foreignBeat = reviewClaimHeartbeat(lines, foreignRun, opts.sha, (opts.clock ?? systemClock).now());
-        const foreignHolds = foreignBeat === undefined
+        const foreignBeat = reviewClaimHeartbeat(claimRows(), foreignRun, opts.sha, (opts.clock ?? systemClock).now());
+        checkoutVanished = reviewClaimCheckoutVanished(claimRows(), foreignRun, opts.sha);
+        const foreignHolds = !checkoutVanished && (foreignBeat === undefined
           ? !Number.isFinite(ageMs) || (ageMs < REVIEW_LOCK_TTL_MS && !ownerProvenDead)
-          : foreignBeat.state === "fresh" && !ownerProvenDead;
-        if (foreignBeat?.state === "silent") heartbeatSilent = foreignBeat;
+          : foreignBeat.state === "fresh");
+        heartbeatSilent = foreignBeat?.state === "silent" ? foreignBeat : undefined;
         if (foreignHolds) {
           return {
             posted: false,
@@ -14708,7 +14755,9 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     }
   }
   const description = (
-    takenOverFrom && ownerProvenDead
+    takenOverFrom && checkoutVanished
+      ? `pending (owned by run ${opts.runId}) — took over run ${takenOverFrom.runId}: reviewer checkout vanished`
+      : takenOverFrom && ownerProvenDead
       ? `pending (owned by run ${opts.runId}) — took over run ${takenOverFrom.runId}: owner proven dead`
       : takenOverFrom && heartbeatSilent
       ? `pending (owned by run ${opts.runId}) — took over run ${takenOverFrom.runId}: its heartbeat was silent ` +
