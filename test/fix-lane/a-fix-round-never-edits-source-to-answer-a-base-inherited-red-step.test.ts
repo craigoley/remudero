@@ -170,6 +170,8 @@ test("W1-T15064 criterion 1: an all-inherited red step dispatches no source edit
   assert.match(dropped.log, /dropped below the recorded fixture population/);
   assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: dropped.log }]).inherited, false);
   assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: stamped(dropped.log) }]).inherited, false);
+  // The drop reads the same from the report alone, as an annotation-backed log read carries it.
+  assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: dropped.log.split("\n::error")[0]! }]).inherited, false);
   const dropOnly = censusLog([], { "test/c.test.ts": 4 });
   assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: dropOnly.log }]).inherited, false);
   assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: `${inheritedLog}\nnot ok 3 - inbox` }]).inherited, false);
