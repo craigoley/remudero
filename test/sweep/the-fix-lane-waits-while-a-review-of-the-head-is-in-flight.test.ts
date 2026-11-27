@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import * as sweep from "#src/lib/sweep.js";
-import type { FixDispatchEvidence, OpenPrView, RollupCheckEntry } from "#src/lib/sweep.js";
+import type { FixDispatchEnvelope, FixDispatchEvidence, OpenPrView, RollupCheckEntry } from "#src/lib/sweep.js";
 import type { Config } from "#src/lib/config.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -78,7 +78,7 @@ function dispatcher(t: TestContext, ledger: Row[] | "unreadable", view: Partial<
     const settle = live === false ? undefined : liveReview(pr, typeof live === "string" ? live : HEAD);
     try { return await effects.dispatchFix!(pr, EVIDENCE); } finally { settle?.(); }
   };
-  return { rows, seen, dispatch };
+  return { rows, seen, dispatch, effects, ledgerPath, pr };
 }
 
 const claim = (run: string, head = HEAD, extra: Record<string, unknown> = {}): Row =>
@@ -269,6 +269,77 @@ test("W1-T15005 criterion 3: an untasked PR's held pass, written under PR-<n> wi
   const waiting = dispatcher(t, [untaskedClaim], { taskId: undefined });
   await waiting.dispatch();
   assert.equal(deferrals(waiting.rows).length, 1, "positive control: the untasked claim with its review running waits");
+});
+
+/** One real sweep pass over `d`'s PR with the run-child host on, as `sweep.runChild.mode: auto` resolves it in production.
+ *  The host's fix child runs the real {@link sweep.runFixDispatchChild} on the envelope the sweep built, in a process of its
+ *  own: before it starts, the review that is live in the sweep's process is not live in the child's (`settle`). */
+async function hostedPass(t: TestContext, d: ReturnType<typeof dispatcher>, settle: (() => void) | undefined) {
+  const sweepRows: Row[] = [];
+  const envelopes: FixDispatchEnvelope[] = [];
+  sweep.installDetachedWorkHost({
+    hosts: new Set(["review", "fix-dispatch"]), mode: () => "on", spawnReview: async () => undefined,
+    spawnFix: async (input) => {
+      envelopes.push(input.envelope);
+      settle?.();
+      const settled = sweep.runFixDispatchChild({ envelope: input.envelope }, {
+        readLivePr: async () => ({ state: "OPEN", headSha: HEAD }),
+        readTask: () => ({ found: true, merged: false, retired: false }),
+        hold: () => undefined, claimFixAdmission: () => ({ admitted: true }),
+        dispatcher: () => ({ dispatchFix: d.effects.dispatchFix! }),
+        log: (step, extra) => { d.rows.push({ step, child: true, ...extra }); },
+      }).catch(() => undefined);
+      return { runId: `work-fix-dispatch-${TASK}-${envelopes.length}`, settled };
+    },
+  });
+  t.after(() => { sweep.installDetachedWorkHost(undefined); sweep.resetChildWork(); });
+  const deps = {
+    ledgerPath: d.ledgerPath, runId: "SWEEP-T15005-hosted", detachFixWait: true,
+    readLedger: () => sweepRows, appendLine: (_p: string, row: Row) => { sweepRows.push(row); },
+    log: (step: string, extra?: Record<string, unknown>) => { sweepRows.push({ step, ...extra }); },
+    arm: () => {}, close: () => assert.fail("a red PR is not closed"), escalate: () => {},
+    dispatchFix: d.effects.dispatchFix!, claimFixAdmission: () => ({ admitted: true }), readActiveWorkerCount: () => 0,
+    readFixPressure: () => ({ availableMib: 8192, floorMib: 1024 }),
+  } as unknown as sweep.SweepDeps;
+  await withLiveWritesAllowed(async () => { await sweep.runSweep([d.pr], deps); await sweep.drainDetachedSweepActions(); });
+  return { sweepRows, envelopes };
+}
+
+test("W1-T15005 criterion 1: a round the sweep starts as a run child waits in the sweep, before any child is spawned", async (t) => {
+  // OBSERVED 2026-11-27 (review of 68cde97a3): with runChild.mode auto the round ran in a fix child, whose review mutex is
+  // empty, so a real runFixDispatchChild wrote 0 deferrals and took the branch claim while the review was live.
+  const d = dispatcher(t, [claim("review-PR15005-1")], {}, false);
+  const settle = liveReview(d.pr);
+  let settledOnce = false;
+  const hosted = await hostedPass(t, d, () => { if (!settledOnce) { settledOnce = true; settle(); } });
+  if (!settledOnce) settle();
+  assert.deepEqual(hosted.envelopes, [], "THE CLAIM: no fix child is spawned while the review of the head is live");
+  assert.deepEqual(deferrals(hosted.sweepRows).map((row) => [row.pr_number, row.head, row.review_run]), [[15005, HEAD, "review-PR15005-1"]],
+    "THE CLAIM: the sweep writes the one deferral row, naming the review run");
+  assert.equal(d.seen.claimKeys, 0, "no branch claim is taken");
+
+  // Positive control: once the review is no longer running, the same pass spawns the child, which dispatches on the
+  // sweep's decision (carried in its envelope) and takes its branch claim, as today.
+  const free = dispatcher(t, [claim("review-PR15005-1")], {}, false);
+  const freed = await hostedPass(t, free, undefined);
+  assert.equal(freed.envelopes.length, 1, "positive control: the round is started as a run child");
+  assert.deepEqual(freed.envelopes[0]!.evidence.reviewInFlight, { headSha: HEAD }, "the child carries the sweep's decision");
+  assert.equal(free.seen.claimKeys, 1, "the child takes its branch claim");
+  assert.equal(deferrals([...freed.sweepRows, ...free.rows]).length, 0);
+});
+
+test("W1-T15005 finding 2: a carried decision for the head is used as made, and one for another head is made again", async (t) => {
+  const d = dispatcher(t, [claim("review-PR15005-1")], {}, false);
+  const pr = d.pr;
+  // A carried "in flight" is honoured without a liveness read: the process that made it held the mutex.
+  const held = await sweep.decideReviewInFlight(pr, { ...EVIDENCE, reviewInFlight: { headSha: HEAD, reviewRun: "review-PR15005-1" } }, d.ledgerPath);
+  assert.equal(held.reviewInFlight.reviewRun, "review-PR15005-1");
+  const deferred = await d.effects.dispatchFix!(pr, held);
+  assert.equal(deferred, false, "the dispatch defers on the carried decision");
+  assert.equal(deferrals(d.rows).length, 1);
+  // A decision for another head (a moved head) is made again, here: no review is live, so it reads none.
+  const moved = await sweep.decideReviewInFlight(pr, { ...EVIDENCE, reviewInFlight: { headSha: OTHER, reviewRun: "review-PR15005-1" } }, d.ledgerPath);
+  assert.deepEqual(moved.reviewInFlight, { headSha: HEAD });
 });
 
 test("W1-T15005 criterion 1: an owned conflicted head whose round waits on a review records no worker round", async (t) => {
