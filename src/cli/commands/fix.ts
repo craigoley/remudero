@@ -5462,7 +5462,10 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
               releaseRoundClaim();
               return;
             }
-          } catch {
+          } catch (error) {
+            deps.log("fix.evidence_head_unread", { round_id: roundId, head_sha: priorHeadSha,
+              worktree_head_sha: roundStartHeadSha,
+              reason: `worker-owned worktree HEAD read failed before outcome attribution: ${String(error).slice(0, 500)}` });
             releaseRoundClaim();
             return;
           }
