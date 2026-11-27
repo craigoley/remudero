@@ -9,6 +9,7 @@ import { spawnSync } from "node:child_process";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { citingFiles } from "#src/lib/plan-task-migration.js";
 import { moveWorld, record, shard, type MoveWorld } from "#test/helpers/plan-move-world.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -42,8 +43,8 @@ function taskIdExistence(w: MoveWorld, commit: string): { status: number | null;
 }
 
 test("W1-T15047 criterion 1: a prose-cited record moves with its history citers", async t => {
-  // The 2026-11-26 shape: W1-T4210 has no reservation and is cited by a retired record (W1-T5197) and, transitively,
-  // through an unreserved citer that a merged record cites in turn.
+  // The 2026-11-26 shape: an unreserved record is cited by a retired record and, transitively, by a merged record.
+  // GitHub's recent merged list also credits that merged citer, which is history evidence rather than current ownership.
   const w = moveWorld(t, {
     "W1-T1": record("W1-T1"), "W1-T2": RETIRED_CITING("W1-T2", "W1-T1"), "W1-T3": MERGED_CITING("W1-T3", "W1-T2"),
   });
@@ -51,7 +52,13 @@ test("W1-T15047 criterion 1: a prose-cited record moves with its history citers"
   unreserve(w, "W1-T2");
   const before = taskIdExistence(w, w.main("public"));
   assert.equal(before.status, 0, `positive control: the real check passes the public tree before the move: ${before.out}`);
-  const copy = await w.run();
+  const copy = await w.run(true, { graphql: async query => {
+    const answer = w.answer(query) as { data: { public: { merged: { nodes: unknown[]; totalCount: number } } } };
+    answer.data.public.merged.nodes.push({ number: 700, state: "MERGED", headRefName: "operator-merge-700",
+      body: "chore(plan): complete history\n\nRemudero-Task: W1-T3", mergeCommit: { oid: "f".repeat(40) } });
+    answer.data.public.merged.totalCount++;
+    return answer;
+  } });
   assert.equal(copy.out.step, "copy", copy.lines.join("\n"));
   assert.equal(changeOf(w), added("W1-T1", "W1-T2", "W1-T3"), "THE CLAIM: the cited record is copied with every citer, transitively");
   w.merge(lastPull(w));
@@ -83,4 +90,15 @@ test("W1-T15047 criterion 2: a group with an unmovable citer stays public", asyn
   assert.equal(changeOf(s), added("W1-T7"), "THE CLAIM: a code citation keeps the whole group on core");
   const kept = taskIdExistence(s, s.main("public"));
   assert.equal(kept.status, 0, `the real check passes while the group stays: ${kept.out}`);
+});
+
+test("W1-T15047 citation scan: one token scan resolves many exact task ids", async t => {
+  const w = moveWorld(t, {});
+  const ids = Array.from({ length: 200 }, (_, i) => `W1-T${1000 + i}`);
+  const source = `${ids.join(" ")} W1-T1000suffix prefixW1-T1001 W1-T9999\n`;
+  w.commitTo("public", { "src/many-prose-citations.ts": source }, "docs: cite many task ids in prose");
+
+  const found = await citingFiles(w.pub.clone.dir, w.main("public"), ids);
+  assert.equal(found.size, ids.length, "every requested id is found without confusing prefix lookalikes");
+  for (const id of ids) assert.deepEqual(found.get(id), ["src/many-prose-citations.ts"], id);
 });

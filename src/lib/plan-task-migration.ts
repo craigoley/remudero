@@ -398,7 +398,7 @@ export async function readState(o: Options, primaryRefs: Map<string, string>, pr
 /** W1-T14447: a task a move step carries: its id, its record path (the same path on both sides), and every path
  *  taskOwned reads as its own: its record path alone (the operator's 2026-11-26 ruling: a pull request that only
  *  edits a record's `files:` does not own it; one naming its task or editing its record does). */
-export interface CarriedTask { id: string; path: string; files: readonly string[] }
+export interface CarriedTask { id: string; path: string; files: readonly string[]; history?: boolean }
 const NO_REFS: Map<string, string> = new Map();
 /**
  * W1-T14447: the re-read refuses ownership_changed only for a change that touches a carried task: another repository,
@@ -412,7 +412,7 @@ const NO_REFS: Map<string, string> = new Map();
  */
 function stable(before: PreviewState, after: PreviewState, carried: readonly CarriedTask[]): void {
   if (before.repositoryId !== after.repositoryId || before.opsId !== after.opsId) return unknown("ownership_changed");
-  const ids = new Set(carried.map(task => task.id));
+  const ids = new Set(carried.filter(task => !task.history).map(task => task.id));
   if (carried.some(task => taskOwned(task.id, task.files, NO_REFS, after.open)) || after.recent.some(pr => credited(pr).some(id => ids.has(id)))) return unknown("ownership_changed");
   const prior = new Map(before.recent.map(pr => [pr.number, JSON.stringify(pr)]));
   const named = (pr: Json) => carried.some(task => taskIdFromRunBranch(String(pr.headRefName)) === task.id || String(pr.body).split(/\r?\n/).includes(`Remudero-Task: ${task.id}`));
@@ -586,19 +586,34 @@ export async function citingFiles(root: string, commit: string, ids: readonly st
   const cited = new Map<string, string[]>();
   if (ids.length === 0) return cited;
   const git = defaultGitRunnerAsync(root);
-  const grep = ["grep", "-I", "-o", "-w", "-F", ...ids.flatMap(id => ["-e", id]), commit, "--", ...CITATION_ROOTS];
-  const found = await exitOf(git, ["grep", "-q", ...grep.slice(1).filter(arg => arg !== "-o")]);
-  if (found === 1) return cited;
-  if (found !== 0) return unknown("citation_unreadable");
+  // Scan once for task-id-shaped tokens, then retain only the unreserved ids. Supplying every id as a
+  // separate fixed-string pattern makes git grep compile and scan thousands of patterns on each selection.
+  const wanted = new Set(ids);
+  let matches: string;
+  try {
+    matches = await git(["grep", "-I", "-n", "-E", "-e", "(^|[^[:alnum:]_])W[0-9]+-T[0-9]+([^[:alnum:]_]|$)", commit, "--", ...CITATION_ROOTS]);
+  } catch (error) {
+    if ((error as { code?: unknown }).code === 1) return cited;
+    const refusal = new PreviewUnknown("citation_unreadable");
+    Object.defineProperty(refusal, "cause", { value: error, configurable: true });
+    throw refusal;
+  }
   const baseline = "scripts/task-id-existence-baseline.json";
   const exempt = await exitOf(git, ["cat-file", "-e", `${commit}:${baseline}`]) !== 0 ? new Set<unknown>() :
     new Set((JSON.parse(await git(["show", `${commit}:${baseline}`])) as Array<{ id?: unknown }>).map(row => row.id));
-  for (const line of (await git(grep)).split("\n")) {
-    if (!line.startsWith(`${commit}:`)) continue;
-    const at = line.lastIndexOf(":"), path = line.slice(commit.length + 1, at), id = line.slice(at + 1);
-    if (exempt.has(id) || path.split("/").some(part => CITATION_SKIPPED.has(part))) continue;
-    const paths = cited.get(id) ?? cited.set(id, []).get(id)!;
-    if (!paths.includes(path)) paths.push(path);
+  for (const line of matches.split("\n")) {
+    const prefix = `${commit}:`;
+    if (!line.startsWith(prefix)) continue;
+    const location = line.indexOf(":", prefix.length), content = line.indexOf(":", location + 1);
+    if (location < 0 || content < 0) return unknown("citation_unreadable");
+    const path = line.slice(prefix.length, location);
+    if (path.split("/").some(part => CITATION_SKIPPED.has(part))) continue;
+    for (const match of line.slice(content + 1).matchAll(/\b(W[0-9]+-T[0-9]+)\b/g)) {
+      const id = match[1]!;
+      if (!wanted.has(id) || exempt.has(id)) continue;
+      const paths = cited.get(id) ?? cited.set(id, []).get(id)!;
+      if (!paths.includes(path)) paths.push(path);
+    }
   }
   return cited;
 }
@@ -629,7 +644,7 @@ export async function selectPlanTaskMigration(
   const batch: Json[] = [];
   // W1-T14447: what each re-read protects: every member selected so far, and the candidate under lookup.
   const carried: CarriedTask[] = [];
-  const carriedOf = (task: Task, path: string): CarriedTask => ({ id: task.id, path, files: [path] });
+  const carriedOf = (task: Task, path: string): CarriedTask => ({ id: task.id, path, files: [path], history: isHistory(task) });
   let lookups = 0;
   // W1-T14825: a record public records still name moves WITH them. Its group is the record plus every public record
   // that names it through depends_on or superseded_by, transitively; a retired, merged or done namer moves as history.
