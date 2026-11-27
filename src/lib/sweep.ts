@@ -16360,7 +16360,7 @@ interface FixAdmissionLock { path: string; owner: FixAdmissionHolder }
 type PrFixAdmission =
   /** `adopted`: the lock is the dispatching sweep's, which frees it at the hosted child's settlement; `release` then frees
    *  only the charge. */
-  | { admitted: true; release?: () => void; releaseCharge?: () => void; lock?: FixAdmissionLock; adopted?: true }
+  | { admitted: true; release?: () => void; releaseCharge?: () => void; handOffCharge?: () => void; lock?: FixAdmissionLock; adopted?: true }
   | { admitted: false; reason: string };
 
 function readFixAdmissionHolder(path: string): FixAdmissionHolder | null {
@@ -16432,8 +16432,9 @@ function claimFixAdmissionForPr(
     grant = charge(pr);
     if (!grant.admitted) return grant;
     const releaseCapacity = grant.release;
-    if (adopted) return { admitted: true, releaseCharge: releaseCapacity, lock: { path, owner }, adopted: true, release: () => releaseCapacity?.() };
-    return { admitted: true, releaseCharge: releaseCapacity, lock: { path, owner }, release: () => {
+    const handOffCharge = grant.handOff;
+    if (adopted) return { admitted: true, releaseCharge: releaseCapacity, handOffCharge, lock: { path, owner }, adopted: true, release: () => releaseCapacity?.() };
+    return { admitted: true, releaseCharge: releaseCapacity, handOffCharge, lock: { path, owner }, release: () => {
       try { releaseCapacity?.(); }
       finally { release(); }
     } };
@@ -18294,7 +18295,9 @@ export interface SweepDeps {
    *  cannot all observe the same free slot. Omitted by every non-light caller, preserving the
    *  full sweep and CLI paths byte-for-byte. A refusal spends no strike and re-derives next pass. */
   claimFixAdmission?: (pr: OpenPrView) =>
-    | { admitted: true; release?: () => void }
+    /** W1-T15115: `handOff` gives the charge to the host at a hosted spawn: it is held until the child's own entry is
+     *  visible, and a `release` after it (no child launched) frees it. Absent: the hand-off is a `release`. */
+    | { admitted: true; release?: () => void; handOff?: () => void }
     | { admitted: false; reason: string };
   /** Shared by the sweep and its hosted children before either charges a fix admission. */
   fixAdmissionLockDir?: string;
@@ -22641,7 +22644,20 @@ export interface FixAdmissionWaiter { prNumber: number; sinceMs: number } // W1-
 export type FixAdmissionResidents = ({ readonly [K in FixAdmissionClass]: readonly number[] } & {
   readonly pendingFix?: number;
   readonly readFixMemoryCalm?: () => boolean;
+  /** W1-T15115: every live fix and review entry of this container, the readable and the unread. Absent (an injected
+   *  reading): no live child is charged, and each reservation is charged as before this field existed. */
+  readonly live?: readonly LiveHostedChild[];
 }) | undefined;
+
+/** W1-T15115: one owned, unreleased fix or review entry of this container, as the fix admission charges it. */
+export interface LiveHostedChild {
+  id: string;
+  workerClass: FixAdmissionClass;
+  /** Its tree's rss+swap (MiB); absent when its record cannot be read, and then it is charged its whole estimate. */
+  residentMib?: number;
+  /** Its fix admission lock reads `charge_released`: a round waiting on CI, charged nothing beyond its resident. */
+  chargeReleased: boolean;
+}
 
 /** W1-T9498: what one refresh charged against the headroom, as the capacity row and a refusal show it. */
 export interface FixAdmissionCharge {
@@ -22656,6 +22672,9 @@ export interface FixAdmissionCharge {
   admissionRung: FixAdmissionRung;
   /** W1-T13879: the live fix trees' summed resident, set only on the typical-beside-live rung. */
   liveFixResidentMib?: number;
+  /** W1-T15115: what the live hosted children have yet to grow into, which the fits rung subtracts; and how many live. */
+  liveChildChargeMib: number;
+  liveChildCount: number;
 }
 
 export type FixAdmissionRung = "fits" | "typical" | "typical-beside-live" | "nothing-live" | "none";
@@ -22673,6 +22692,66 @@ export function fixAdmissionChargeMib(count: number, estimateMib: number, reside
   let charge = 0;
   for (let i = 0; i < count; i++) charge += Math.max(0, estimateMib - (trees[i] ?? 0));
   return charge;
+}
+
+/**
+ * W1-T15115 — A LIVE HOSTED CHILD STAYS CHARGED ITS UNREALIZED ESTIMATE. The W1-T9498 rule, max(0, class estimate -
+ * resident), applied to every live fix and review tree of this container rather than only to this controller's pending
+ * reservations: a child the host spawned is charged its growth to the estimate until it settles. An unread tree is
+ * charged whole; a round waiting on CI (`chargeReleased`) nothing. `reviewsReserved` reviews still spawning are charged
+ * by their own term, which takes the smallest readable review residents first ({@link fixAdmissionChargeMib}), so those
+ * trees are not charged again here. Pure.
+ */
+export function liveHostedChildChargeMib(
+  live: readonly LiveHostedChild[],
+  estimates: { readonly [K in FixAdmissionClass]: number },
+  reviewsReserved = 0,
+): number {
+  const paired = new Set(live.filter((child) => child.workerClass === "review" && child.residentMib !== undefined)
+    .sort((a, b) => a.residentMib! - b.residentMib!).slice(0, Math.max(0, reviewsReserved)));
+  let charge = 0;
+  for (const child of live) {
+    if (paired.has(child) || child.chargeReleased) continue;
+    charge += Math.max(0, estimates[child.workerClass] - (child.residentMib ?? 0));
+  }
+  return charge;
+}
+
+/** W1-T15115: the pids of this host's fix admission holders whose charge went back at their CI wait
+ *  ({@link markFixAdmissionChargeReleased}). A hosted child adopts the lock under its own pid, the root the host bound
+ *  to its memory entry. An unreadable directory or lock releases nothing, so every live fix stays charged. */
+export function chargeReleasedFixPids(dir: string, host: string = hostname()): ReadonlySet<number> {
+  const pids = new Set<number>();
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch (error) {
+    void error; // No readable lock directory: no round reads as waiting on CI, so every live fix is charged.
+    return pids;
+  }
+  for (const name of names) {
+    if (!name.endsWith(".lock")) continue;
+    let holder: FixAdmissionHolder | null;
+    try {
+      holder = readFixAdmissionHolder(join(dir, name));
+    } catch (error) {
+      void error; // An unreadable lock releases nothing: its round stays charged.
+      continue;
+    }
+    if (holder?.charge_released === true && holder.host === host) pids.add(holder.pid);
+  }
+  return pids;
+}
+
+/** W1-T15115: the pids an entry's record names (its roots and tree); none when it cannot be read. */
+function recordedEntryPids(readFile: (path: string) => string, path: string): number[] {
+  try {
+    const parsed = JSON.parse(readFile(path)) as { roots?: Array<{ pid?: unknown }>; tree?: Array<{ pid?: unknown }> };
+    return [...(parsed.roots ?? []), ...(parsed.tree ?? [])].map((p) => p.pid).filter((pid): pid is number => typeof pid === "number");
+  } catch (error) {
+    void error; // An unreadable record joins no lock: the entry stays charged.
+    return [];
+  }
 }
 
 /**
@@ -22702,6 +22781,10 @@ export function productionFixMemoryCalm(
  * survival above 1 - typicalQuantile, or unmeasured): such a tree's resident says nothing yet about its peak. The
  * reading also carries the host memory calm reader. Both ride as non-enumerable fields, so the trees' own view (a
  * deep-equal or JSON of fix and review) is unchanged.
+ *
+ * W1-T15115: `live` (non-enumerable too) lists every live entry, the unread ones with no resident, each fix marked
+ * `chargeReleased` when a fix admission lock under `<root>/state/fix-admission` reads charge_released for a pid its
+ * record names. The locks are read only when a live fix entry is.
  */
 export function productionFixAdmissionResidents(
   root: string,
@@ -22710,6 +22793,7 @@ export function productionFixAdmissionResidents(
   readTypical: (workerClass: "fix") => LearnedEstimate = (workerClass) => classTypical(workerClass),
   readSurvival: (workerClass: "fix", ageMs: number) => Survival = (workerClass, ageMs) => classSurvival(workerClass, ageMs),
   readFixMemoryCalm: () => boolean = () => productionFixMemoryCalm(),
+  readChargeReleasedPids: () => ReadonlySet<number> = () => chargeReleasedFixPids(join(root, "state", "fix-admission")),
 ): FixAdmissionResidents {
   const reading = readLedger(root);
   if (reading === undefined || reading.state === "unreadable") return undefined;
@@ -22734,7 +22818,20 @@ export function productionFixAdmissionResidents(
     const survival = readSurvival("fix", entry.ageMs);
     if ("unmeasured" in survival || survival.factor > 1 - ESTIMATE_LEARNING.typicalQuantile) pendingFix++;
   });
-  Object.defineProperties(out, { pendingFix: { value: pendingFix }, readFixMemoryCalm: { value: readFixMemoryCalm } });
+  let released: ReadonlySet<number> | undefined;
+  const children = live.map((entry, i): LiveHostedChild => {
+    const resident = residents[i]!;
+    const workerClass = entry.workerClass as FixAdmissionClass;
+    let chargeReleased = false;
+    if (workerClass === "fix") {
+      const pids = released ??= readChargeReleasedPids();
+      chargeReleased = pids.size > 0 && recordedEntryPids(readFile, entry.path).some((pid) => pids.has(pid));
+    }
+    return { id: entry.id, workerClass, ...("unread" in resident ? {} : { residentMib: resident.mib }), chargeReleased };
+  });
+  Object.defineProperties(out, {
+    pendingFix: { value: pendingFix }, readFixMemoryCalm: { value: readFixMemoryCalm }, live: { value: children },
+  });
   return out;
 }
 
@@ -22837,6 +22934,31 @@ export function createSweepFixAdmissionController(input: {
   };
   let residents: FixAdmissionResidents;
   let residentsRead = false;
+  // W1-T15115: the residency read on every readable refresh, for the live children's charge; `residents` stays the view
+  // the reservation terms and rungs read, exposed exactly when origin/main read it.
+  let reading: FixAdmissionResidents;
+  // W1-T15115: each reservation and the live fix entries already there at its claim. Its child is the first entry seen
+  // since (pair by count, in claim order); once matched, the entry carries its charge through the live term.
+  type HeldReservation = { baseline?: ReadonlySet<string>; matched?: string; handed: boolean };
+  const held: HeldReservation[] = [];
+  let liveFixChargeMib = 0;
+  const liveFixIds = (): ReadonlySet<string> | undefined => reading?.live === undefined ? undefined
+    : new Set(reading.live.filter((child) => child.workerClass === "fix").map((child) => child.id));
+  // A handed-off reservation ends once its child's entry is visible; a held one is charged through that entry meanwhile.
+  const matchLiveEntries = (): void => {
+    const ids = liveFixIds();
+    if (ids === undefined) return;
+    const taken = new Set(held.flatMap((r) => r.matched === undefined ? [] : [r.matched]));
+    for (const r of held) {
+      if (r.matched !== undefined || r.baseline === undefined) continue;
+      const id = [...ids].find((candidate) => !r.baseline!.has(candidate) && !taken.has(candidate));
+      if (id === undefined) continue;
+      r.matched = id;
+      taken.add(id);
+    }
+    for (let i = held.length - 1; i >= 0; i--) if (held[i]!.handed && held[i]!.matched !== undefined) held.splice(i, 1);
+    reservations = held.length;
+  };
   // W1-T13879: absent, false or a throw is not calm, so a reading without the calm reader reads as before this rung.
   const fixMemoryCalm = (live: NonNullable<FixAdmissionResidents>): boolean => {
     try {
@@ -22848,7 +22970,7 @@ export function createSweepFixAdmissionController(input: {
   };
   const liveTrees = (): FixAdmissionResidents => {
     if (!residentsRead) {
-      residents = readResidents();
+      residents = reading; // Read on this refresh: compute reaches a rung only on a readable pressure reading.
       residentsRead = true;
     }
     return residents;
@@ -22867,19 +22989,29 @@ export function createSweepFixAdmissionController(input: {
     }
     const fix = estimate("fix");
     const review = estimate("review");
+    const liveChildren = reading?.live;
+    const estimates = { fix: fix.estimateMib, review: review.estimateMib };
+    liveFixChargeMib = liveChildren === undefined ? 0
+      : liveHostedChildChargeMib(liveChildren.filter((child) => child.workerClass === "fix"), estimates);
     charge = {
       headroomMib: Math.max(0, pressure.availableMib - pressure.floorMib),
       reviewChargeMib: fixAdmissionChargeMib(charged(), review.estimateMib, residents?.review),
-      fixChargeMib: fixAdmissionChargeMib(reservations, fix.estimateMib, residents?.fix),
+      // W1-T15115: with the live entries read, a reservation whose child is visible is charged through that entry.
+      fixChargeMib: liveChildren === undefined ? fixAdmissionChargeMib(reservations, fix.estimateMib, residents?.fix)
+        : fix.estimateMib * held.filter((r) => r.matched === undefined).length,
       fixEstimateMib: fix.estimateMib,
       fixEstimateSource: fix.samples > 0 ? "measured" : "default-unmeasured",
       ...(fix.basis ? { fixEstimateBasis: fix.basis } : {}),
       reviewEstimateMib: review.estimateMib,
       fixTypicalMib: Math.min(fix.estimateMib, input.readTypical?.("fix").estimateMib ?? fix.estimateMib),
       admissionRung: "none",
+      liveChildChargeMib: liveChildren === undefined ? 0
+        : liveHostedChildChargeMib(liveChildren, estimates, residents === undefined ? 0 : charged()),
+      liveChildCount: liveChildren?.length ?? 0,
     };
+    // The rungs below read origin/main's arithmetic; only the fits rung subtracts the live children's charge.
     const left = charge.headroomMib - charge.reviewChargeMib - charge.fixChargeMib;
-    available = Math.floor(Math.max(0, left) / Math.max(1, fix.estimateMib));
+    available = Math.floor(Math.max(0, left - charge.liveChildChargeMib) / Math.max(1, fix.estimateMib));
     if (available > 0) {
       charge.admissionRung = "fits";
       return;
@@ -22910,8 +23042,8 @@ export function createSweepFixAdmissionController(input: {
   };
   const reviewsFit = (count: number): boolean => !pressure
     ? Math.max(0, input.hostWorkerBudget - activeWorkers) - reservations - count >= 0
-    : charge !== undefined &&
-      charge.headroomMib - charge.fixChargeMib - fixAdmissionChargeMib(count, charge.reviewEstimateMib, residents?.review) >= 0;
+    : charge !== undefined && charge.headroomMib - charge.fixChargeMib - liveFixChargeMib -
+      fixAdmissionChargeMib(count, charge.reviewEstimateMib, residents?.review) >= 0;
   const overtake = (since: number): void => { // W1-T9582: a later-queued review the admitted repair left no room for.
     const later = kept().filter((review) => review.sinceMs > since);
     let fit = kept().length - later.length;
@@ -22924,8 +23056,11 @@ export function createSweepFixAdmissionController(input: {
     activeWorkers = Math.max(0, Math.trunc(input.readActiveWorkers?.() ?? input.activeWorkers));
     reviewReservations = Math.max(0, Math.trunc(input.readReviewReservations?.() ?? input.reviewReservations));
     pressure = input.readPressure?.();
-    residentsRead = pressure !== undefined && pressure.reason === undefined && reviewReservations + reservations > 0;
-    residents = residentsRead ? readResidents() : undefined;
+    const readable = pressure !== undefined && pressure.reason === undefined;
+    reading = readable ? readResidents() : undefined;
+    matchLiveEntries();
+    residentsRead = readable && reviewReservations + reservations > 0;
+    residents = residentsRead ? reading : undefined;
     compute();
   };
   refresh();
@@ -22976,6 +23111,7 @@ export function createSweepFixAdmissionController(input: {
       fix_typical_mib: state.charge?.fixTypicalMib,
       admission_rung: state.charge?.admissionRung,
       ...(state.charge?.admissionRung === "typical-beside-live" ? { live_fix_resident_mib: state.charge.liveFixResidentMib } : {}),
+      ...(state.charge ? { live_child_charge_mib: state.charge.liveChildChargeMib, live_child_count: state.charge.liveChildCount } : {}),
       ...order,
     });
   };
@@ -23000,7 +23136,8 @@ export function createSweepFixAdmissionController(input: {
       if (available <= 0) {
         fixesRefused++;
         if (charge) noteRepairMemoryRefusal({ prNumber: pr.prNumber, waitingSinceMs: since ?? systemClock.now(), refusedAtMs: systemClock.now(),
-          shortMib: Math.max(0, charge.fixEstimateMib - (charge.headroomMib - charge.reviewChargeMib - charge.fixChargeMib)) }); // W1-T9706
+          shortMib: Math.max(0, charge.fixEstimateMib -
+            (charge.headroomMib - charge.reviewChargeMib - charge.fixChargeMib - charge.liveChildChargeMib)) }); // W1-T9706
         emit(order());
         const arithmetic = refusalArithmetic();
         ahead = undefined;
@@ -23012,18 +23149,36 @@ export function createSweepFixAdmissionController(input: {
             " — repair remains queued and will be re-derived next pass",
         };
       }
-      reservations++;
+      const mine: HeldReservation = { baseline: liveFixIds(), handed: false };
+      held.push(mine);
+      reservations = held.length;
       fixesAdmitted++;
       clearRepairMemoryDemand(pr.prNumber); // W1-T9706: an admission ends this repair's wait for memory.
       compute();
       if (since !== undefined) overtake(since);
       emit(order());
       ahead = undefined;
-      let released = false;
+      let state: "held" | "handed" | "gone" = "held";
+      const drop = (): void => {
+        const at = held.indexOf(mine);
+        if (at >= 0) held.splice(at, 1);
+        reservations = held.length;
+      };
       return { admitted: true, release: standIn ? undefined : () => {
-        if (released) return;
-        released = true;
-        reservations--;
+        if (state === "gone") return;
+        state = "gone";
+        drop();
+        refresh();
+        emit();
+      }, handOff: standIn ? undefined : () => {
+        // W1-T15115: the host spawns the child after this; its entry takes the charge over once visible. With no live
+        // entries to watch for, the hand-off is origin/main's release.
+        if (state !== "held") return;
+        state = "handed";
+        if (mine.baseline === undefined) {
+          state = "gone";
+          drop();
+        } else mine.handed = true;
         refresh();
         emit();
       } };
@@ -24803,7 +24958,7 @@ async function runSweepPinned(
   }
   const fixCapacityReleases = new Map<string, () => void>();
   // W1-T13991: the per-PR admission lock each held charge carries, handed to a hosted child in place.
-  const fixAdmissionLocks = new Map<string, { lock: FixAdmissionLock; releaseCharge?: () => void }>();
+  const fixAdmissionLocks = new Map<string, { lock: FixAdmissionLock; releaseCharge?: () => void; handOffCharge?: () => void }>();
   const fixCapacityKey = (pr: OpenPrView) => `${pr.prNumber}@${pr.headSha}`;
   const capacityClaim = deps.claimFixAdmission ?? countedYieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
   const claimFixAdmission = capacityClaim ? (pr: OpenPrView) => {
@@ -24813,7 +24968,9 @@ async function runSweepPinned(
         : () => deps.fixRoundHoldsBranch!(pr, readLedger(deps.ledgerPath));
       const claim = claimFixAdmissionForPr(deps.fixAdmissionLockDir, pr, capacityClaim, undefined, roundHoldsBranch);
       if (claim.admitted && claim.release) fixCapacityReleases.set(fixCapacityKey(pr), claim.release);
-      if (claim.admitted && claim.lock) fixAdmissionLocks.set(fixCapacityKey(pr), { lock: claim.lock, releaseCharge: claim.releaseCharge });
+      if (claim.admitted && claim.lock) {
+        fixAdmissionLocks.set(fixCapacityKey(pr), { lock: claim.lock, releaseCharge: claim.releaseCharge, handOffCharge: claim.handOffCharge });
+      }
       return claim.admitted ? { admitted: true as const, ...(claim.release ? { release: claim.release } : {}) } : claim;
     } catch (error) {
       return { admitted: false as const, reason: `fix admission failed: ${String(error)}` };
@@ -25784,9 +25941,10 @@ async function runSweepPinned(
       if (heldAdmission !== undefined) {
         // W1-T13991: the host charges the child's memory itself, so this pass's charge goes back now. The PR's admission lock
         // does not: it is held through the host's reservation until the child adopts it, so no second round reserves.
+        // W1-T15115: a controller that can see the child's entry keeps the charge until that entry carries it.
         fixCapacityReleases.delete(capacityKey);
         fixAdmissionLocks.delete(capacityKey);
-        heldAdmission.releaseCharge?.();
+        (heldAdmission.handOffCharge ?? heldAdmission.releaseCharge)?.();
         markFixAdmissionChargeReleased(heldAdmission.lock);
       } else if (deps.fixAdmissionLockDir !== undefined) releaseFixCapacity(pr);
       pendingFixLaunches.set(claim.fixKey, deps.now?.() ?? systemClock.now());
@@ -25802,6 +25960,8 @@ async function runSweepPinned(
       // child's memory reservation until it settles the child, so the lock is freed at that settlement, whoever holds it.
       if (heldAdmission !== undefined) {
         const { path, owner } = heldAdmission.lock;
+        // W1-T15115: no child launched, so no entry will carry a handed-off charge: it goes back now.
+        if (!launched && heldAdmission.handOffCharge !== undefined) heldAdmission.releaseCharge?.();
         if (!launched) releaseFixAdmissionLineage(path, owner);
         else if (hosted !== undefined && !("abandoned" in hosted)) void hosted.settled.finally(() => releaseFixAdmissionLineage(path, owner)).catch((error: unknown) => {
           // A failed release leaves the lock for the stale-holder check; record it so the leak is visible.
