@@ -1,6 +1,6 @@
 import { INBOX_VERBS, validatedInboxAction, type InboxVerbActions, type InboxVerbActor, type InboxVerbName, type InboxVerbRespond } from "./inbox-verdict-command.js";
 import { expiredSnoozeDetail, INBOX_TERMINAL_VERDICT_HEADER } from "./inbox-cli-serve.js";
-import { readInboxGardenerStore, inboxGardenerPath, inboxRetirementFor, inboxOperatorIntent } from "./inbox-retirement.js";
+import { readInboxGardenerStore, inboxGardenerPath, inboxRetirementFor, inboxOperatorIntent, mechanicalAskPurpose } from "./inbox-retirement.js";
 /** Control-panel plan→task→PR routes (MASTER-PLAN §7B, api-client §7A).
  * Reuse feedback/trace/drain; only the daemon writes durably. `replyTo` files fresh feedback;
  * re-prioritization has no schema support. History: docs/forensics/panel-graph.md. */
@@ -31,7 +31,7 @@ import {
 } from "./plan.js";
 import { loadPlanIndex, type PlanIndex, type PlanIndexEntry } from "./plan-index.js";
 import { threadPlanPin, threadStrictPlan } from "./thread-plan.js";
-import type { PlanSourceOutcome } from "./serve-plan-reload.js";
+import { readBoardCatalogs, type BoardCatalogContext, type PlanSourceOutcome } from "./serve-plan-reload.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import {
   buildLedgerIndex,
@@ -160,6 +160,7 @@ import {
   type PredicateFailure,
   type Proposal,
   releasedHumanTaskIds,
+  deriveTaskReferent,
 } from "./inbox.js";
 import { skillEvalInboxStatus } from "./skill-eval-gate.js";
 
@@ -187,8 +188,10 @@ export interface PanelGraphDeps {
   /** The status-derivation gateway (status.ts's `GitHub`) — a different shape from `github`
    *  above; backs the drain-preview and plan-view merged-set derivation. */
   statusGithub: GitHub;
-  /** W1-T14114: the ok ops catalog's combined plan, for the Inbox's board referents only. */
+  /** W1-T14114: the ok ops catalog's combined plan, for board referents and asks' ops tasks. */
   inboxReferentPlan?: (plan: Plan) => Plan | undefined;
+  /** W1-T15105: approve's catalog read when `inboxReferentPlan` is unwired. */
+  readInboxCatalog?: (readPublic: () => Plan | undefined) => Promise<BoardCatalogContext | undefined>;
   /** config.root holds inbox state (W1-T110); `root` holds the checkout. See serve.ts's
    * `fleetControlRoot` and docs/forensics/panel-graph.md for the split's history. */
   inboxRoot: string;
@@ -2213,7 +2216,35 @@ export function projectInboxPlan(deps: Pick<PanelGraphDeps, "ledgerPath" | "stat
   const statusDeps = { ledgerPath: deps.ledgerPath, github,
     writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY, ...(ledgerLines === undefined ? {} : { readLedger: () => ledgerLines }) };
   const projection = projectPlan(plan, { ...statusDeps, observeOpenPrCount: rows => { openPrs = rows; } });
-  return { projection, boardReferents: withOpsOwnTaskReferents(deps, plan, projection, openPrs, mergedPrs ?? [], statusDeps, readProposals) };
+  let combined: Plan | undefined | null = null;
+  const referentPlan = deps.inboxReferentPlan && ((p: Plan) => combined === null ? (combined = deps.inboxReferentPlan!(p)) : combined);
+  const referentDeps = { inboxReferentPlan: referentPlan };
+  const boardReferents = withOpsOwnTaskReferents(referentDeps, plan, projection, openPrs, mergedPrs ?? [], statusDeps, readProposals);
+  return { projection, boardReferents, ...opsAskTasks(referentDeps, plan, projection, statusDeps, readProposals) };
+}
+
+/** W1-T15105: asks are judged on the ops tasks they name; the public plan and projection stay as they were. */
+function opsAskTasks(deps: Pick<PanelGraphDeps, "inboxReferentPlan">, plan: Plan, projection: Map<string, StatusProjection>,
+  statusDeps: Parameters<typeof projectPlan>[1], readProposals?: () => readonly Proposal[]): { askPlan: Plan; askProjection: Map<string, StatusProjection> } {
+  const unchanged = { askPlan: plan, askProjection: projection };
+  if (!deps.inboxReferentPlan || !readProposals) return unchanged;
+  const named = new Set<string>();
+  for (const proposal of readProposals()) {
+    const id = deriveTaskReferent(proposal.id) ?? mechanicalAskPurpose(proposal)?.taskId;
+    if (id !== undefined && !plan.byId.has(id)) named.add(id);
+  }
+  if (named.size === 0) return unchanged;
+  const combined = deps.inboxReferentPlan(plan);
+  if (!combined || combined === plan) return unchanged;
+  const tasks = [...named].flatMap(id => combined.byId.get(id) ?? []);
+  if (tasks.length === 0) return unchanged;
+  const rows = projectPlan({ tasks, byId: new Map(tasks.map(task => [task.id, task])) }, {
+    ...statusDeps, skipTasklessEscalations: true, skipUncreditedBuildWarning: true,
+  });
+  return {
+    askPlan: { tasks: [...plan.tasks, ...tasks], byId: new Map([...plan.byId, ...tasks.map(task => [task.id, task] as const)]) },
+    askProjection: new Map([...projection, ...rows]),
+  };
 }
 
 /** Ops-only rows can verify their own board referent and stay local to this pass (W1-T12211). */
@@ -2300,9 +2331,9 @@ function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: strin
   const plan = loadPlanFn(deps.planPath);
   const readProposals = inboxProposalReader(deps);
   const ledgerLines = readLedgerLines(deps.ledgerPath);
-  const { projection, boardReferents } = projectInboxPlan(deps, plan, ledgerLines, readProposals);
+  const { projection, boardReferents, askPlan, askProjection } = projectInboxPlan(deps, plan, ledgerLines, readProposals);
   const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
-  const pass = prepareInboxPass(deps, readProposals(), plan, projection, ledgerLines, anchorGrepFor(deps, sha), boardReferents);
+  const pass = prepareInboxPass(deps, readProposals(), askPlan, askProjection, ledgerLines, anchorGrepFor(deps, sha), boardReferents);
   // W1-T13188: a write classifies only the proposal it acts on; `proposals` stays whole for existence checks.
   const classified = only === undefined ? pass.proposals : pass.proposals.filter((p) => p.id === only);
   return { plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: classified.map(p => pass.classifyOne(p, lapseDeclines)), ledgerLines, projection };
@@ -2344,6 +2375,8 @@ interface InboxFingerprint {
   readPlanSnapshot?: () => Plan;
   readProposals: () => Proposal[];
   projection: Map<string, StatusProjection>;
+  askPlan: Plan;
+  askProjection: Map<string, StatusProjection>;
   boardReferents: ReturnType<typeof inboxBoardReferents>;
   ledgerLines: LedgerLines;
   archiveReleases?: ReadonlyMap<string, string>;
@@ -2391,10 +2424,10 @@ function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readP
     plan = last?.planKey !== undefined && last.planKey === planKey ? last.plan : inboxPlan(deps);
   }
   const readProposals = inboxProposalReader(deps);
-  const { projection, boardReferents } = projectInboxPlan(deps, plan, ledgerLines, readProposals);
+  const { projection, boardReferents, askPlan, askProjection } = projectInboxPlan(deps, plan, ledgerLines, readProposals);
   const archiveKey = archiveReleases?.size ? [...archiveReleases].sort(([a], [b]) => a.localeCompare(b)) : null;
-  const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(projection, boardReferents), archiveKey]);
-  return { key, writeKey: inboxWriteKey(inputs), sha, plan, planKey, readPlanSnapshot, readProposals, projection, boardReferents, ledgerLines, archiveReleases, verdictReceipts };
+  const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(askProjection, boardReferents), archiveKey]);
+  return { key, writeKey: inboxWriteKey(inputs), sha, plan, planKey, readPlanSnapshot, readProposals, projection, askPlan, askProjection, boardReferents, ledgerLines, archiveReleases, verdictReceipts };
 }
 
 /**
@@ -2436,7 +2469,7 @@ export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?
   const reused = reusableResult(state, fp);
   if (reused !== undefined) return reused;
   const generation = state.generation = {};
-  const pass = prepareInboxPass(deps, fp.readProposals(), fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
+  const pass = prepareInboxPass(deps, fp.readProposals(), fp.askPlan, fp.askProjection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
   const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(p => pass.classifyOne(p)), ledgerLines: fp.ledgerLines, projection: fp.projection };
   holdInboxResult(state, generation, fp, result);
   return result;
@@ -2511,7 +2544,7 @@ export async function classifyAllProposalsSliced(
   const generation = state.generation = {};
   const warmFailures = new Map<string, unknown>();
   const answers = new Map<string, boolean>();
-  const pass = prepareInboxPass(deps, fp.readProposals(), fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha, warmFailures, answers), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
+  const pass = prepareInboxPass(deps, fp.readProposals(), fp.askPlan, fp.askProjection, fp.ledgerLines, anchorGrepFor(deps, fp.sha, warmFailures, answers), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
   const run = async (): Promise<ClassifiedInbox> => {
     await warmInboxAnchors(deps, fp.sha, pass.proposals, warmFailures, answers);
     const classifications: InboxClassification[] = [];
@@ -4387,6 +4420,19 @@ function inboxRegistryHas(deps: PanelGraphDeps, proposalId: string): boolean {
   return parseProposalRegistry(readFileIfExists(inboxInputPaths(deps).registryPath)).some((p) => p.id === proposalId);
 }
 
+/** W1-T15105: approve judges an ops task's ask as the Inbox read did. */
+async function approveCatalogDeps(deps: PanelGraphDeps, proposalId: string): Promise<PanelGraphDeps> {
+  const taskId = deriveTaskReferent(proposalId);
+  if (deps.inboxReferentPlan || taskId === undefined) return deps;
+  let publicPlan: Plan | undefined;
+  try { publicPlan = approvePlanReader(deps)(deps.planPath); } catch { return deps; }
+  if (publicPlan.byId.has(taskId)) return deps;
+  const read = deps.readInboxCatalog ?? ((pub: () => Plan | undefined) => readBoardCatalogs(pub, dirname(deps.ledgerPath)));
+  const context = await read(() => publicPlan).catch(() => undefined);
+  const combined = context?.outcome === "ok" ? context.plan : undefined;
+  return combined ? { ...deps, inboxReferentPlan: () => combined } : deps;
+}
+
 export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxCausalScope): InboxVerbActions {
   const verdict = (kind: ProposalVerdictKind) =>
     validatedInboxAction(validateDeclineProposal, (input, actor, respond) =>
@@ -4413,7 +4459,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       // irreversible spawn, so it alone reads via loadPlanAtRef, "cannot be partial" (W1-T2220).
       // W1-T13605: like every other write, it classifies only the proposal it names. The full pass ran every
       // anchor's git grep on serve's main thread after a cold start: a 123 s loop stall on 2026-11-18.
-      const { proposals, classifications } = classifyAllProposals(deps, approvePlanReader(deps), input.proposalId);
+      const { proposals, classifications } = classifyAllProposals(await approveCatalogDeps(deps, input.proposalId), approvePlanReader(deps), input.proposalId);
       if (!proposals.some((p) => p.id === input.proposalId)) {
         respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
         return;
