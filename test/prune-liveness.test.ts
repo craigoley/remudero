@@ -25,9 +25,6 @@ import {
 } from "#src/lib/worker.js";
 import { buildSweepHook, sweepCommand } from "#src/run-task.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
-import { emptyHostProcessTable } from "#test/helpers/empty-process-table.js";
-
-emptyHostProcessTable(); // W1-T15026: the reapers here decide removals on an owned process table, not the host's
 
 // pruneStaleRuns needs a real git repo + worktree to exercise `git worktree list`.
 // Build one: repoDir with a NAMED worktree under worktreesRoot, then assert the

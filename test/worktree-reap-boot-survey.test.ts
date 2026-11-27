@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import type { Config } from "#src/lib/config.js";
-import { reapStaleWorktrees, type WorktreeReapSummary } from "#src/lib/worker.js";
+import type { WorktreeReapSummary } from "#src/lib/worker.js";
 import { logWorktreeReapBootSurvey } from "#src/run-task.js";
 
 const CONFIG = { root: "/nonexistent-repo-root-for-wiring-test" } as never;
@@ -133,8 +133,6 @@ describe("worktree reap boot survey (W1-T406)", () => {
       const config = { root } as Config;
       const summary = logWorktreeReapBootSurvey(config, () => {}, {
         policy: () => ({ enabled: false }), // the shipped default — survey only
-        // W1-T15026: the real reaper, told nobody works in the fixture instead of reading the host's `/proc`.
-        reap: (r, o) => reapStaleWorktrees(r, { ...o, cwdCensus: () => ({ state: "clear", scanned: 0 }) }),
       });
 
       assert.ok(summary, "the real pass must succeed against a real fixture root");

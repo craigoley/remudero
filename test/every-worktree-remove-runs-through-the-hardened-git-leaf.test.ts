@@ -27,9 +27,6 @@ import type { Config } from "#src/lib/config.js";
 import type { OpenPrView } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
-import { emptyHostProcessTable } from "#test/helpers/empty-process-table.js";
-
-emptyHostProcessTable(); // W1-T15026: the reapers here decide removals on an owned process table, not the host's
 
 let root: string;
 let decoy: GitRepo;
