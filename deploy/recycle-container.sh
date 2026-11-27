@@ -2623,7 +2623,7 @@ move_inflight_lock_aside() {
     fi
   fi
   mv "${f}" "${reclaimed_path}"
-  printf 'reclaimed by recycle-container.sh (W1-T2556/W1-T3611/W1-T12316) pid %s at %s\nhost: %s\nverdict: %s\n%s' \
+  printf 'reclaimed by recycle-container.sh (W1-T2556/W1-T3611/W1-T12316/W1-T14947) pid %s at %s\nhost: %s\nverdict: %s\n%s' \
     "$$" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${host}" "${verdict}" "${extra}" > "${reclaimed_path}.reason"
   echo "  moved aside to ${reclaimed_path} (reason recorded alongside it) — recycle proceeds" >&2
 }
@@ -2844,6 +2844,38 @@ live_review_locks() {
     printf '%s\n' "${f}"
   done
   return 0
+}
+
+# A review can die after a previous drain refusal named its lock. Merely omitting that lock from
+# the next in-flight count is not enough: the supervisor also waits for the refused blocker file
+# to disappear. Move aside only when the target container itself proves the pid absent (or proves
+# it is a reused pid), and retain the original lock and reason for forensics.
+reclaim_dead_review_locks() {
+  local f pid host target_host probe lock_epoch start_epoch identity
+  [ -d "${INFLIGHT_DIR}/reviews" ] || return 0
+  target_host="$(docker inspect --format '{{.Config.Hostname}}' "${CONTAINER_NAME}" 2>/dev/null | head -n 1 || true)"
+  [ -n "${target_host}" ] || return 0
+  for f in "${INFLIGHT_DIR}/reviews"/*.lock; do
+    [ -e "${f}" ] || continue
+    identity="$(inflight_lock_identity "${f}")" || continue
+    pid="$(lock_pid_field "${f}")"
+    host="$(lock_host_field "${f}")"
+    printf '%s' "${pid}" | grep -Eq '^[1-9][0-9]*$' || continue
+    [ "${host}" = "${target_host}" ] || continue
+    probe="$(docker exec "${CONTAINER_NAME}" sh -c '[ -e "/proc/$1" ] && echo PRESENT || echo ABSENT' sh "${pid}" 2>/dev/null | head -n 1 || true)"
+    if [ "${probe}" = ABSENT ]; then
+      move_inflight_lock_aside "${f}" "${host}" "review owner pid ${pid} is absent in the target container (W1-T14947)" \
+        "pid: ${pid}\nreview lock owner is absent from the target container\n" "${identity}"
+      continue
+    fi
+    [ "${probe}" = PRESENT ] || continue
+    lock_epoch="$(epoch_of_started_at "$(lock_started_at_field "${f}")")"
+    start_epoch="$(container_pid_start_epoch "${pid}")"
+    if printf '%s' "${lock_epoch}:${start_epoch}" | grep -Eq '^[0-9]+:[0-9]+$' && [ "$((start_epoch - lock_epoch))" -gt 2 ]; then
+      move_inflight_lock_aside "${f}" "${host}" "review owner pid ${pid} was reused after the lock (W1-T14947)" \
+        "pid: ${pid}\nlock epoch: ${lock_epoch}\nprocess start epoch: ${start_epoch}\n" "${identity}"
+    fi
+  done
 }
 
 worker_lane() {
@@ -3132,6 +3164,7 @@ evaluate_frozen_daemon_proof
 waited=0
 while :; do
   reclaim_dead_inflight_locks
+  reclaim_dead_review_locks
   n=0
   counted_locks=""
   for f in "${INFLIGHT_DIR}"/*.lock; do

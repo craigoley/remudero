@@ -3,7 +3,7 @@
 // fake `docker` on PATH.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test, type TestContext } from "node:test";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -21,7 +21,11 @@ case "$1" in
       exit 1
     fi
     # The container's own pid start-time read: FAKE_PID_START_EPOCH, or nothing when unset.
-    if [ "$3" = sh ]; then [ -z "\${FAKE_PID_START_EPOCH:-}" ] || echo "$FAKE_PID_START_EPOCH"; exit 0; fi
+    if [ "$3" = sh ]; then
+      case "$5" in *'/proc/$1'*'echo PRESENT'*) case " $FAKE_ALIVE_PIDS " in *" $7 "*) echo PRESENT ;; *) echo ABSENT ;; esac; exit 0 ;; esac
+      [ -z "\${FAKE_PID_START_EPOCH:-}" ] || echo "$FAKE_PID_START_EPOCH"
+      exit 0
+    fi
     exit 0 ;;
   pull) : > "$S/images/$PULL_ID"; echo "fixture pulled"; exit 0 ;;
   create) mkdir -p "$S/containers/$3"; echo "$4" > "$S/containers/$3/image"; echo "$3" > "$S/containers/$3/id"; echo "$3"; exit 0 ;;
@@ -68,7 +72,7 @@ exit 0
  *  `core-host`. Returns its exit code and output. */
 async function recycleWithReviewLock(
   t: TestContext, alivePids: string, lockHost = "core-host", pidStartAfterLockS?: number,
-): Promise<{ code: number | null; out: string }> {
+): Promise<{ code: number | null; out: string; root: string }> {
   const owned = ownedFixtureDir(t, "recycle-review-lock");
   const root = owned.dir;
   const store = join(root, "store");
@@ -105,7 +109,7 @@ async function recycleWithReviewLock(
     child.on("exit", (c, signal) => resolve(c ?? (signal ? -1 : null)));
   });
   owned.until(Promise.resolve(code));
-  return { code, out };
+  return { code, out, root };
 }
 
 describe("test/deploy/a-recycle-drain-counts-in-flight-review-locks.test.ts", { timeout: 300_000 }, () => {
@@ -121,6 +125,12 @@ describe("test/deploy/a-recycle-drain-counts-in-flight-review-locks.test.ts", { 
 
     const gone = await recycleWithReviewLock(t, "");
     assert.match(gone.out, /no in-flight workers — safe to proceed/, `a lock whose owner is gone does not block:\n${gone.out}`);
+    assert.match(gone.out, /review owner pid 4242 is absent in the target container \(W1-T14947\)/,
+      `the stale file from a prior refusal is moved aside so blocker settlement can observe it gone:\n${gone.out}`);
+    assert.equal(existsSync(join(gone.root, "core/state/inflight/reviews/review-run-a.lock")), false,
+      "an owner-gone review lock no longer remains at the blocker path");
+    assert.ok(readdirSync(join(gone.root, "core/state/inflight/reclaimed")).some((name) => name.startsWith("review-run-a.lock.recycle-")),
+      "the reclaimed lock is retained for forensics");
 
     const reused = await recycleWithReviewLock(t, "4242", "core-host", 600);
     assert.match(reused.out, /no in-flight workers — safe to proceed/,
