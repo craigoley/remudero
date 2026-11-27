@@ -250,7 +250,6 @@ import { cashDeploymentEndpoint } from "./config-schema.js";
 import { FIX_ROUTING_LEARNER, fixRoutingDecisionFields, mountedFixArms, type FixLearnedArms, type FixRoutingWeights } from "./fix-routing-learner.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
 import { FIX_WORKER_TOOLS } from "./fix-fence.js";
-import { readBoundedProcessCwdCensus, type ProcessCwdCensus } from "./process-cwd-census.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import {
   GITDIR_RECORD_PREFIX,
@@ -7900,11 +7899,7 @@ export type WorktreeKeepReason =
   | "registration-undecidable"
   | "unpushed-commit"
   | "inflight-lock"
-  | "work-undecidable"
-  /** W1-T15026: a live process works at or below the tree (an operator `rmd review` run from a hand tree holds no lock). */
-  | "live-cwd"
-  /** W1-T15026: the bounded working-directory census could not decide, so absence is not proven. */
-  | "cwd-unknown";
+  | "work-undecidable";
 
 /** The newest mtime anywhere under `dir`, and whether the walk could be trusted. TRAP: a DIRECTORY's mtime advances only when
  * an entry is added to or removed from THAT directory, never when a nested file is modified, so age-gating on the root's own
@@ -7990,17 +7985,13 @@ export interface WorktreeReapOpts {
   /** Whether `branch` (in `repoDir`) is still live upstream — true means KEEP, fail closed. Defaults to {@link
    * defaultBranchIsLiveUpstream} (an `origin` ls-remote). */
   branchIsLiveUpstream?: (branch: string, repoDir: string) => boolean;
-  /** W1-T2950: canonical-path resolver for the registration identity compare and the cwd census (W1-T15026). Injectable
-   *  so a test can drive the UNDECIDABLE arm — the one where the comparison cannot be made — without an unreadable real
-   *  filesystem. Defaults to `realpathSync`. */
+  /** W1-T2950: canonical-path resolver for the registration identity compare. Injectable so a test can drive the
+   *  UNDECIDABLE arm — the one where the comparison cannot be made — without an unreadable real filesystem. Defaults to
+   *  `realpathSync`. */
   realpath?: (p: string) => string;
   /** The tree-activity probe the age gate measures against. Injectable so a test asserts the boundary without a deep fixture
    * per case. Defaults to {@link newestActivityMs}, the REAL bounded walk, which the fixture-free tests drive (W1-T378). */
   newestActivity?: (dir: string) => { mtimeMs: number; complete: boolean };
-  /** W1-T15026: who works at or below a tree about to be removed; defaults to the bounded `/proc` cwd census. */
-  cwdCensus?: (dir: string) => ProcessCwdCensus;
-  /** W1-T15026: asks whether `/proc` exists after a `proc_unavailable` census; defaults to `statSync`. */
-  statProcessTable?: (path: string) => unknown;
   /** SURVEY ONLY when true: an entry that would be reaped is still recorded in `reaped` and `reapedLocks`, so a caller can
    * ledger exactly what it would reclaim, but nothing is removed from disk. Mirrors {@link reapStaleClones}'s own `dryRun`.
    * Default false, unchanged for every existing caller (W1-T406). */
@@ -8068,14 +8059,13 @@ type WorktreeRegistrationLookup =
 function canonicalIdentity(
   path: string,
   realpath: (p: string) => string = realpathSync,
-): { kind: "resolved"; identity: string } | { kind: "unresolvable"; gone: boolean } {
+): { kind: "resolved"; identity: string } | { kind: "unresolvable" } {
   try {
     return { kind: "resolved", identity: realpath(path) };
-  } catch (e) {
+  } catch {
     // The distinction is CARRIED, not erased: "could not resolve" is a different answer from "does
     // not match", and folding them into one bare `undefined` is how a live lane gets destroyed.
-    // `gone` (ENOENT) says the path does not exist; every other failure leaves that open.
-    return { kind: "unresolvable", gone: (e as NodeJS.ErrnoException)?.code === "ENOENT" };
+    return { kind: "unresolvable" };
   }
 }
 
@@ -8099,19 +8089,6 @@ function resolveWorktreeRegistration(
     if (registered.identity === candidate.identity) return { kind: "registered", repoDir, branch: entry.branch };
   }
   return { kind: "unregistered" };
-}
-
-/** W1-T15026: true only when this host is PROVEN to have no process table, i.e. `/proc` does not exist. A `/proc` that
- *  stats, or whose stat fails any other way, leaves a failed census undecided. */
-function processTableIsAbsent(stat: (path: string) => unknown): boolean {
-  try {
-    stat("/proc");
-    return false;
-  } catch (e) {
-    // Only ENOENT proves the host HAS no process table; any other stat failure (EACCES, EIO) leaves a table that may exist,
-    // so it reads "present" and the census's unknown keeps the tree — an unproven absence never authorizes a removal.
-    return (e as NodeJS.ErrnoException).code === "ENOENT";
-  }
 }
 
 /** HOW an aged, terminal reap candidate must be REMOVED — never WHETHER, which the gates above decide. `git-remove` deletes
@@ -8243,7 +8220,6 @@ function* worktreeReapPass(
   const now = opts.now ?? (() => Date.now());
   const branchIsLiveUpstream = opts.branchIsLiveUpstream ?? defaultBranchIsLiveUpstream;
   const newestActivity = opts.newestActivity ?? ((d: string) => newestActivityMs(d));
-  const cwdCensus = opts.cwdCensus ?? ((d: string) => readBoundedProcessCwdCensus(d));
   const dryRun = opts.dryRun ?? false;
   const reaped: string[] = [];
   const reapedLocks: string[] = [];
@@ -8362,26 +8338,6 @@ function* worktreeReapPass(
           }
           initializing = true;
         }
-      }
-      // W1-T15026: the last gate before removal. A tree can look terminal by every signal above while a live process still
-      // works in it (an operator review writes nothing inside its tree), so the census is asked only here, for the few
-      // trees about to be removed. Occupied keeps; an undecidable census keeps. A host with no process table at all has
-      // nothing to ask, so its removal runs as it did before this gate. `/proc` cwd links are canonical, so the census
-      // is asked about the canonical path: a symlinked spelling would match no cwd and read clear. A tree already gone
-      // (a concurrent removal won) has nothing left to protect, so it proceeds as before, uncensused.
-      const canonical = canonicalIdentity(entryPath, opts.realpath ?? realpathSync);
-      if (canonical.kind === "resolved") {
-        const census = cwdCensus(canonical.identity);
-        // `proc_unavailable` also covers a failed open or a broken enumeration of a table that exists.
-        const noProcessTable = census.state === "unknown" && census.reason === "proc_unavailable"
-          && processTableIsAbsent(opts.statProcessTable ?? statSync);
-        if (census.state !== "clear" && !noProcessTable) {
-          keep(name, census.state === "occupied" ? "live-cwd" : "cwd-unknown");
-          continue;
-        }
-      } else if (!canonical.gone) {
-        keep(name, "cwd-unknown");
-        continue;
       }
       if (!dryRun) {
         executeWorktreeRemoval(entryPath, removalPlan, initializing);

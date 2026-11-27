@@ -10,6 +10,7 @@ const END = "\n-->";
 const FLEET_LOGIN = "remudero-fleet[bot]";
 const proofOutcomes = z.enum([
   "executed_pass", "executed_fail", "not_executable", "exec_error", "cannot_evaluate", "inconclusive_load",
+  "sandbox_start_failed",
   "executed_stale", "base_unreadable", "not_yet_built", "stale_self_path",
 ]);
 const payloadSchema = z.object({

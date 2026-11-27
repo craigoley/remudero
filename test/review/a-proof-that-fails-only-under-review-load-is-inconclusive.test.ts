@@ -81,7 +81,7 @@ function assertPendingLoad(verdict: ReviewVerdict): void {
   assert.deepEqual(reviewLedgerReasons(verdict), []);
 }
 
-test("production sandbox startup errors stay pending with load in both judges regardless of keywords", async t => {
+test("production sandbox startup errors stay pending as sandbox_start_failed with load in both judges regardless of keywords", async t => {
   setProofSandboxForTests({ mode: "bwrap", binary: process.execPath });
   t.after(() => setProofSandboxForTests());
   for (const asynchronous of [false, true]) {
@@ -104,8 +104,19 @@ test("production sandbox startup errors stay pending with load in both judges re
         catch (error) { return checkError(error); }
       }, { preparedArgs: ["--test", PROOF_FILE] });
       const verdict = asynchronous ? await judgeReviewAsync(criteria, evidence) : judgeReview(criteria, evidence);
-      assert.equal(startupErrors, 1);
-      assertPendingLoad(verdict);
+      // W1-T15100: a failed start check is sandbox_start_failed, not inconclusive_load; the async judge re-runs it on
+      // its next fold pass first, so it fails twice there.
+      assert.equal(startupErrors, asynchronous ? 2 : 1);
+      assert.equal(verdict.criteria[0].proof_exec, "sandbox_start_failed", verdict.criteria[0].reason);
+      assert.equal(verdict.criteria[0].met, false);
+      // The re-run samples the load again, so the async judge records the load around its second start check.
+      assert.deepEqual(verdict.criteria[0].load, {
+        start: { load1: asynchronous ? 41 : 30, cpuPsiSomeAvg10Pct: 60 }, end: { load1: 41, cpuPsiSomeAvg10Pct: 60 },
+      });
+      assert.equal(verdict.state, "pending");
+      assert.equal(verdict.floorState, "pending");
+      assert.deepEqual(reviewUnmetFields(verdict), { visibleUnmet: [], unmetClaims: [], reasons: [] });
+      assert.match(verdict.criteria[0].sandboxStartFailure?.stderr ?? "", /bad option/);
       assert.equal(verdict.criteria[0].proof_skip, "runner-absent");
       const posted = JSON.parse(JSON.stringify({ decision_verdict: verdict }));
       assert.deepEqual(posted.decision_verdict.criteria[0].load, verdict.criteria[0].load);

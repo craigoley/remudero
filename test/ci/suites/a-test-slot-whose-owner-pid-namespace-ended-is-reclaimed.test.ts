@@ -6,13 +6,15 @@ import { test, type TestContext } from "node:test";
 
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
+  INITIAL_PID_NAMESPACE,
   acquireTestSlot, probeRecordedPidNamespace, TEST_SLOT_LEASE_MS, TEST_SLOT_SILENT_BEATS,
   type ReservedTreeEvidence, type ReservedTreeProbeHost, type TestSlotHolder, type TestSlotOptions,
 } from "#src/lib/test-slot.js";
 
 const NOW = Date.parse("2026-11-14T12:00:00Z");
 const OWNER_NS = "pid:[12504]";
-const WAITER_NS = "pid:[1]";
+// W1-T15112: an initial-namespace waiter reads the kernel's fixed init namespace link, not a one-entry NSpid alone.
+const WAITER_NS = INITIAL_PID_NAMESPACE;
 // Namespace inode reuse proves the old tree ended only when the new init started after its owner.
 // All fixture time is injected; no dated fixture is compared with the real clock.
 const failure = (code: string) => Object.assign(new Error(code), { code });

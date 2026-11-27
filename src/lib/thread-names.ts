@@ -18,6 +18,7 @@ export const THREAD_NAMES = {
   configMeasure: "rmd-config-meas",
   consoleProjection: "rmd-console-prj",
   heavyReadyDeadline: "rmd-heavy-ready",
+  hookListener: "rmd-hook-listen",
   inboxBuild: "rmd-inbox-build",
   ledgerCompact: "rmd-ledger-cmpt",
   ledgerDigestCodec: "rmd-ledger-dgst",
