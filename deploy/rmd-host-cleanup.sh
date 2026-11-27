@@ -1344,7 +1344,50 @@ lender_check() {
 # unit idle for the scratch window, closed and unmounted. A unit idle past HOLD_EXPIRE_DAYS is copied to the preserve
 # root (each bare repository as a verified bundle, the rest as a listed tarball, with a MANIFEST), then removed.
 # A unit owned in whole or part by another user is reported with its size and never removed.
-HELD_LINKS_TAKEN=0
+HELD_LINKS_TAKEN=0; HELD_MARK_TAKEN=0
+# held_unit_hosts_nothing <unit>: fails with SCRATCH_REASON when a repository inside the unit registers a linked
+# worktree outside it, or when the registrations cannot be read.
+held_unit_hosts_nothing() {
+  local p="$1" reg target
+  while IFS= read -r reg; do
+    [ -n "$reg" ] || continue
+    target="$(head -n 1 -- "$reg" 2>/dev/null)" || { SCRATCH_REASON="linked worktree registration unreadable ($reg)"; return 1; }
+    target="${target%/.git}"
+    case "$target" in "$p"/*) ;; *) SCRATCH_REASON="hosts linked worktree ${target:-$reg} outside the unit"; return 1 ;; esac
+  done < <(find "$p" -path '*/worktrees/*/gitdir' -type f 2>/dev/null)
+  return 0
+}
+# W1-T14971: a seed store's consumers link into it from inside their node_modules (per package, Linux readonly links),
+# which snapshot_links prunes. One extra walk of every janitor root, node_modules included, collects those links.
+HELD_SEED_LINKS=""; HELD_SEED_LINKS_OK=1
+held_seed_links() {
+  local root link target out
+  HELD_SEED_LINKS=""; HELD_SEED_LINKS_OK=1
+  while IFS= read -r root; do
+    root="${root%/}"
+    [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
+    out="$(find "$root" -xdev -name .git -prune -o -type l -print 2>/dev/null)" || { HELD_SEED_LINKS_OK=0; return; }
+    while IFS= read -r link; do
+      [ -n "$link" ] || continue
+      target="$(readlink -- "$link" 2>/dev/null)" || continue
+      case "$target" in /*) ;; *) target="${link%/*}/$target" ;; esac
+      HELD_SEED_LINKS="$HELD_SEED_LINKS$link	$(normalize_path "$target")
+"
+    done <<< "$out"
+  done < <(printf '%s\n' "$SCRATCH_ROOTS" "$SCRATCH_PARENTS" "$WORKTREE_ROOTS" "$LIVE_CHECKOUTS" "$PRESERVE_ROOTS" "$AGENT_SCRATCH" |
+             tr ':' '\n' | awk 'NF && !seen[$0]++')
+}
+held_seed_unreferenced() {   # fails with SCRATCH_REASON when a link outside unit $1 points into it, or the walk failed
+  local p="$1" pp link target
+  [ "$HELD_SEED_LINKS_OK" = 1 ] || { SCRATCH_REASON="seed consumer scan failed (unknown)"; return 1; }
+  pp="$(cd -P -- "$p" 2>/dev/null && pwd -P)" || pp="$p"
+  while IFS='	' read -r link target; do
+    [ -n "$link" ] || continue
+    case "$link" in "$p"/*|"$pp"/*) continue ;; esac
+    case "$target" in "$p"|"$p"/*|"$pp"|"$pp"/*) SCRATCH_REASON="seed store used by $link"; return 1 ;; esac
+  done <<< "$HELD_SEED_LINKS"
+  return 0
+}
 retire_held_scratch_unit() {
   local p="$1" kind="$2" why="$3" uid bytes found name final work rel bare listed walked unit_is_bare=0
   local -a excludes=() bares=()
@@ -1360,10 +1403,14 @@ retire_held_scratch_unit() {
     1) log "KEEP $p: $why (written within $HOLD_EXPIRE_DAYS days)"; return ;;
     *) log "KEEP $p: $why; activity probe failed (unknown)"; return ;;
   esac
-  if [ "$kind" = seed ]; then
-    [ "$HELD_LINKS_TAKEN" = 1 ] || { snapshot_links; HELD_LINKS_TAKEN=1; }
-    if ! link_lender_check "$p"; then log "KEEP $p: $why; $SCRATCH_REASON"; return; fi
+  # Every kind: nothing outside the unit may borrow its objects, link into it or be a worktree it hosts.
+  if ! lender_check "$p"; then
+    case "$SCRATCH_REASON" in "borrows from missing "*) ;; *) log "KEEP $p: $why; $SCRATCH_REASON"; return ;; esac
   fi
+  [ "$HELD_LINKS_TAKEN" = 1 ] || { snapshot_links; held_seed_links; HELD_LINKS_TAKEN=1; }
+  if ! link_lender_check "$p"; then log "KEEP $p: $why; $SCRATCH_REASON"; return; fi
+  if ! held_unit_hosts_nothing "$p"; then log "KEEP $p: $why; $SCRATCH_REASON"; return; fi
+  if [ "$kind" = seed ] && ! held_seed_unreferenced "$p"; then log "KEEP $p: $why; $SCRATCH_REASON"; return; fi
   if [ -L "$PRESERVE_ROOT" ]; then log "KEEP $p: $why; preserve root $PRESERVE_ROOT is a symbolic link"; return; fi
   name="${p#/}"; name="${name//\//__}@$PRESERVE_STAMP"; final="$PRESERVE_ROOT/$name.held"
   if [ "$DRY_RUN" = 1 ]; then
@@ -1371,6 +1418,7 @@ retire_held_scratch_unit() {
     tally "hold-expired ${p%/*}" "$bytes"; return
   fi
   if ! mkdir -p -- "$PRESERVE_ROOT" 2>/dev/null || ! chmod 700 "$PRESERVE_ROOT" 2>/dev/null; then log "KEEP $p: $why; cannot create $PRESERVE_ROOT"; return; fi
+  [ "$HELD_MARK_TAKEN" = 1 ] || { preserve_root_mark; HELD_MARK_TAKEN=1; }
   if ! preserve_root_has_room; then log "KEEP $p: $why; preserve root $PRESERVE_ROOT is past its watched mark"; return; fi
   if [ -e "$final" ] || [ -L "$final" ]; then log "KEEP $p: $why; preserve copy $final already exists"; return; fi
   work="$PRESERVE_ROOT/.incoming-$name.held"
@@ -1382,12 +1430,18 @@ retire_held_scratch_unit() {
     for bare in ${bares[@]+"${bares[@]}"}; do
       [ -d "$bare/objects" ] && [ -d "$bare/refs" ] || continue
       rel="${bare#"$p"}"; rel="${rel#/}"
+      if [ -z "$(git --git-dir="$bare" for-each-ref --count=1 2>/dev/null)" ] || [ -f "$bare/shallow" ]; then
+        # No refs or a shallow history: a bundle would not restore it, so the repository stays in the tarball.
+        printf 'bare repository tarred whole (no refs or shallow): %s\n' "$bare" >> "$work/MANIFEST.txt"
+        continue
+      fi
       if [ -z "$rel" ]; then unit_is_bare=1; else excludes+=("--exclude=${p##*/}/$rel"); fi
-      if [ -n "$(git --git-dir="$bare" for-each-ref --count=1 2>/dev/null)" ]; then
+      if :; then
         if ! git --git-dir="$bare" bundle create "$work/${rel//\//__}${rel:+.}all.bundle" --all >/dev/null 2>&1 </dev/null ||
-           ! git --git-dir="$bare" bundle verify "$work/${rel//\//__}${rel:+.}all.bundle" >/dev/null 2>&1 </dev/null; then
+           ! git clone --quiet --bare -- "$work/${rel//\//__}${rel:+.}all.bundle" "$work/.verify-clone" >/dev/null 2>&1 </dev/null; then
           rm -rf -- "$work"; log "KEEP $p: $why; bundle of $bare did not verify"; return
         fi
+        rm -rf -- "$work/.verify-clone"
       fi
       printf 'bare repository: %s\n' "$bare" >> "$work/MANIFEST.txt"
     done
@@ -2302,7 +2356,8 @@ expire_preserved_copies() {
   [ "$HELD_PRESERVE_ROOT" = "$PRESERVE_ROOT" ] || roots+=("$HELD_PRESERVE_ROOT")
   for root in "${roots[@]}"; do
     [ -d "$root" ] && [ ! -L "$root" ] || continue
-    for e in "$root"/*@[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z "$root"/.incoming-*; do
+    for e in "$root"/*@[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z \
+             "$root"/*@[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z.held "$root"/.incoming-*; do
       [ -d "$e" ] && [ ! -L "$e" ] || continue
       keep_container_path "$e" && continue
       [ "$(owner_uid "$e")" = "$RUN_UID" ] || continue   # only copies this identity made

@@ -133,3 +133,99 @@ test("W1-T14971 criterion 4: invariant:foreign-owner-is-never-removed — a fold
   assert.equal(existsSync(theirs), true, "another user's folder is never removed");
   assert.deepEqual(preserved(fx, theirs), [], "and nothing is copied");
 });
+
+test("W1-T14971 criterion 1: a bare repository something outside depends on is kept: an alternates borrower, a hosted worktree or a link into it", () => {
+  const fx = fixture();
+  const { main } = repos(fx);
+  const lent = bareUnit(fx, main, "lent.Aa1111");
+  const borrower = join(fx.scratch, "borrower.Bb2222");
+  git(fx.root, "clone", "--quiet", "--shared", lent, borrower);
+  writeFileSync(join(borrower, ".git", "objects", "info", "alternates"), `${join(lent, "objects")}\n`);
+  const host = bareUnit(fx, main, "host.Cc3333");
+  mkdirSync(join(host, "worktrees", "outside"), { recursive: true });
+  writeFileSync(join(host, "worktrees", "outside", "gitdir"), `${join(fx.root, "elsewhere", "wt")}/.git\n`);
+  const linked = bareUnit(fx, main, "linked.Dd4444");
+  const live = join(fx.root, "live-checkout");
+  mkdirSync(live, { recursive: true });
+  symlinkSync(linked, join(live, "upstream.git"));
+  for (const p of [lent, host, linked]) age(p, 10 * DAY_HOURS);
+
+  const r = run(fx, scratchOnly(fx, { RMD_CLEANUP_LIVE_CHECKOUTS: live }));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  for (const kept of [lent, host, linked]) {
+    assert.equal(existsSync(kept), true, `${kept} stays:\n${r.stdout}`);
+    assert.deepEqual(preserved(fx, kept), [], `nothing is copied for ${kept}`);
+  }
+  assert.match(r.stdout, new RegExp(`KEEP ${lent}: .*lends objects to`));
+  assert.match(r.stdout, new RegExp(`KEEP ${host}: .*hosts linked worktree`));
+  assert.match(r.stdout, new RegExp(`KEEP ${linked}: .*lends files to symlinks`));
+});
+
+test("W1-T14971 criterion 1: an idle bare repository with no refs or a shallow history is tarred whole, then removed", () => {
+  const fx = fixture();
+  const { main } = repos(fx);
+  const empty = join(fx.scratch, "empty-bare.Ee5555");
+  git(fx.root, "init", "--quiet", "--bare", empty);
+  const shallow = join(fx.scratch, "shallow-bare.Ff6666");
+  git(fx.root, "clone", "--quiet", "--bare", "--depth", "1", `file://${main}`, shallow);
+  for (const p of [empty, shallow]) age(p, 10 * DAY_HOURS);
+
+  const r = run(fx, scratchOnly(fx));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  for (const gone of [empty, shallow]) {
+    assert.equal(existsSync(gone), false, `${gone} is retired:\n${r.stdout}`);
+    const [copy] = preserved(fx, gone);
+    assert.ok(copy, r.stdout);
+    const listing = execFileSync("tar", ["-tzf", join(copy, "unit.tar.gz")], { encoding: "utf8" });
+    assert.match(listing, /\/HEAD$/m, `the repository is in the tarball of ${gone}`);
+  }
+});
+
+test("W1-T14971 criterion 1: an expired hold copy is removed with the other preserved copies, and a full preserve disk holds the unit", () => {
+  const fx = fixture();
+  const { main } = repos(fx);
+  const old = join(fx.root, "preserved", "tmp__old-unit@20260101T000000Z.held");
+  mkdirSync(old, { recursive: true });
+  writeFileSync(join(old, "MANIFEST.txt"), "old copy\n");
+  age(old, 30 * DAY_HOURS);
+  const r = run(fx, scratchOnly(fx));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(old), false, `an old .held copy expires:\n${r.stdout}`);
+
+  const full = bareUnit(fx, main, "full-disk.Gg7777");
+  age(full, 10 * DAY_HOURS);
+  const f = run(fx, scratchOnly(fx, { RMD_CLEANUP_WATCH_FS: `${fx.rootfs}:40`, FAKE_DF_PCT: "95" }));
+  assert.equal(existsSync(full), true, `the unit stays when the preserve disk is past its mark:\n${f.stdout}`);
+  assert.match(f.stdout, new RegExp(`KEEP ${full}: .*past its watched mark`));
+});
+
+test("W1-T14971 criterion 2: a broken clone something outside links into is kept", () => {
+  const fx = fixture();
+  const { main } = repos(fx);
+  const { unit } = brokenUnit(fx, main, "h");
+  const live = join(fx.root, "live-checkout");
+  mkdirSync(live, { recursive: true });
+  symlinkSync(join(unit, "repo"), join(live, "vendored"));
+  age(unit, 10 * DAY_HOURS);
+
+  const r = run(fx, scratchOnly(fx, { RMD_CLEANUP_LIVE_CHECKOUTS: live }));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(unit), true, r.stdout);
+  assert.match(r.stdout, new RegExp(`KEEP ${unit}: borrows from missing .*lends files to symlinks`));
+  assert.deepEqual(preserved(fx, unit), []);
+});
+
+test("W1-T14971 criterion 3: a seed store a live checkout uses through a link inside its node_modules is kept", () => {
+  const fx = fixture();
+  const used = seedUnit(fx, "rmd-seeded.Hh8888");
+  const live = join(fx.root, "live-checkout");
+  mkdirSync(join(live, "node_modules"), { recursive: true });
+  symlinkSync(join(used, "seeds", "store", "pkg"), join(live, "node_modules", "pkg"));
+  age(used, 10 * DAY_HOURS);
+
+  const r = run(fx, scratchOnly(fx, { RMD_CLEANUP_LIVE_CHECKOUTS: live, RMD_CLEANUP_PRESERVE_ROOTS: "" }));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(used), true, r.stdout);
+  assert.match(r.stdout, new RegExp(`KEEP ${used}: contains dependency seed store.*seed store used by ${join(live, "node_modules", "pkg")}`));
+  assert.deepEqual(preserved(fx, used), []);
+});
