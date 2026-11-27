@@ -40492,7 +40492,8 @@ export async function approveCommand(
   // W1-T15105: serve's Approve spawns this path, so it judges an ops-catalog task's ask as serve did.
   const named = parseProposalRegistry(readFileIfExists(registryPath)).filter(p => p.id === proposalId);
   const catalogState = dirname(ledgerPathFor(config));
-  const plan = await readAskTaskPlan(loadPlan(planPath), named, catalogState,
+  const publicPlan = loadPlan(planPath);
+  const plan = await readAskTaskPlan(publicPlan, named, catalogState,
     deps.readInboxCatalog ?? ((pub) => readBoardCatalogs(pub, catalogState, deps.taskLookup?.api)));
   const { owner, repo } = proposalPlan.target ?? resolveOwnerRepo();
   const registryIntent = selectedRegistryIntentForConfig(config);
@@ -40521,7 +40522,7 @@ export async function approveCommand(
   // W1-T12214: the repository this approval files its task file in. Skill approvals stay in the public repository.
   const publicFiling = { owner, repo, checkoutDir: join(config.root, "repos", repo), destination: false };
   const filing = deps.gateway === undefined && classification.state === "ready" && classification.draft && !classification.skillFile
-    ? await approveFilingRepository([classification.draft.fragmentYaml], plan, join(config.root, "state"), publicFiling) : publicFiling;
+    ? await approveFilingRepository([classification.draft.fragmentYaml], publicPlan, join(config.root, "state"), publicFiling) : publicFiling;
   if ("refused" in filing) {
     console.error(`rmd approve: refusing ${proposalId} — ${filing.refused}`);
     return 1;
