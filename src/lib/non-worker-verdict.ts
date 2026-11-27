@@ -35,6 +35,57 @@ export function infrastructureRefusal(line: Record<string, unknown>): string | u
   return undefined;
 }
 
+/** W1-T12154: the boot sweep's reason on a restart-orphaned run's `handed_off` verdict (dispatch-claim.ts
+ *  `ORPHANED_BY_RESTART`), spelled here because this leaf imports nothing. */
+const ORPHANED_BY_RESTART_REASON = "orphaned-by-restart";
+
+/**
+ * W1-T12154: did this run end before any worker was assigned? A reader that saw the run's own `worker.assignment`
+ * row (`runAssigned`) says no. Otherwise a verdict the run's logger stamped answers by its `worker_assigned` field,
+ * and an unstamped one (written before this task, or by the boot sweep for a restart-orphaned run) falls back to
+ * {@link infrastructureRefusal} or the orphan's `handed_off`. MEASURED 2026-11-10: 600 of 1,030 implement runs.
+ */
+export function endedBeforeWorkerAssignment(line: Record<string, unknown>, runAssigned = false): boolean {
+  if (runAssigned) return false;
+  if (typeof line.worker_assigned === "boolean") return !line.worker_assigned;
+  return infrastructureRefusal(line) !== undefined ||
+    (line.verdict === "handed_off" && line.reason === ORPHANED_BY_RESTART_REASON);
+}
+
+function namedText(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * W1-T12154: wraps a run's ledger writer so the verdict of a run that wrote its `run.start` and no
+ * `worker.assignment` row says so: `worker_assigned: false`, `last_stage` (the verdict's own `stage` unless it is
+ * the generic `run.error`, else the last `run.phase` or row `stage` written, else the last step) and `last_step`,
+ * the last row written before the verdict. A row counts as written only once `write` returns.
+ * run-task.ts `benchmarkRunLedgerLogger` writes through it.
+ */
+export function recordUnassignedRunVerdict(
+  write: (step: string, fields: Record<string, unknown>) => void,
+): (step: string, fields: Record<string, unknown>) => void {
+  let started = false;
+  let assigned = false;
+  let lastStage: string | undefined;
+  let lastStep = "run.start";
+  return (step, fields) => {
+    const stamp = step === "verdict" && started && !assigned
+      ? {
+        worker_assigned: false,
+        last_stage: (fields.stage !== "run.error" ? namedText(fields.stage) : undefined) ?? lastStage ?? lastStep,
+        last_step: lastStep,
+      }
+      : {};
+    write(step, { ...fields, ...stamp });
+    if (step === "run.start") started = true;
+    if (step === "worker.assignment") assigned = true;
+    lastStage = (step === "run.phase" ? namedText(fields.waiting_on) : namedText(fields.stage)) ?? lastStage;
+    lastStep = step;
+  };
+}
+
 export function lifetimeInfrastructureRefusal(line: Record<string, unknown>): string | undefined {
   return infrastructureRefusal(line) ??
     (typeof line.verdict === "string" && LIFETIME_ONLY_REFUSAL_VERDICTS.has(line.verdict) ? line.verdict : undefined);

@@ -155,6 +155,7 @@ import { createIndexedLifetimeAccounting, tallyAuditedLifetimeDispatches, type L
 import { defaultCreditOverridePath, planCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
   type CreditOverrideRow, type CreditReadState, type CreditStore, type ProjectPlanPhases } from "./lib/status.js";
 import type { DependencyMergeEvidence } from "./lib/plan.js";
+import { recordUnassignedRunVerdict } from "./lib/non-worker-verdict.js";
 export { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import {
   GitFetchError, PLAN_SYNC_GIT_TIMEOUT_MS, PlanSyncGitTimeoutError, createPlanRevisionStore,
@@ -10892,8 +10893,9 @@ export function predecessorTranscriptPromptLines(paths: readonly string[]): stri
   ];
 }
 
-export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<string, unknown>) => void,
+export function benchmarkRunLedgerLogger(rawWrite: (step: string, fields: Record<string, unknown>) => void,
   stackEvidence: BenchmarkStackEvidence = {}, initialWork: BenchmarkWorkInput = {}) {
+  const write = recordUnassignedRunVerdict(rawWrite);
   const assignments = new Set<string>();
   let work = initialWork;
   return (step: string, extra: Record<string, unknown> = {}): void => {
