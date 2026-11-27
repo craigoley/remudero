@@ -26298,8 +26298,25 @@ export function onCircuitBreakWithVerifier(
     const page = () => escalateCircuitBreak(task, { owner: ctx.owner, repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, issues: ctx.issues });
     if (!ctx.judge) return page();
     // Settles off the selection pass; a throw anywhere still pages (the judge route never throws on its own).
-    return judgeDispatchBreak(task, detail, stall.verdict, { repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, judge: ctx.judge, mainEvidence: ctx.mainEvidence })
-      .then((decision) => { if (decision === "escalate") page(); }, page);
+    let judgeWithheld = false;
+    const judge = async (input: Parameters<DispatchBreakJudge>[0]) => {
+      try {
+        return await ctx.judge!(input);
+      } catch (error) {
+        if (error instanceof WorkerNotStartedError) {
+          // The daemon retired before this judge could run. Keep this breaker due for its successor.
+          judgeWithheld = true;
+          return undefined;
+        }
+        throw error;
+      }
+    };
+    return judgeDispatchBreak(task, detail, stall.verdict, { repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, judge, mainEvidence: ctx.mainEvidence })
+      .then((decision) => { if (!judgeWithheld && decision === "escalate") page(); }, (error: unknown) => {
+        // A retired daemon never got a ruling. Leave the breaker due for its successor, while real
+        // judge failures retain the established page-as-backstop behavior.
+        if (!judgeWithheld && !(error instanceof WorkerNotStartedError)) page();
+      });
   };
 }
 

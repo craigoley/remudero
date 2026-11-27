@@ -8,6 +8,7 @@ import { productionDispatchBreakJudge } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { onCircuitBreakWithVerifier } from "../src/run-task.js";
+import { WorkerNotStartedError } from "#src/lib/worker.js";
 import type { Task } from "../src/lib/plan.js";
 import {
   decideStallVerdict,
@@ -299,6 +300,15 @@ test("W1-T7742: a tripped breaker pages only when its judge rules escalate", asy
     assert.equal(pages.length, 3, "escalate, a throwing judge and an unparseable ruling each keep the page");
     const rulings = readLedgerLines(ledgerPath).filter((row) => row.step === DISPATCH_BREAKER_JUDGED_STEP).map((row) => row.decision);
     assert.deepEqual(rulings, ["continue", "escalate", "unavailable", "unavailable"]);
+
+    const markersBeforeWithheld = readLedgerLines(ledgerPath).filter((row) => row.step === "dispatch.circuit_broken.escalated").length;
+    await onCircuitBreakWithVerifier(gate, () => undefined, { ...base,
+      judge: async () => { throw new WorkerNotStartedError("admission-abandoned"); } })(breakerTask("W1-N"));
+    assert.equal(pages.length, 3, "a retired daemon whose judge never started does not page the operator");
+    assert.deepEqual(readLedgerLines(ledgerPath).filter((row) => row.step === DISPATCH_BREAKER_JUDGED_STEP)
+      .map((row) => row.decision), [...rulings, "unavailable"], "the withheld judge remains an un-settled ruling for the successor");
+    assert.equal(readLedgerLines(ledgerPath).filter((row) => row.step === "dispatch.circuit_broken.escalated").length,
+      markersBeforeWithheld, "a withheld judge writes no permanent escalation marker");
 
     let asked = 0;
     await onCircuitBreakWithVerifier(gate, () => undefined, { ...base,
