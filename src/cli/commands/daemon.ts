@@ -42,9 +42,10 @@ import {
   OPENWEIGHT_PRICES,
 } from "../../lib/worker-provider.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "../../lib/provider-routing-status.js";
+import { readOpsPrJobLog } from "../../lib/ops-pr-watch.js";
 import { readFileIfExists } from "../../lib/fs-race-safe.js";
 import { mergedInLastDayAsync } from "../../lib/fleet-lane.js";
-import { startDaemonSreLane, type LightPassScope, type ReviewAdmissionGate, type SweepCycleOutcome } from "../../lib/daemon.js";
+import { startDaemonSreLane, isOpsPullRequestWatchRow, type LightPassScope, type ReviewAdmissionGate, type SweepCycleOutcome } from "../../lib/daemon.js";
 import { REGISTERED_GARDEN_NAMES, createGardenFlightRegistry, gardenAndJudgeUnits, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "../../lib/garden-registry.js";
 import { gardenSchedule } from "../../lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "../../lib/gardener-runtime.js";
@@ -84,7 +85,7 @@ import { appendLedger, markDaemonProcessActor } from "../../lib/ledger.js";
 import { clockFromMillisFn, fixedClock, systemClock, type Clock } from "../../lib/clock.js";
 import { getHeapStatistics } from "node:v8";
 import { sweepInflightLocksWithReceipts } from "../../lib/benchmark-run.js";
-import { ledgerMemoHolders, readLedgerUnionRecordsSync } from "../../lib/ledger-union.js";
+import { ledgerMemoHolders, readLedgerUnionRawLinesSync, readLedgerUnionRecordsSync } from "../../lib/ledger-union.js";
 import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../../lib/measurement-cadence.js";
 import { loadPlan, type Plan } from "../../lib/plan.js";
 import { createPlanTaskMover, opsCatalogOutcomeReader, planTaskMovePorts, type PlanTaskMoveFlag, type PlanTaskMoveSwitch } from "../../lib/plan-task-move-janitor.js";
@@ -2719,7 +2720,21 @@ export async function daemonCommand(
         },
         readOpsTaskDispatch,
         // W1-T14865: the ops catalog's open pull requests are watched for a required check left red on an unchanged head.
-        opsPullRequestWatch: { repository: () => opsSourceRepository, api: deps.opsCatalogApi ?? defaultOpsCatalogApi(), escalate: raiseDuplicate },
+        opsPullRequestWatch: {
+          repository: () => opsSourceRepository,
+          api: deps.opsCatalogApi ?? defaultOpsCatalogApi(),
+          readJobLog: readOpsPrJobLog,
+          // Read this decision's rows from the live ledger and rotations. If an archive cannot
+          // be read, refuse the watch pass instead of forgetting a prior escalation.
+          ledgerLines: () => {
+            const read = readLedgerUnionRawLinesSync(dirname(ledgerPathFor(config)), {
+              keep: isOpsPullRequestWatchRow, refuseIncomplete: true,
+            });
+            if (!read.ok) throw new Error(`ops pull request ledger history unreadable: ${read.unread.join(", ") || "incomplete"}`);
+            return read.rawLines;
+          },
+          escalate: raiseDuplicate,
+        },
         // W1-T13681: the move janitor reads move_public_tasks on every tick; absent or false, it does nothing.
         planTaskMover: createPlanTaskMover(planTaskMovePorts({
           publicRoot: targetCheckoutRoot, publicRepository: `${target.owner}/${target.repo}`,

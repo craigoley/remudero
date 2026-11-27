@@ -10,6 +10,7 @@
 import type { Escalation } from "./escalate.js";
 import type { Clock } from "./clock.js";
 import type { OpsCatalogApi } from "./ops-catalog-source.js";
+import { ghTextAsync, type GhAsyncExecutor } from "./github-transport.js";
 
 export const OPS_PR_RED_STALLED_STEP = "ops_pr.red_stalled";
 export const OPS_PR_WATCH_UNREADABLE_STEP = "ops_pr.watch_unreadable";
@@ -20,10 +21,17 @@ export const OPS_PR_RED_STALLED_AFTER_MS = 60 * 60_000;
 // PRIMARY CONTROL: the daemon reads the ops pull requests at most this often (W1-T14865 design, step 2).
 export const OPS_PR_WATCH_EVERY_MS = 15 * 60_000;
 
+/** The production job-log adapter: Actions log endpoints return plain text, not JSON. */
+export function readOpsPrJobLog(path: string, executor?: GhAsyncExecutor): Promise<string> {
+  return ghTextAsync(["api", path], { fresh: true }, executor);
+}
+
 export interface OpsPrWatchInput {
   /** The ops catalog repository, `owner/name`: the same one the daemon reads the ops plan from. */
   repository: string;
   api: OpsCatalogApi;
+  /** Plain-text GitHub job log transport; logs are not JSON responses. */
+  readJobLog?: (path: string) => Promise<string>;
   nowMs: number;
   /** The ledger's raw lines; a pull request already escalated at its head is not escalated again. */
   ledgerLines: readonly string[];
@@ -146,11 +154,15 @@ export async function watchOpsPullRequests(input: OpsPrWatchInput): Promise<OpsP
         const job = staleFailedRequiredJob(Array.isArray(jobs.jobs) ? jobs.jobs : [], required, input.nowMs);
         if (job === undefined) continue;
         let errorLine: string | undefined;
-        try { errorLine = firstErrorLine(await input.api(`repos/${repo}/actions/jobs/${job.id}/logs`)); }
-        catch (error) { void error; errorLine = undefined; /* an unreadable log leaves the line out */ }
+        // A log read is part of the evidence for the escalation. If it fails, the outer catch
+        // records the watch as unreadable instead of sending a success-shaped partial notice.
+        errorLine = firstErrorLine(input.readJobLog
+          ? await input.readJobLog(`repos/${repo}/actions/jobs/${job.id}/logs`)
+          : await input.api(`repos/${repo}/actions/jobs/${job.id}/logs`));
         const red: RedStalledPull = { prNumber, prUrl: String(pull.html_url ?? `https://github.com/${repo}/pull/${prNumber}`), headSha,
           check: job.name, failedAt: job.completedAt, ...(errorLine === undefined ? {} : { firstErrorLine: errorLine }) };
         const url = input.escalate?.(escalationFor(red, repo));
+        if (typeof url !== "string" || url.length === 0) continue;
         input.log(OPS_PR_RED_STALLED_STEP, { repository: repo, pr_number: prNumber, head_sha: headSha, check: red.check,
           failed_at: red.failedAt, required_source: required === undefined ? "every_job" : "branch_protection", first_error_line: errorLine ?? null, escalation_url: typeof url === "string" ? url : null });
         done.add(`${prNumber}@${headSha}`);
@@ -169,6 +181,10 @@ export interface OpsPullRequestWatch {
   /** The ops catalog repository, `owner/name`; undefined until the daemon knows which one it reads. */
   repository: () => string | undefined;
   api: OpsCatalogApi;
+  /** Plain-text transport for workflow job logs. */
+  readJobLog?: (path: string) => Promise<string>;
+  /** Optional durable ledger-union reader, used to preserve once-per-head memory over rotation. */
+  ledgerLines?: () => readonly string[];
   escalate?: (escalation: Escalation) => unknown;
 }
 
@@ -195,8 +211,18 @@ export function opsPullRequestWatchTick(
     if (repository === undefined) return undefined;
     lastAtMs = nowMs;
     inFlight = true;
-    return ports.run({ repository, api: watch.api, nowMs, ledgerLines: ports.ledgerLines(), log: ports.log,
-      ...(watch.escalate ? { escalate: watch.escalate } : {}) })
+    let input: OpsPrWatchInput;
+    try {
+      input = { repository, api: watch.api, nowMs, ledgerLines: watch.ledgerLines?.() ?? ports.ledgerLines(), log: ports.log,
+        ...(watch.readJobLog ? { readJobLog: watch.readJobLog } : {}),
+        ...(watch.escalate ? { escalate: watch.escalate } : {}) };
+    } catch (error) {
+      inFlight = false;
+      try { ports.log(OPS_PR_WATCH_UNREADABLE_STEP, { repository, reason: String((error as Error)?.message ?? error).slice(0, 300) }); }
+      catch (logError) { void logError; /* the watch is advisory; a lost row never stops the daemon */ }
+      return Promise.resolve();
+    }
+    return ports.run(input)
       .then(() => undefined, (error: unknown) => {
         try { ports.log(OPS_PR_WATCH_UNREADABLE_STEP, { repository, reason: String((error as Error)?.message ?? error).slice(0, 300) }); }
         catch (logError) { void logError; /* the watch is advisory; a lost row never stops the daemon */ }
