@@ -1125,3 +1125,106 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
   }
   return result.decision.effectiveWidth;
 }
+
+/**
+ * W1-T15116 — THE DAEMON'S OWN CGROUP, READ PER ADMISSION. MEASURED 2026-11-27: one sweep pass admitted four reviews in
+ * three seconds against one pre-admission PSI and MemAvailable reading, and their children (1.4 to 2.0 GB each) held the
+ * daemon cgroup at memory.current 18.7 GB over memory.high 17.5 GB for over 80 minutes. These are the readings the pass
+ * re-takes before EACH review it admits. Every outcome is its own kind, so no caller can mistake one for another:
+ * `bounded` (memory.high is a number), `unbounded` (memory.high reads `max`: the kernel never throttles at high) and
+ * `unread` (a file could not be read; the reason names which).
+ *
+ * The working set is memory.current less memory.stat's inactive_file: page cache the kernel reclaims first at
+ * memory.high, before it throttles anything. Charging it would hold reviews on a healthy, cache-full container.
+ */
+export type DaemonCgroupMemoryReading =
+  | { kind: "bounded"; cgroupDir: string; highMib: number; currentMib: number; workingSetMib: number; inactiveFileMib?: number;
+      /** memory.stat could not be read: the working set is memory.current whole, which can only overstate it. */
+      statUnread?: string }
+  | { kind: "unbounded"; cgroupDir: string }
+  | { kind: "unread"; reason: string };
+
+export interface DaemonCgroupMemoryIo {
+  readFile?: (path: string) => string;
+  /** The cgroup v2 mount. Default /sys/fs/cgroup. */
+  cgroupMount?: string;
+  /** This process's /proc/<pid>/cgroup. Default /proc/self/cgroup. */
+  selfCgroupFile?: string;
+}
+
+const MIB = 1024 * 1024;
+
+export function readDaemonCgroupMemory(io: DaemonCgroupMemoryIo = {}): DaemonCgroupMemoryReading {
+  const read = io.readFile ?? ((path: string) => readFileSync(path, "utf8"));
+  const mount = io.cgroupMount ?? "/sys/fs/cgroup";
+  let membership: string;
+  try {
+    membership = read(io.selfCgroupFile ?? "/proc/self/cgroup");
+  } catch (error) {
+    return { kind: "unread", reason: `cgroup membership unreadable: ${String((error as Error)?.message ?? error)}` };
+  }
+  // cgroup v2 is the single `0::<path>` line; with a private cgroup namespace the path is `/`.
+  const path = /^0::(\/.*)$/m.exec(membership)?.[1];
+  if (path === undefined) return { kind: "unread", reason: "no cgroup v2 membership line (0::) in the process's cgroup file" };
+  const cgroupDir = join(mount, path);
+  let highText: string;
+  let currentText: string;
+  try {
+    highText = read(join(cgroupDir, "memory.high")).trim();
+    currentText = read(join(cgroupDir, "memory.current")).trim();
+  } catch (error) {
+    return { kind: "unread", reason: `${cgroupDir} memory.high or memory.current unreadable: ${String((error as Error)?.message ?? error)}` };
+  }
+  if (highText === "max") return { kind: "unbounded", cgroupDir };
+  if (!/^\d+$/.test(highText) || !/^\d+$/.test(currentText)) {
+    return { kind: "unread", reason: `${cgroupDir} memory.high "${highText}" or memory.current "${currentText}" is not a byte count` };
+  }
+  const highMib = Number(highText) / MIB;
+  const currentMib = Number(currentText) / MIB;
+  try {
+    const inactive = /^inactive_file (\d+)$/m.exec(read(join(cgroupDir, "memory.stat")))?.[1];
+    if (inactive === undefined) {
+      return { kind: "bounded", cgroupDir, highMib, currentMib, workingSetMib: currentMib, statUnread: "no inactive_file line in memory.stat" };
+    }
+    const inactiveFileMib = Number(inactive) / MIB;
+    return { kind: "bounded", cgroupDir, highMib, currentMib, workingSetMib: Math.max(0, currentMib - inactiveFileMib), inactiveFileMib };
+  } catch (error) {
+    return { kind: "bounded", cgroupDir, highMib, currentMib, workingSetMib: currentMib,
+      statUnread: `memory.stat unreadable: ${String((error as Error)?.message ?? error)}` };
+  }
+}
+
+/** W1-T15116 — what one more review admission would add: the admitted reviews still running, each charged its
+ *  unrealized part (its learned peak less what its running tree already holds, which the working set already counts),
+ *  plus the candidate's own learned peak, whole. */
+export interface ReviewMemoryHighCharge {
+  /** Admitted full reviews still running in this process. */
+  admitted: number;
+  /** Those reviews' charge, MiB: the sum of max(0, estimate - resident) (sweep.ts fixAdmissionChargeMib). */
+  admittedChargeMib: number;
+  /** The candidate's learned peak, MiB. */
+  candidateMib: number;
+}
+
+export type ReviewMemoryHighVerdict = { admit: true; why: "fits" | "unbounded" | "unread" } | { admit: false; reason: string };
+
+/**
+ * W1-T15116 — admit the next review only while the daemon cgroup's working set, plus this pass's admitted reviews'
+ * charge, plus the candidate, stays at or under memory.high. No count, width or time bound: room admits every
+ * candidate (INVARIANT room-still-admits). `unbounded` and `unread` admit as before this task, and say which they were;
+ * the memory-pressure and memory-reserve sheds of the width above are untouched. Pure.
+ */
+export function reviewMemoryHighVerdict(reading: DaemonCgroupMemoryReading, charge: ReviewMemoryHighCharge): ReviewMemoryHighVerdict {
+  if (reading.kind === "unbounded") return { admit: true, why: "unbounded" };
+  if (reading.kind === "unread") return { admit: true, why: "unread" };
+  const projected = reading.workingSetMib + charge.admittedChargeMib + charge.candidateMib;
+  if (projected <= reading.highMib) return { admit: true, why: "fits" };
+  const mib = (n: number): string => `${Math.round(n)} MiB`;
+  return {
+    admit: false,
+    reason: `held for a later pass: daemon cgroup memory.high headroom (W1-T15116) — working set ${mib(reading.workingSetMib)}` +
+      ` (memory.current ${mib(reading.currentMib)}${reading.inactiveFileMib === undefined ? "" : `, inactive_file ${mib(reading.inactiveFileMib)}`})` +
+      ` + ${charge.admitted} admitted review(s) still running charged ${mib(charge.admittedChargeMib)}` +
+      ` + this review's learned peak ${mib(charge.candidateMib)} = ${mib(projected)} > memory.high ${mib(reading.highMib)}`,
+  };
+}

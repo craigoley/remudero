@@ -281,7 +281,10 @@ import type {
 import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, readDepReviewHoldState, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { DEP_REVIEW_REFUSED_ASK_RETIRED_STEP, retireDepReviewRefusedAsk } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
-import { readReviewHostObservation, reviewYieldsReReviews, selectRuntimeReviewWidth } from "./review-capacity.js";
+import {
+  readDaemonCgroupMemory, readReviewHostObservation, reviewMemoryHighVerdict, reviewYieldsReReviews, selectRuntimeReviewWidth,
+  type DaemonCgroupMemoryReading,
+} from "./review-capacity.js";
 import {
   flushLateSharedHostMemoryPass, flushSharedHostMemoryPass, openSharedHostMemoryPass, type SharedHostMemoryPass,
 } from "./lane-governor.js";
@@ -18218,6 +18221,9 @@ export interface SweepDeps {
   };
   /** W1-T3491 — fleet hold checked before review or repair admission; direct CLI/test callers omit it. */
   workerAdmissionHold?: (kind?: "review") => string | undefined;
+  /** W1-T15116 — the readings each full review admission is judged on against the daemon cgroup's memory.high. Absent:
+   *  {@link productionReviewMemoryHighReaders} in a live process, none for a direct CLI or test caller. */
+  reviewMemoryHigh?: ReviewMemoryHighReaders;
   /** Re-read the shared PAUSE ref for a recorded fleet-held fix failure. */
   fixDispatchFleetHold?: () => string | undefined;
   /** W1-T13750: the stuck-state registry's probe for a fix-dispatch cause it names; undefined for any other cause. */
@@ -21838,6 +21844,14 @@ export function inFlightReviewCount(): number {
   return inFlightReviewRuns.size;
 }
 
+/** W1-T15116: this process's admitted full reviews still running, from every pass and surface (a light pass's
+ *  per-PR runSweep included), each of which the memory.high admission charges until it settles. */
+export function inFlightFullReviewCount(): number {
+  let n = 0;
+  for (const review of inFlightReviewRuns.values()) if (review.kind === "full-review") n++;
+  return n;
+}
+
 /** W1-T11340: abort this process's in-process review of `prNumber` once it has run `ceilingMs` or longer, returning its
  *  settlement and age. `undefined` when none is registered (a child review, or none) or it is under the ceiling. */
 export function abortInProcessReviewPastCeiling(prNumber: number, ceilingMs: number, now: number):
@@ -22708,6 +22722,28 @@ export function productionFixAdmissionReaders(deps: Pick<SweepDeps, "readFixPres
     readEstimate: (workerClass) => classEstimate(workerClass),
     readTypical: (workerClass) => classTypical(workerClass),
     readResidents: () => productionFixAdmissionResidents(dirname(dirname(deps.ledgerPath))),
+  };
+}
+
+/** W1-T15116 — what a pass re-reads before each full review it admits: the daemon cgroup, the review class's learned
+ *  peak, and the live review trees' residents (each admitted review is charged only what its tree does not yet hold). */
+export interface ReviewMemoryHighReaders {
+  read: () => DaemonCgroupMemoryReading;
+  estimateMib: () => number;
+  /** Live review trees' resident MiB; undefined when unread, so every admitted review is charged whole. */
+  residents: () => readonly number[] | undefined;
+}
+
+/** W1-T15116: the production readers, in a live process only (the fix admission readers' rule). A test or CLI caller
+ *  that injects nothing reads no host cgroup. The learned estimate and residents fall back as the fix lane's do: the
+ *  class default when unmeasured, every review charged whole when the residency cannot be read. */
+export function productionReviewMemoryHighReaders(deps: Pick<SweepDeps, "fixProgressJudge" | "ledgerPath">,
+  live = deps.fixProgressJudge !== undefined): ReviewMemoryHighReaders | undefined {
+  if (!live) return undefined;
+  return {
+    read: () => readDaemonCgroupMemory(),
+    estimateMib: () => classEstimate("review").estimateMib,
+    residents: () => productionFixAdmissionResidents(dirname(dirname(deps.ledgerPath)))?.review,
   };
 }
 
@@ -30305,6 +30341,22 @@ async function runSweepPinned(
   const closeAdmissions = (reason: string): void => {
     admissionStopReason ??= reason;
   };
+  // W1-T15116 — A RUNNING CHARGE, NOT ONE READING. Every full review still running here (this pass's, and any earlier
+  // pass's or light refill's) is charged its learned peak less what its tree already holds, and the next is judged
+  // against the daemon cgroup's memory.high, re-read for each admission. startReview registers an admitted review
+  // synchronously (trackInFlightReview), so the review admitted just before the next one is already charged.
+  const memoryHigh = deps.reviewMemoryHigh ?? productionReviewMemoryHighReaders(deps);
+  const reviewMemoryHighHold = (): string | undefined => {
+    if (memoryHigh === undefined) return undefined;
+    const estimateMib = memoryHigh.estimateMib();
+    const admitted = inFlightFullReviewCount();
+    const verdict = reviewMemoryHighVerdict(memoryHigh.read(), {
+      admitted,
+      admittedChargeMib: fixAdmissionChargeMib(admitted, estimateMib, admitted > 0 ? memoryHigh.residents() : undefined),
+      candidateMib: estimateMib,
+    });
+    return verdict.admit ? undefined : verdict.reason;
+  };
 
   const takeNextReview = (lane: ReviewLane): (typeof orderedReviews)[number] | undefined => {
     if (admissionStopReason !== undefined || lane.stop !== undefined) return undefined;
@@ -30332,6 +30384,13 @@ async function runSweepPinned(
     }
     const job = lane.jobs[lane.next];
     if (job === undefined) return undefined;
+    if (job.mode.kind === "full-review") {
+      const held = reviewMemoryHighHold();
+      if (held !== undefined) {
+        closeAdmissions(held);
+        return undefined;
+      }
+    }
     lane.next += 1;
     return job;
   };
