@@ -22738,18 +22738,18 @@ export function productionFixAdmissionReaders(deps: Pick<SweepDeps, "readFixPres
   };
 }
 
-/** W1-T15116 — what a pass re-reads before each full review it admits: the daemon cgroup, the review class's learned
- *  peak, and the live review trees' residents (each admitted review is charged only what its tree does not yet hold). */
+/** W1-T15116 — what a pass re-reads before each full review it admits: the daemon cgroup and the review class's learned
+ *  peak. */
 export interface ReviewMemoryHighReaders {
   read: () => DaemonCgroupMemoryReading;
   estimateMib: () => number;
-  /** Live review trees' resident MiB; undefined when unread, so every admitted review is charged whole. */
+  /** Aggregate live review RSS has no admission identity and must not offset a specific review's charge. */
   residents: () => readonly number[] | undefined;
 }
 
 /** W1-T15116: the production readers, in a live process only (the fix admission readers' rule). A test or CLI caller
- *  that injects nothing reads no host cgroup. The learned estimate and residents fall back as the fix lane's do: the
- *  class default when unmeasured, every review charged whole when the residency cannot be read. */
+ *  that injects nothing reads no host cgroup. A review tree's RSS is not subtracted unless it can be attributed to that
+ *  admitted review; the shared memory ledger has no such identity, so the learned peak remains charged. */
 export function productionReviewMemoryHighReaders(deps: Pick<SweepDeps, "fixProgressJudge" | "ledgerPath">,
   live = deps.fixProgressJudge !== undefined): ReviewMemoryHighReaders | undefined {
   if (!live) return undefined;
@@ -30355,9 +30355,9 @@ async function runSweepPinned(
     admissionStopReason ??= reason;
   };
   // W1-T15116 — A RUNNING CHARGE, NOT ONE READING. Every full review still running here (this pass's, and any earlier
-  // pass's or light refill's) is charged its learned peak less what its tree already holds, and the next is judged
-  // against the daemon cgroup's memory.high, re-read for each admission. startReview registers an admitted review
-  // synchronously (trackInFlightReview), so the review admitted just before the next one is already charged.
+  // pass's or light refill's) is charged its learned peak. The cgroup reader gives no per-review identity, so subtracting
+  // every live review tree's RSS could let an unrelated review erase this admission's charge. Re-read memory.high for
+  // each admission. startReview registers synchronously, so the review admitted just before the next one is charged.
   const memoryHigh = deps.reviewMemoryHigh ?? productionReviewMemoryHighReaders(deps);
   const reviewMemoryHighHold = (): string | undefined => {
     if (memoryHigh === undefined) return undefined;
@@ -30365,7 +30365,7 @@ async function runSweepPinned(
     const admitted = inFlightFullReviewCount();
     const verdict = reviewMemoryHighVerdict(memoryHigh.read(), {
       admitted,
-      admittedChargeMib: fixAdmissionChargeMib(admitted, estimateMib, admitted > 0 ? memoryHigh.residents() : undefined),
+      admittedChargeMib: admitted * estimateMib,
       candidateMib: estimateMib,
     });
     return verdict.admit ? undefined : verdict.reason;

@@ -10,7 +10,7 @@
  * Room admits every candidate: no count, width or time bound (INVARIANT room-still-admits).
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -30,6 +30,7 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const NOW = Date.parse("2026-11-27T09:28:50Z");
 const MIB = 1024 * 1024;
+const tempDirs: string[] = [];
 
 function width(n: number): SweepPolicy {
   return { ...DEFAULT_SWEEP_POLICY, reviewLanes: n, reviewLaneMin: n, reviewLaneMax: n };
@@ -65,7 +66,8 @@ interface Harness {
 }
 
 /** Every review is held running until released, so each admission is judged with the earlier ones still in flight. */
-function harness(reading: () => DaemonCgroupMemoryReading, estimateMib = 1_500): Harness {
+function harness(reading: () => DaemonCgroupMemoryReading, estimateMib = 1_500,
+  residentTrees: readonly number[] | undefined = []): Harness {
   const started: number[] = [];
   const gates: Array<() => void> = [];
   const h: Harness = { deps: undefined as unknown as SweepDeps, started, reads: 0, releaseAll: () => gates.splice(0).forEach((g) => g()) };
@@ -75,8 +77,10 @@ function harness(reading: () => DaemonCgroupMemoryReading, estimateMib = 1_500):
       return reading();
     },
     estimateMib: () => estimateMib,
-    residents: () => [], // no tree's resident memory is visible yet: each running review is charged its whole peak
+    residents: () => residentTrees,
   };
+  const tempDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t15116-`));
+  tempDirs.push(tempDir);
   h.deps = withFullSweepRepairAdmission({
     log: () => {},
     arm: () => "armed",
@@ -87,7 +91,7 @@ function harness(reading: () => DaemonCgroupMemoryReading, estimateMib = 1_500):
       started.push(p.prNumber);
       await new Promise<void>((resolve) => gates.push(resolve));
     },
-    ledgerPath: join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t15116-`)), "ledger.ndjson"),
+    ledgerPath: join(tempDir, "ledger.ndjson"),
     runId: "SWEEP-T15116-1",
     now: () => NOW,
     reviewMemoryHigh: memory,
@@ -114,6 +118,7 @@ afterEach(async () => {
   settleChildWork("t15116-child-review");
   live.splice(0).forEach((h) => h.releaseAll());
   await settle();
+  tempDirs.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true }));
 });
 
 test("W1-T15116 criterion 1: one pass cannot admit reviews past the cgroup's memory.high headroom", async () => {
@@ -169,6 +174,20 @@ test("W1-T15116: child-hosted reviews stay charged after postReview returns", as
   await pass;
   await settle();
   assert.equal(inFlightFullReviewCount(), 0);
+});
+
+test("W1-T15116: an unrelated review tree's RSS cannot offset an admitted review charge", async () => {
+  // The unrelated tree's 1,500 MiB is already included in memory.current. Because no per-review identity connects
+  // that tree to this pass's admitted review, it cannot reduce the admitted review's learned 1,500 MiB charge.
+  // Correctly only one candidate fits: 11,500 + 1,500 + 1,500 would cross the 14,000 MiB high mark.
+  const h = harness(() => bounded(11_500, 14_000), 1_500, [1_500]);
+  const pass = runSweep(four(21970), h.deps, width(4));
+  await settle();
+  assert.deepEqual(h.started, [21970], "unattributed review RSS does not erase the first admitted review's charge");
+  assert.ok(h.reads >= 2, "the second candidate is checked against the admitted review's running charge");
+  h.releaseAll();
+  await pass;
+  await settle();
 });
 
 test("W1-T15116 criterion 2: a pass with headroom admits every candidate", async () => {
@@ -243,7 +262,9 @@ test("W1-T15116: the real reader and the production readers run against this hos
   assert.ok(["bounded", "unbounded", "unread"].includes(real.kind), JSON.stringify(real));
   if (real.kind === "bounded") assert.ok(real.highMib > 0 && real.workingSetMib >= 0 && real.workingSetMib <= real.currentMib);
 
-  const ledgerPath = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t15116-prod-`)), "state", "ledger.ndjson");
+  const tempDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t15116-prod-`));
+  tempDirs.push(tempDir);
+  const ledgerPath = join(tempDir, "state", "ledger.ndjson");
   assert.equal(productionReviewMemoryHighReaders({ ledgerPath }), undefined, "a caller with no live judge reads no host cgroup");
   const live = productionReviewMemoryHighReaders({ ledgerPath }, true);
   assert.ok(live);
