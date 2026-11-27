@@ -22784,7 +22784,9 @@ export function productionFixMemoryCalm(
  *
  * W1-T15115: `live` (non-enumerable too) lists every live entry, the unread ones with no resident, each fix marked
  * `chargeReleased` when a fix admission lock under `<root>/state/fix-admission` reads charge_released for a pid its
- * record names. The locks are read only when a live fix entry is.
+ * record names. The locks are read only when a live fix entry is. An entry whose record names this process (`selfPid`)
+ * is the reading process's own, as a run child's own reservation is: its memory is this controller's, never a live child
+ * charged beside it, so it is left out of `live` (each worker charged once).
  */
 export function productionFixAdmissionResidents(
   root: string,
@@ -22794,6 +22796,7 @@ export function productionFixAdmissionResidents(
   readSurvival: (workerClass: "fix", ageMs: number) => Survival = (workerClass, ageMs) => classSurvival(workerClass, ageMs),
   readFixMemoryCalm: () => boolean = () => productionFixMemoryCalm(),
   readChargeReleasedPids: () => ReadonlySet<number> = () => chargeReleasedFixPids(join(root, "state", "fix-admission")),
+  selfPid: number = process.pid,
 ): FixAdmissionResidents {
   const reading = readLedger(root);
   if (reading === undefined || reading.state === "unreadable") return undefined;
@@ -22819,15 +22822,17 @@ export function productionFixAdmissionResidents(
     if ("unmeasured" in survival || survival.factor > 1 - ESTIMATE_LEARNING.typicalQuantile) pendingFix++;
   });
   let released: ReadonlySet<number> | undefined;
-  const children = live.map((entry, i): LiveHostedChild => {
+  const children = live.flatMap((entry, i): LiveHostedChild[] => {
     const resident = residents[i]!;
     const workerClass = entry.workerClass as FixAdmissionClass;
+    const recorded = recordedEntryPids(readFile, entry.path);
+    if (recorded.includes(selfPid)) return [];
     let chargeReleased = false;
     if (workerClass === "fix") {
       const pids = released ??= readChargeReleasedPids();
-      chargeReleased = pids.size > 0 && recordedEntryPids(readFile, entry.path).some((pid) => pids.has(pid));
+      chargeReleased = pids.size > 0 && recorded.some((pid) => pids.has(pid));
     }
-    return { id: entry.id, workerClass, ...("unread" in resident ? {} : { residentMib: resident.mib }), chargeReleased };
+    return [{ id: entry.id, workerClass, ...("unread" in resident ? {} : { residentMib: resident.mib }), chargeReleased }];
   });
   Object.defineProperties(out, {
     pendingFix: { value: pendingFix }, readFixMemoryCalm: { value: readFixMemoryCalm }, live: { value: children },

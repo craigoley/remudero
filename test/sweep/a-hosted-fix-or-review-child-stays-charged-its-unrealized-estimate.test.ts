@@ -64,8 +64,9 @@ function container(trees: Tree[] = []) {
     return text;
   };
   /** The production residency reader over this store; `root` holds the fix admission locks (state/fix-admission). */
-  const residents = (root = "/no-such-root"): FixAdmissionResidents => productionFixAdmissionResidents(root, () => reading(), read,
-    () => ({ estimateMib: TYPICAL_MIB, samples: 50 }), () => ({ factor: 0.2, samples: 50 }), () => false);
+  const residents = (root = "/no-such-root", selfPid?: number): FixAdmissionResidents => productionFixAdmissionResidents(root,
+    () => reading(), read, () => ({ estimateMib: TYPICAL_MIB, samples: 50 }), () => ({ factor: 0.2, samples: 50 }), () => false,
+    undefined, selfPid);
   return { live, residents };
 }
 
@@ -123,6 +124,13 @@ test("W1-T15115 criterion 1: live hosted children are charged their unrealized e
   assert.equal(refusal.fix_admissions_available, 0);
   assert.equal(refusal.pending_reservations, 1);
   assert.equal(refusal.fix_charge_mib, FIX_MIB, "the admitted, unspawned fix is charged whole");
+
+  // Each worker once: an entry whose record names the reading process is that process's own (a run child's own
+  // reservation), charged by its own controller, never as a live child beside it.
+  const own: Row[] = [];
+  controller({ rows: own, residents: () => box.residents(undefined, 41) });
+  assert.equal(own[0]!.live_child_charge_mib, 4 * (REVIEW_MIB - 550), "the reading process's own fix entry is not a live child");
+  assert.equal(own[0]!.live_child_count, 4);
 
   // The pure rule: each live tree max(0, estimate - resident); an unreadable one whole; past its estimate, nothing.
   assert.equal(liveHostedChildChargeMib([
