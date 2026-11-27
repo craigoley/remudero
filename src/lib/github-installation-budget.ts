@@ -113,6 +113,8 @@ export interface InstallationBudget {
   noteRead(): void;
   /** Admit and count a transport read as one atomic operation across the daemon's threads. */
   claimRead(): InstallationBudgetAdmit;
+  /** W1-T14892: take back one claimed read whose answer was a 304, which GitHub does not count. */
+  refundRead?(): void;
   /** Deduplicate each window, preserving a later GitHub refusal even after its throttle was drained. */
   noteThrottle(reason: "share" | "reserve" | "refused"): void;
   /** The allowance of the latest reading, or undefined when there is no limit. */
@@ -282,6 +284,17 @@ export function createInstallationBudget(opts: {
           if (consumers !== undefined) shared[Slot.Reads] += 1n;
         }
         return admitted;
+      });
+    },
+    refundRead() {
+      if (shared === undefined) {
+        if (windowReads > 0) windowReads -= 1;
+        if (consumers !== undefined && reads > 0) reads -= 1;
+        return;
+      }
+      withState(shared, () => {
+        if (shared[Slot.WindowReads] > 0n) shared[Slot.WindowReads] -= 1n;
+        if (consumers !== undefined && shared[Slot.Reads] > 0n) shared[Slot.Reads] -= 1n;
       });
     },
     noteThrottle(reason) {

@@ -76,8 +76,8 @@ test("an active risk-judge ask survives automatic verification holds and unavail
     assert.notEqual(classifyProposal(proposal(sibling), undefined, ctx).state, "retired",
       `a verify-human release does not silently resolve the separate ${sibling} finding`);
   }
-  assert.equal(classifyProposal(proposal(`verify-human:${ID}`), undefined, ctx).state, "not_ready",
-    "an untyped verify-human ID cannot borrow release authority");
+  assert.equal(classifyProposal(proposal(`verify-human:${ID}`), undefined, ctx).state, "retired",
+    "W1-T14976: an untyped verify-human ask is answered by its own task's release");
   const typedVerification = stampVerificationAsk(proposal(`verify-human:${ID}`), ID);
   assert.equal(classifyProposal(typedVerification, undefined, ctx).state, "retired",
     "positive control: an unchanged producer-owned verification ask uses its exact release");

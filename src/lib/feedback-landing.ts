@@ -1354,8 +1354,15 @@ function lostLease(e: unknown): boolean {
   return /\(stale info\)/.test(`${String((e as Error)?.message ?? e)}\n${String((e as { stderr?: unknown })?.stderr ?? "")}`);
 }
 
-function pushFailure(branch: string, e: unknown): string {
-  return `${branch} was not pushed, and no lease was lost, so nothing was re-derived: ${String((e as Error)?.message ?? e)}`;
+/** W1-T15032: the failure text names the error and every cause in its chain; a cause is where the real reason is. */
+export function pushFailure(branch: string, e: unknown): string {
+  const parts: string[] = [];
+  const seen = new Set<unknown>();
+  for (let link: unknown = e; link !== undefined && link !== null && !seen.has(link); link = (link as { cause?: unknown }).cause) {
+    seen.add(link);
+    parts.push(String((link as Error)?.message ?? link));
+  }
+  return `${branch} was not pushed, and no lease was lost, so nothing was re-derived: ${parts.join(": caused by ")}`;
 }
 
 function* tipAuthor(net: LandingNet, sha: string | undefined): Generator<LandingAsk, string | undefined, AskReply> {

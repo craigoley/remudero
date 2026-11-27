@@ -8,7 +8,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
-import { MOVER_BRANCH_PREFIX, movedFromCommit, parseMoverReceipts, verifyMoverRemoval, type MoverOpsRead, verifyMoverRemovalPublic, type MoverRemovalVerdict, parseReviewerHistoryEvidence, parseWhitelistedProof, reviewRowNamesPr, resolveProofTestPath, resolveNameFilteredCandidatesAsync } from "../../lib/review.js";
+import { MOVER_BRANCH_PREFIX, movedFromCommit, parseMoverReceipts, verifyMoverRemoval, type MoverOpsRead, verifyMoverRemovalPublic, type MoverRemovalVerdict, parseReviewerHistoryEvidence, parseWhitelistedProof, reviewRowNamesPr, resolveProofTestPath, resolveNameFilteredCandidatesAsync, publicTaskHoldDescription, taskHoldRefusal, type TaskHoldReading } from "../../lib/review.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -43,7 +43,8 @@ import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/moun
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import type { ReviewTriagePullRequest } from "../../lib/review-triage.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, markUnbackedBodyGuards, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type CriterionVerdict, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure, type ReviewAdmission } from "../../lib/review.js";
+import { isTestRunner } from "../../lib/live-write-guard.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, markUnbackedBodyGuards, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, postUnreadTaskHoldGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type CriterionVerdict, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure, type ReviewAdmission } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -69,6 +70,7 @@ import { flagValue } from "../../lib/cli-args.js";
 import { resolveReviewTarget, reviewTaskIdFromBody, reviewPrNumber, reviewViewArgs } from "../../lib/report-commands.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "../../lib/staged-install.js";
 import { UNTASKED_REVIEW_BUDGET_USD, isPlanOnlyFilingPr, resolveReviewTaskId, reviewStateFromRollup, reviewStatusHistoryFromRest, usesUntaskedReviewMetadata } from "../../lib/tick-read-worker.js";
+import { freshPullRowRead, resolvePullRequestTaskSubject, type PullRequestTaskSubject } from "../../lib/task-dispatch-hold.js";
 
 export interface ReviewCommandHost {
   readonly GIT_UNTRACKED_FILES_ALL: string;
@@ -976,7 +978,9 @@ async function compareProofReuse(read: ProofDiscriminationRecordRead, input: Pro
 // one does; it carries no code provenance, as no pending post does.
 export function catalogReviewPoster(catalog: "public" | "ops" | undefined, post: typeof postReviewStatus, codeSha?: string): typeof postReviewStatus {
   return catalog !== "ops" ? post : async options => {
-    const description = `remudero-review: ${options.state} — detailed evidence retained on host`;
+    // W1-T14902: a task hold keeps a public-safe description naming the hold, so an ops task's PR says why it waits.
+    const held = options.state === "pending" ? publicTaskHoldDescription(options.description) : undefined;
+    const description = held ?? `remudero-review: ${options.state} — detailed evidence retained on host`;
     const owner = options.state === "pending" ? reviewStatusOwnerRun(options.description) : undefined;
     await post({ ...options, description: owner !== undefined ? reviewPendingDescriptionWithOwner(description, owner)
       : codeSha ? reviewDescriptionWithCodeProvenance(description, codeSha) : description });
@@ -1119,6 +1123,8 @@ export async function runReview(host: ReviewCommandHost, args: {
   /** `files` (W1-T322): the task's declared scope — see {@link "../../lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
   task: { catalog?: "public" | "ops"; id: string; title?: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number; sourcePath?: string } & ReviewTaskNarrativeInput;
+  /** W1-T14902 test seam: the named task's `dispatch_hold` reading. Omitted, the guarded poster reads it at main. */
+  taskHold?: TaskHoldReading;
   /** W1-T3704 (completed here) — injectable producer for the review-reuse pair recorded on this verdict's
    *  `review.posted` line (`own_diff_digest`/`merge_base_sha`). Production omits it and gets one
    *  best-effort REST compare against `main`; a test supplies a stub so it never reaches the
@@ -2137,6 +2143,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     cannotEvaluateEscalation: (e, issues) => tryEscalate(task.catalog === "ops" ? { ...e, detail: "Review cannot evaluate this head; detailed evidence is retained on the host." } : e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath: args.ledgerPath, runId: args.runId }),
     // W1-T14235 (invariant no-semantic-no-code-pass): a code pass publishes only on this run's own semantic judgement.
     semanticJudgement: { planOnly: planOnlySkip, reviewerOutcome: outcome },
+    ...(args.taskHold !== undefined ? { taskHold: args.taskHold } : {}),
   });
   phases.post = systemClock.now();
   // W1-T11151: `posted` releases admission once the outcome is terminal: posted, refused (review.post_refused) or a
@@ -2160,6 +2167,13 @@ export async function runReview(host: ReviewCommandHost, args: {
     withdrawArmIfVerdictRefuses(verdict, { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, { disarm: args.disarm });
     say(`remudero-review: PASS NOT PUBLISHED for ${headSha.slice(0, 7)} — ${posted.reason ?? posted.semanticHold}`);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.reason ?? posted.semanticHold,
+      reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
+  }
+  if (posted.taskHold !== undefined) {
+    // W1-T14902: the pass was held as pending until the operator releases the task's hold, so an arm taken at open is withdrawn.
+    withdrawArmIfVerdictRefuses(verdict, { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, { disarm: args.disarm });
+    say(`remudero-review: PASS NOT PUBLISHED for ${headSha.slice(0, 7)} — ${posted.taskHold}`);
+    return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.taskHold,
       reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
   if (posted.cappedHold !== undefined) {
@@ -2674,6 +2688,9 @@ export interface ReviewCommandDeps {
   buildBaseProof?: (criteria: Parameters<typeof buildBaseProofDirAsync>[0], headCheckoutDir: string) => BaseProofDir | Promise<BaseProofDir>;
   runReview?: (args: Parameters<typeof runReview>[1]) => ReturnType<typeof runReview>;
   postStatus?: typeof postReviewStatusGuarded;
+  /** W1-T14902: posts pending naming an unread task hold when the task catalog is unreadable. Under the test runner the
+   *  default posts nothing, so a fixture that reaches this exit never shells out to the real `gh`; inject to observe it. */
+  publishUnreadHold?: typeof publishUnreadTaskCatalogHold;
   reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
   /** W1-T913: injectable so a test can observe the pending post without a real `gh` spawn — see
    *  `postReviewPending`'s call site below. Defaults to the real {@link postReviewPending}. */
@@ -3027,10 +3044,11 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // Criteria: task trailer → tasks.yaml; else the PR body's Acceptance: block.
   let criteria: AcceptanceCriterion[] = [];
   let source = "NONE (fail closed — nothing to judge is never a pass)";
+  const reviewPlanOnlyFiling = planOnlyFiling ?? isPlanOnlyFilingPr(reviewLedger, view.url);
   const taskId = resolveReviewTaskId(
     body,
     view.headRefName,
-    planOnlyFiling ?? isPlanOnlyFilingPr(reviewLedger, view.url),
+    reviewPlanOnlyFiling,
   );
   const reviewKey = reviewLedgerKeyFor(taskId, view.number);
   // W1-T10269: a shadow review publishes nothing and its rows are renamed; every terminal row names the judging code's sha.
@@ -3138,6 +3156,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
   }
   let resolverDivergence: PlanCriteriaAtHeadDivergence | undefined;
+  let mainPlanDivergence: PlanCriteriaAtHeadDivergence | undefined;
   let ownTaskRecordMissing = false, headTaskResolved = false;
   let publicTaskAbsent = false;
   // W1-T2846: a fleet PR can lose its trailer while retaining the task-bearing run branch.
@@ -3176,10 +3195,25 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
         keepsUnseenDependency)
         .then(recordMainSuccess, recordMainFailure);
       ownTaskRecordMissing = headLacksOwnTaskRecord(resolved, atMain);
+      mainPlanDivergence = atMain.divergence;
       publicTaskAbsent = atMain.divergence === undefined && atMain.criteria.length === 0 &&
         atMain.taskDeclaredFiles === undefined && atMain.taskRisk === undefined && atMain.taskBudgetUsd === undefined;
     }
   }
+  // W1-T14902 (invariant an-unread-hold-holds): THE ONE unread-hold exit. Every path that leaves this review without a
+  // verdict for a named task whose record could not be read replaces a success already on this head with pending
+  // naming the unread hold, projected as an ops task's status is. A shadow posts nothing.
+  const publishUnreadHoldFor = async (source: string, reason: string): Promise<void> => {
+    // The review lane's own untasked classification of this id on this head (a main-repair or other generated lane's
+    // synthetic trailer on its own run branch names no task); the publisher re-checks the live PR through the resolver.
+    if (shadow || !taskId || usesUntaskedReviewMetadata(taskId, view.headRefName)) return;
+    await (deps.publishUnreadHold ?? (isTestRunner() ? async () => {} : publishUnreadTaskCatalogHold))({
+      post: catalogReviewPoster("ops", postReviewStatus), owner, repo, sha: view.headRefOid, taskId, reviewKey, source, reason, planOnlyFiling: reviewPlanOnlyFiling,
+      ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest, fetchLifecycle: () => fetchPrLifecycleAsync(view.url), log });
+  };
+  // The public plan at origin/main could not be read for a task the head's plan lacks: neither its hold nor its catalog
+  // is known, so the hold is unread before anything else runs.
+  if (mainPlanDivergence !== undefined) await publishUnreadHoldFor("public plan at origin/main", mainPlanDivergence.reason);
   if (taskId && publicTaskAbsent) {
     const lookUp = () => findTaskInCatalogs(taskId, { ...deps.taskLookup, stateDir: join(config.root, "state"), byId: new Map() });
     let found = await lookUp();
@@ -3187,6 +3221,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     if (found.outcome === "unreadable" && found.reason === "ops-ref_moved") found = await lookUp();
     if (found.outcome === "unreadable") {
       log("review.catalog.unreadable", { reason: found.reason });
+      await publishUnreadHoldFor("task catalog", found.reason);
       console.error("rmd review: task catalog unreadable; no body fallback or review effect");
       exit.as("task-metadata-unavailable");
       return 2;
@@ -3286,7 +3321,8 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       if (setupDecision.class === "refused") {
         recordSetupReplay(replaySetupInput, setupDecision);
         log("review.semantic_setup_refused", { reason: "head-task-metadata-unavailable", head_sha: view.headRefOid, pr_url: view.url });
-        console.error("rmd review: semantic review unavailable (head task metadata); no pending status, verdict or merge effect");
+        await publishUnreadHoldFor("task record at the PR head", `missing ${missing.join(", ")}`);
+        console.error("rmd review: semantic review unavailable (head task metadata); no verdict or merge effect");
         exit.as("task-metadata-unavailable");
         return 2;
       }
@@ -3743,4 +3779,53 @@ export function planOnlyPhaseFields(marks: Record<string, number>, armedAt: numb
     judge_ms: span("lint", "judge"), post_ms: span("postStart", "post"),
     arm_ms: Math.max(0, armedAt - (marks.armStart ?? armedAt)), total_ms: Math.max(0, armedAt - (marks.started ?? armedAt)),
   };
+}
+
+/**
+ * W1-T14902 (invariant an-unread-hold-holds): the review could not read the named task's catalog, so the task's
+ * `dispatch_hold` is unread. Before the review exits, it replaces whatever status this head carries (a success from an
+ * earlier pass included) with pending naming the unread hold, through the pending-only {@link postUnreadTaskHoldGuarded},
+ * which ledgers what the post actually did. A throw is ledgered too, never thrown out of the review's exit.
+ */
+export async function publishUnreadTaskCatalogHold(args: {
+  publish?: typeof postUnreadTaskHoldGuarded;
+  post: Parameters<typeof postReviewStatusGuarded>[0]["post"];
+  owner: string; repo: string; sha: string; taskId: string; reviewKey: string; reason: string;
+  /** What could not be read. Default: the task catalog. */
+  source?: string;
+  ledgerPath: string; runId: string; prUrl: string; reviewInputDigest: string;
+  fetchLifecycle: Parameters<typeof postReviewStatusGuarded>[0]["fetchLifecycle"];
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  /** Whether this review identified the PR as a plan-only filing (its run branch then names no task). */
+  planOnlyFiling?: boolean;
+  /** The one PR task resolver. Default: {@link resolvePullRequestTaskSubject}, one fresh read of the live PR. */
+  resolveSubject?: (prUrl: string) => Promise<PullRequestTaskSubject>;
+}): Promise<void> {
+  // W1-T14902: the hold belongs to the task the LIVE PR names, classified on its live head. An untasked PR (a generated
+  // lane's synthetic trailer on its own run branch) has no hold to be unread, so a success standing on it stays.
+  // An unreadable PR is no exemption: the hold stays unread and pending is posted.
+  let taskId = args.taskId;
+  let inputDigest = args.reviewInputDigest;
+  try {
+    const subject = await (args.resolveSubject ??
+      ((url: string) => resolvePullRequestTaskSubject(url, freshPullRowRead, () => args.planOnlyFiling === true)))(args.prUrl);
+    if (subject.untasked) {
+      args.log("review.dispatch_hold_untasked", { task_id: subject.taskId ?? null, head_ref: subject.headRefName });
+      return;
+    }
+    taskId = subject.taskId ?? taskId;
+    // Round-8 C1: the pending write names the body the hold was read from, so the freshness rule judges it against the
+    // live PR rather than the body this review started from.
+    inputDigest = reviewInputDigest(args.sha, subject.snapshot.body, REVIEW_ENGINE_REVISION);
+  } catch (e) {
+    args.log("review.dispatch_hold_subject_unreadable", { error: String((e as Error)?.message ?? e) });
+  }
+  const refusal = taskHoldRefusal({ outcome: "unread", taskId, reason: `${args.source ?? "task catalog"} ${args.reason}` })!;
+  try {
+    await (args.publish ?? postUnreadTaskHoldGuarded)({ post: args.post, owner: args.owner, repo: args.repo, sha: args.sha,
+      refusal, taskId: args.reviewKey, ledgerPath: args.ledgerPath, runId: args.runId, prUrl: args.prUrl,
+      reviewInputDigest: inputDigest, reviewEngineRevision: REVIEW_ENGINE_REVISION, fetchLifecycle: args.fetchLifecycle });
+  } catch (e) {
+    args.log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
+  }
 }
