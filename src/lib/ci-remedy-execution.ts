@@ -163,3 +163,63 @@ export function ciRemedyExecutionReport(rows: readonly ExecutionRow[], asOf: str
     : items.length ? "component-execution-only-retention-uncertified" : "no-qualified-component-execution",
     omittedInvocations: omitted.size, records: items };
 }
+
+/** W1-T15064: the marker scripts/expiring-fixture-census.mjs prints on a crossing the base already carries. */
+export const BASE_INHERITED_MARKER = "[inherited from the base -- NOT this diff]";
+/** One census crossing line, as that script prints it: `  - <file>:<line>  ... goes red <day> (...)`. */
+const CROSSING_LINE = /^\s*- \S+:\d+\s.*\sgoes red\s/;
+/** A failure the log names that is not a census crossing: a failed test, a type error, an explicit error annotation. */
+const OTHER_RED = /^\s*not ok \d|^\s*✖ |\berror TS\d+|##\[error\](?!Process completed with exit code)/;
+
+/** W1-T15064: every red step a round would answer is base-inherited when each failing check's log carries the
+ *  inherited marker, marks every crossing it prints, and names no other failure. An empty list, or any doubt, is not. */
+export function baseInheritedRedSteps(failures: ReadonlyArray<{ name: string; logTail: string }>): { inherited: boolean; steps: string[] } {
+  const steps = [...new Set(failures.map((failure) => failure.name))];
+  const inherited = failures.length > 0 && failures.every((failure) => {
+    const lines = failure.logTail.split("\n");
+    return lines.some((line) => line.includes(BASE_INHERITED_MARKER))
+      && lines.filter((line) => CROSSING_LINE.test(line)).every((line) => line.includes(BASE_INHERITED_MARKER))
+      && !lines.some((line) => OTHER_RED.test(line));
+  });
+  return { inherited, steps };
+}
+
+const ASSERTION_START = /\bassert(?:\.\w+)*\s*\(|\bexpect\s*\(/g;
+
+/** Each assertion call in `text`, whole (its balanced argument list), with whitespace collapsed. */
+function assertionCalls(text: string): string[] {
+  const calls: string[] = [];
+  for (const match of text.matchAll(ASSERTION_START)) {
+    let depth = 0, quote: string | undefined, end = -1;
+    for (let i = match.index! + match[0].length - 1; i < text.length; i++) {
+      const c = text[i]!;
+      if (quote) { if (c === "\\") i++; else if (c === quote) quote = undefined; continue; }
+      if (c === "\"" || c === "'" || c === "`") quote = c;
+      else if (c === "(") depth++;
+      else if (c === ")" && --depth === 0) { end = i; break; }
+    }
+    calls.push(text.slice(match.index!, end < 0 ? text.length : end + 1).replace(/\s+/g, " "));
+  }
+  return calls;
+}
+
+/** W1-T15064: the assertions of an existing test file the round's diff removed or changed, per file. */
+export function rewrittenTestExpectations(changes: ReadonlyArray<{ path: string; base: string; head: string }>):
+  Array<{ path: string; changed: string[] }> {
+  return changes.flatMap(({ path, base, head }) => {
+    const left = new Map<string, number>();
+    for (const call of assertionCalls(head)) left.set(call, (left.get(call) ?? 0) + 1);
+    const changed = assertionCalls(base).filter((call) => {
+      const n = left.get(call) ?? 0;
+      if (n > 0) left.set(call, n - 1);
+      return n === 0;
+    });
+    return changed.length > 0 ? [{ path, changed }] : [];
+  });
+}
+
+/** W1-T15064: a rewritten expectation stands only in a test the answered finding names, by path or file name. */
+export function unaskedExpectationRewrites(rewrites: ReadonlyArray<{ path: string; changed: string[] }>, findingText: string):
+  Array<{ path: string; changed: string[] }> {
+  return rewrites.filter(({ path }) => !findingText.includes(path) && !findingText.includes(path.split("/").pop()!));
+}

@@ -45,7 +45,8 @@ import { observeFeedbackInputs, type AdmissionObserver } from "../../lib/contrib
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
 import { observeAdmissionDisposition } from "../../lib/action-executor.js";
 import { fixLaneBenchmarkWork } from "../../lib/benchmark-run.js";
-import { captureCiRemedyComponent, recordCiRemedyExecution, upsertCiRemedyRoundComment, type CiRemedyExecution } from "../../lib/ci-remedy-execution.js";
+import { baseInheritedRedSteps, captureCiRemedyComponent, recordCiRemedyExecution, rewrittenTestExpectations, unaskedExpectationRewrites,
+  upsertCiRemedyRoundComment, type CiRemedyExecution } from "../../lib/ci-remedy-execution.js";
 import { loadPlan, visibleCriteria, type AcceptanceCriterion, type Plan } from "../../lib/plan.js";
 import { loadMounts, mountsPath, type Mount } from "../../lib/mounts.js";
 import { codexCapabilityBelow, codexCapabilityForRequestedModel } from "../../lib/worker-provider.js";
@@ -4632,6 +4633,17 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         ? { ...evidenceBase, priorPartialWork: opts.priorPartialWork }
         : evidenceBase;
     const fixMode = deriveFixMode(evidence, PROOF_REPAIR_FIX_MODE_RULES);
+    // W1-T15064: a red step the base already carries is not this PR's to repair. When every red step this ci-log
+    // round answers is marked base-inherited, no worker edits source for it; #21035's round 1835b8af3 loosened a
+    // guard in src/lib/inbox.ts to answer inherited expiring-fixture-census crossings.
+    const inheritedRed = fixMode === "ci-log" && !("review" in evidence && evidence.review)
+      ? baseInheritedRedSteps(currentCiFailures ?? []) : undefined;
+    if (inheritedRed?.inherited) {
+      const reason = "base_inherited";
+      deps.log("fix.stood_down", { site: "rung.strike", strike: strikes + 1, reason, steps: inheritedRed.steps });
+      deps.say(`fix rung: every red step (${inheritedRed.steps.join(", ")}) is inherited from the base — no source edit dispatched`);
+      return finish({ outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason });
+    }
     await observeFeedbackInputs(opts.config.contributorAdmission, opts.feedbackContributions ?? [], "fix-adoption", deps.log);
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
@@ -5835,6 +5847,31 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         reason: "harness commit refused",
         standDownReason: harnessCommitRefusalReason,
       });
+    }
+
+    // W1-T15064: a round never rewrites an existing test's expectation unless the finding it answers names that test.
+    // An unreadable diff refuses too: the push is what this check protects.
+    const expectationBase = roundStartSha ?? priorHeadSha;
+    if (expectedHeadShaForPush !== undefined && expectationBase !== undefined && expectedHeadShaForPush !== expectationBase) {
+      let unasked: Array<{ path: string; changed: string[] }>;
+      try {
+        const git = (args: string[]) => hostWorktreeGit(opts.worktreePath, args);
+        const paths = git(["diff", "--name-only", "-z", "--diff-filter=M", expectationBase, expectedHeadShaForPush, "--", "test/"])
+          .split("\0").filter((path) => /\.test\.[cm]?[jt]s$/.test(path));
+        unasked = unaskedExpectationRewrites(rewrittenTestExpectations(paths.map((path) => ({ path,
+          base: git(["show", `${expectationBase}:${path}`]), head: git(["show", `${expectedHeadShaForPush}:${path}`]) }))),
+        JSON.stringify(evidence));
+      } catch (error) {
+        unasked = [{ path: "(diff unreadable)", changed: [String(error)] }];
+      }
+      if (unasked.length > 0) {
+        const reason = "the round changed a test expectation the answered finding does not name";
+        deps.log("fix.commit_refused", { round_id: roundId, strike: attempt, round, head_sha: priorHeadSha, reason,
+          tests: unasked.map((rewrite) => rewrite.path), changed_assertions: unasked.flatMap((rewrite) => rewrite.changed) });
+        deps.say(`fix rung: refused — ${reason}: ${unasked.map((rewrite) => rewrite.path).join(", ")}`);
+        logFixDone();
+        return finish({ outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason });
+      }
     }
 
     let roundPush: FixRungOutcome | "refused" | undefined;
