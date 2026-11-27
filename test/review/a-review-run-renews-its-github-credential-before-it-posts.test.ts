@@ -2,7 +2,7 @@
 // holds its claim, and a run that dies leaves no pending status the sweep cannot re-admit.
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -222,6 +222,49 @@ test("W1-T15030 criterion 2: one renew-and-retry on 401, then a named refusal", 
   const other = { disableAuto: async () => { throw new Error("can't disable auto-merge"); }, say: () => {}, isMerged: () => false };
   assert.equal(await disarmAutoMergeAsync(PR_URL, other, renewal), "not-armed");
   assert.equal(renewed, 2);
+});
+
+test("W1-T15030 criterion 2: the guarded default poster leaves the single 401 retry to its wrapper", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t15030-single-renewal-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const keyPath = join(root, "app.pem");
+  const app = fakeApp(t, () => Date.now() + 60 * 60_000, () => "unexpected-inner-renewal");
+  writeFileSync(keyPath, app.pem);
+  const previous = {
+    GH_TOKEN: process.env.GH_TOKEN,
+    GH_APP_ID: process.env.GH_APP_ID,
+    GH_APP_INSTALLATION_ID: process.env.GH_APP_INSTALLATION_ID,
+    GH_APP_PRIVATE_KEY_PATH: process.env.GH_APP_PRIVATE_KEY_PATH,
+    fetch: globalThis.fetch,
+  };
+  t.after(() => {
+    for (const key of ["GH_TOKEN", "GH_APP_ID", "GH_APP_INSTALLATION_ID", "GH_APP_PRIVATE_KEY_PATH"] as const) {
+      const value = previous[key];
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    globalThis.fetch = previous.fetch;
+  });
+  Object.assign(process.env, { GH_TOKEN: "old-token", GH_APP_ID: "42", GH_APP_INSTALLATION_ID: "7",
+    GH_APP_PRIVATE_KEY_PATH: keyPath });
+  globalThis.fetch = app.fetchImpl;
+
+  const ledgerPath = join(root, "ledger.ndjson");
+  let renewals = 0;
+  const run = await withGhShim([REFUSED_POST, ...READS], async (shim) => {
+    const result = await postReviewStatusGuarded({ owner: "acme", repo: "remudero", sha: HEAD, state: "failure",
+      taskId: "W1-T15030", runId: "review-single-renewal", prUrl: PR_URL, evidence: "executed", ledgerPath,
+      fetchLifecycle: () => ({ merged: false, closed: false }),
+      renewToken: async () => {
+        renewals++;
+        process.env.GH_TOKEN = "renewed-token";
+        shim.addRoute({ when: "state=failure", stdout: "{}" });
+        return "renewed";
+      } });
+    return { result, calls: shim.calls().filter((call) => call.includes("-X POST") && call.includes("state=failure")).length };
+  });
+  assert.equal(run.result.posted, true, "the outer renewal and one retry publish the status");
+  assert.deepEqual([run.calls, renewals, app.exchanges.length], [2, 1, 0],
+    "the guarded default poster makes no independent App refresh or retry");
 });
 
 test("W1-T15030 criterion 2: an ops task's terminal post refused twice still lands its private findings", async (t) => {

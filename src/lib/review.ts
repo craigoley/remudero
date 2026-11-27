@@ -14056,7 +14056,9 @@ async function publishCappedHold(opts: PostReviewStatusGuardedOpts, verdict: Rev
 }
 
 async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts, heldRetry?: HeldLintRetry): Promise<PostReviewStatusGuardedResult> {
-  const post = opts.post ?? postReviewStatus;
+  // The guarded publisher owns the single 401 renewal below. Keep the raw poster's standalone reauth disabled here,
+  // or its retry loop can mint and retry independently before this wrapper gets control back.
+  const post = opts.post ?? ((status) => postReviewStatus(status, { reauth: async () => false }));
   const freshnessRefusal = reviewerCodePublicationRefusal(opts.state, opts.reviewerCodeFreshness);
   if (freshnessRefusal !== undefined) {
     const freshness = opts.reviewerCodeFreshness!;
