@@ -2687,6 +2687,9 @@ export function productionFixProgressJudge(opts: {
     const primaryArgs: SpawnWorkerArgs = { ...args, prompt, memoryShadow: { ...args.memoryShadow, ...lightPassMemoryWaitPorts() },
       ...(mount.provider === undefined ? {} : { mountProvider: mount.provider }) };
     const result = await spawn(primaryArgs);
+    // W1-T14916: a judge a retired daemon withheld answered nothing. Throwing makes judgeFixProgress return unavailable,
+    // which holds the PR, instead of an absent verdict the reask path turns into a fabricated continue.
+    if (result.notStarted !== undefined) throw new WorkerNotStartedError(result.notStarted);
     const verdict = result.subtype !== undefined && result.subtype !== "success" ? undefined : parseFixProgressVerdict(result.text);
     const shadowKey = `${input.prNumber === undefined ? input.taskId ?? "unknown" : `PR${input.prNumber}`}@${input.headSha}`;
     if (mount.shadow?.provider === "decisions" && opts.log !== undefined) {

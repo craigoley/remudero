@@ -25,7 +25,8 @@ import { ghShim } from "#test/helpers/gh-shim.js";
 import { answerThread, realThreadDecider, type InboxThreadItem } from "#src/lib/inbox-responder.js";
 import { appendThreadMessage, inboxThreadId, inboxThreadIdentity, readAllThreads } from "#src/lib/inbox-thread.js";
 import { runAlertLane, type AlertLaneAlert, type AlertPolicy } from "#src/lib/alert-lane.js";
-import { trackRepairLadder } from "#src/lib/sweep.js";
+import { productionFixProgressJudge, trackRepairLadder } from "#src/lib/sweep.js";
+import { buildFixProgressInput, judgeFixProgress } from "#src/lib/fix-progress-judge.js";
 import { claudeCapacityFromUsage, ProviderCapacityBlockedError, readRepairLadderState } from "#src/lib/worker-provider.js";
 import { judgeVerifyHumanShard, realVerifyHumanJudge, type ShardUnderJudgement } from "#src/lib/verify-human-judge.js";
 import { verifyHumanCadence } from "#src/lib/measurement-cadence.js";
@@ -737,4 +738,17 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   assert.equal(outcome.strikes, 0);
   assert.deepEqual(issues, [], "no needs-human issue");
   assert.equal(rows.some((row) => row.step === "fix.exhausted"), false, rows.map((row) => row.step).join(", "));
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and a fix progress judge it withheld rules nothing", async () => {
+  let asks = 0;
+  const judge = productionFixProgressJudge({ cwd: REPO_ROOT, settingsFile: "/unused",
+    mount: { model: "test-model", effort: "low", maxTurns: 1, contextBudget: 10000 }, spawn: async () => { asks++; return notStartedResult(); } });
+  const input = buildFixProgressInput({ taskId: "W1-T14916FIX", prNumber: 4242, headSha: "d".repeat(40), currentRed: ["ci"], ledger: [] });
+  await assert.rejects(judge(input), isNotStarted);
+  const decision = await judgeFixProgress(input, judge, { reask: true });
+  assert.equal(decision.verdict, "unavailable", JSON.stringify(decision));
+  assert.equal("judge_skipped" in decision, false, "no unparseable-twice continue is fabricated");
+  assert.equal(asks, 2, "one ask per call: a withheld judge is not asked again");
 });
