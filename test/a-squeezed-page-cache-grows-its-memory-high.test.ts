@@ -118,6 +118,55 @@ test("the tuner never sets memory.high below the policy value", () => {
   assert.equal(restore.target, 2560);
 });
 
+// OBSERVED 2026-11-27: tier 3 shrank remudero-daemon 18,964 -> 17,172 -> 16,148 MiB while it held 18,450 MiB anon
+// and 0 MiB of file cache; the shrink freed nothing and swapped the daemon until it stopped making progress.
+const DAEMON_SQUEEZE = {
+  MH_LIVE_MIB: 18964, MH_POLICY_MIB: 15503, MH_MAX_MIB: 28058,
+  MH_AVAIL_MIB: 1500, MH_RESERVE_MIB: 2048, MH_ALLOCSTALL: 13678, MH_PSI_FULL10: 9890, MH_FURTHEST: 1,
+};
+
+test("W1-T15172 criterion 1: a container with no file cache to give back is held, not shrunk, under tier 3 pressure", () => {
+  const held = decide({ ...DAEMON_SQUEEZE, MH_FILE_MIB: 0, MH_ANON_MIB: 18842 });
+  assert.equal(held.action, "hold", held.reason);
+  assert.equal(held.target, 18964);
+  assert.match(held.reason, /tier 3/);
+  assert.match(held.reason, /0 MiB of file cache/);
+  // Without the memory inputs the decision is the old one, so every caller that does not pass them is unchanged.
+  const unknown = decide({ ...DAEMON_SQUEEZE });
+  assert.equal(unknown.action, "shrink", unknown.reason);
+  assert.equal(unknown.target, 17172);
+});
+
+test("W1-T15172 criterion 2: a shrink target never goes below the container's anon plus one quantum", () => {
+  // Half the 10,772 MiB excess would take 18,964 to 13,332 MiB, under the 15,000 MiB of anon the container holds.
+  const bounded = decide({ ...DAEMON_SQUEEZE, MH_POLICY_MIB: 8192, MH_FILE_MIB: 4096, MH_ANON_MIB: 15000 });
+  assert.equal(bounded.action, "shrink", bounded.reason);
+  assert.equal(bounded.target, 15360, "15,000 + 256 rounded up to a quantum");
+  assert.ok(bounded.target >= 15000 + 256);
+  // Anon plus a quantum at or over the live value: nothing to give back without swapping, so hold.
+  const full = decide({ ...DAEMON_SQUEEZE, MH_FILE_MIB: 4096, MH_ANON_MIB: 18800 });
+  assert.equal(full.action, "hold", full.reason);
+  assert.match(full.reason, /18800 MiB anon/);
+  // The policy floor still wins over a small anon.
+  const floor = decide({ ...DAEMON_SQUEEZE, MH_LIVE_MIB: 15759, MH_FILE_MIB: 4096, MH_ANON_MIB: 1000 });
+  assert.equal(floor.action, "shrink", floor.reason);
+  assert.equal(floor.target, 15503);
+});
+
+test("W1-T15172 criterion 3: a swap-in rise the container's own anon refaults explain does not corroborate host pressure", () => {
+  // MemAvailable under two reserves with only swap-in rising: the 2026-11-27 host rate, nearly all the daemon's own.
+  const pressure = { MH_LIVE_MIB: 3072, MH_AVAIL_MIB: 3000, MH_SWAPIN_RATE: 41706, MH_PREV_SWAPIN_RATE: 12610, MH_FURTHEST: 1 };
+  const own = decide({ ...pressure, MH_OWN_SWAPIN_RATE: 41000 });
+  assert.equal(own.action, "hold", own.reason);
+  assert.match(own.reason, /tier 1/);
+  // Host swap-in beyond the container's own still corroborates, and the reason names the part it set aside.
+  const host = decide({ ...pressure, MH_OWN_SWAPIN_RATE: 20000 });
+  assert.equal(host.action, "shrink", host.reason);
+  assert.match(host.reason, /swap-in rising \(12610 -> 21706 KiB\/s, .*after 20000 KiB\/s of its own anon refaults\)/);
+  const none = decide({ ...pressure });
+  assert.equal(none.action, "shrink", none.reason);
+});
+
 /** A host with one console container on a systemd-driver cgroup tree, and fake docker/sudo/systemctl. */
 function host(container = CONSOLE): { root: string; env: NodeJS.ProcessEnv; cg: string; calls: string; now: number } {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}memory-high-tuner-`));
@@ -132,7 +181,7 @@ function host(container = CONSOLE): { root: string; env: NodeJS.ProcessEnv; cg: 
   writeFileSync(join(cg, "memory.high"), `${2048 * MIB}\n`);
   writeFileSync(join(cg, "memory.max"), `${CONSOLE_MAX_MIB * MIB}\n`);
   writeFileSync(join(cg, "memory.events"), "low 0\nhigh 1124\nmax 0\noom 0\n");
-  writeFileSync(join(cg, "memory.stat"), "anon 1\nfile 2\nworkingset_refault_anon 9\nworkingset_refault_file 25000\n");
+  writeFileSync(join(cg, "memory.stat"), `anon ${MIB}\nfile ${4096 * MIB}\nworkingset_refault_anon 9\nworkingset_refault_file 25000\n`);
   writeFileSync(join(root, "meminfo"), `MemTotal:       ${HOST_KB} kB\nMemAvailable:    9216000 kB\n`);
   writeFileSync(join(root, "vmstat"), "pswpin 5000\npswpout 9000\nallocstall_normal 10\nallocstall_movable 20\n");
   writeFileSync(join(root, "psi"), "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n");
@@ -470,6 +519,48 @@ test("the tuner's swap-in counts what zswap serves: its counter is pswpin plus z
       assert.match(run.stdout, new RegExp(`swap-in rising \\(0 -> 800 KiB/s, pswpin\\+zswpin; ${basis}\\)`), run.stdout);
       const sample = readFileSync(join(h.root, "cfg", "state", `memory-high-sample-${CONSOLE}.txt`), "utf8").split(" ");
       assert.equal(sample[5], "65000", "the stored counter is the sum, so the next tick's delta counts zswap too");
+    } finally {
+      rmSync(h.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("W1-T15172 criterion 4: a tick reads anon, file and its own anon refaults from memory.stat, and an unreadable value holds", () => {
+  for (const variant of ["no-cache", "own-swap", "unreadable"] as const) {
+    const h = host();
+    try {
+      const id = "c0ffee".padEnd(64, "0");
+      const then = h.now - 300;
+      writeFileSync(join(h.cg, "memory.high"), `${3072 * MIB}\n`);
+      // MemAvailable under one reserve with a PSI full stall: tier 3, so at origin/main every variant shrinks.
+      writeFileSync(join(h.root, "meminfo"), `MemTotal: ${HOST_KB} kB\nMemAvailable: ${1000 * 1024} kB\n`);
+      writeFileSync(join(h.root, "psi"), "some avg10=90.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=50.00 avg60=0.00 avg300=0.00 total=1\n");
+      const stat = {
+        "no-cache": `anon ${2900 * MIB}\nfile ${8 * MIB}\nshmem ${4 * MIB}\nworkingset_refault_anon 9\nworkingset_refault_file 25000\n`,
+        "own-swap": `anon ${MIB}\nfile ${4096 * MIB}\nworkingset_refault_anon 60009\nworkingset_refault_file 25000\n`,
+        unreadable: `file ${4096 * MIB}\nworkingset_refault_anon 9\nworkingset_refault_file 25000\n`,
+      }[variant];
+      writeFileSync(join(h.cg, "memory.stat"), stat);
+      writeFileSync(join(h.root, "vmstat"), "pswpin 65000\npswpout 9000\nallocstall_normal 10\nallocstall_movable 20\n");
+      writeFileSync(join(h.root, "cfg", "state", `memory-high-sample-${CONSOLE}.txt`), `v1 ${then} ${id} 1124 25000 5000 30 0 9\n`);
+      const run = spawnSync("bash", [TUNER, "--container", CONSOLE, "--state-dir", join(h.root, "cfg")], { encoding: "utf8", env: h.env });
+      assert.equal(run.status, 0, run.stderr);
+      const sample = readFileSync(join(h.root, "cfg", "state", `memory-high-sample-${CONSOLE}.txt`), "utf8").trim().split(" ");
+      if (variant === "no-cache") {
+        assert.match(run.stdout, /hold at 3072 MiB/, run.stdout);
+        assert.match(run.stdout, /only 4 MiB of file cache/, "file less shmem is what can be given back");
+        assert.equal(readFileSync(join(h.cg, "memory.high"), "utf8").trim(), String(3072 * MIB));
+      } else if (variant === "own-swap") {
+        // 60,000 pages swapped in and 60,000 of the container's own anon refaults: none of it is host pressure,
+        // but the stall still makes tier 3, and 4 GiB of cache can be given back.
+        assert.match(run.stdout, /shrink 3072 -> /, run.stdout);
+        assert.doesNotMatch(run.stdout, /swap-in rising/);
+        assert.equal(sample[7], "0", "the stored rate is the host's less the container's own");
+        assert.equal(sample[8], "60009", "the anon refault counter is kept for the next tick");
+      } else {
+        assert.match(run.stdout, /hold: a counter is unreadable/, run.stdout);
+        assert.equal(readFileSync(join(h.cg, "memory.high"), "utf8").trim(), String(3072 * MIB));
+      }
     } finally {
       rmSync(h.root, { recursive: true, force: true });
     }

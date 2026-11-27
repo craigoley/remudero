@@ -31,7 +31,7 @@ import { releaseTaskIdReservationAsync, type ReservationReleaseOutcome } from ".
 import { reservationHolderBranch, taskIdReservationRef } from "./task-id-reservation.js";
 import { loadPlanFromYaml } from "./plan.js";
 import { planDestinationRepository, type PlanDestination, type PlanDestinationRepository } from "./plan-destination.js";
-import { PLAN_RECONCILE_LANDING_RECORD_LIMIT, planReconcilePrBody, planReconcileProofFor } from "./plan-reconcile-batch.js";
+import { PLAN_RECONCILE_LANDING_RECORD_LIMIT, planReconcilePrBody, planReconcileProofFor, planReconcileStatusCountProof } from "./plan-reconcile-batch.js";
 import { reconcileShardStatus, requeueShardStatusText } from "./plan-reconcile.js";
 import { readOpsCheckoutAtMainSync } from "./ops-checkout-at-main.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -1985,7 +1985,10 @@ function planReconcileLandingKindSteps(
     {
       family: "plan-reconcile",
       commitMessage: (files) => [PLAN_RECONCILE_LANDING_PR_TITLE, "", "Automated plan-status reconciliation from the measurement cadence.", "", ...files.map((file) => `- ${file}`)].join("\n"),
-      prBody: (files, content) => planReconcilePrBody(files, (file) => landingProof(file, planReconcileProofFor(file, content?.head(file)), content)),
+      // W1-T15048: a flip into a file that already holds that status adds no new line, so it gets the count proof.
+      prBody: (files, content) => planReconcilePrBody(files, (file) =>
+        (content && (discriminatingLandingProof(file, content) ?? planReconcileStatusCountProof(file, content.base(file), content.head(file))))
+          ?? planReconcileProofFor(file, content?.head(file))),
     },
     root,
     opts,
