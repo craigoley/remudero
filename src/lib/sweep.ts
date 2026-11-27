@@ -7474,7 +7474,9 @@ export function reviewInFlightOnHead(
       if (line.pr_number === pr.prNumber) live.clear();
       continue;
     }
-    if (!reviewRowNamesPr(line, pr.taskId, pr.prUrl) || typeof line.run_id !== "string") continue;
+    // Legacy review rows omit pr_url and use the review ledger key, which is PR-<number>
+    // for unfiled PRs. Resolve that key here too so an old taskless claim is not missed.
+    if (!reviewRowNamesPr(line, reviewLedgerKeyFor(pr.taskId, pr.prNumber), pr.prUrl) || typeof line.run_id !== "string") continue;
     if (line.step === "review.pending_posted") {
       if (typeof line.took_over_run_id === "string") live.delete(line.took_over_run_id);
       live.delete(line.run_id);
