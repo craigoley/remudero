@@ -40,6 +40,17 @@ test("idle_starved: only a successful complete board read may prove zero open PR
   assert.equal(board.readConfirmed(), undefined, "the next tick cannot inherit an old zero");
 });
 
+test("W1-T15170: readOwnership counts an operator-authored run-<task> PR foreign and an authorless one owned", () => {
+  const head = "run-W1-T15170-1795797802670";
+  const board = createOpenPrCountObservation();
+  board.observe([
+    { number: 1, url: "https://github.com/o/r/pull/1", state: "OPEN", headRefName: head, authorLogin: "an-operator" },
+    { number: 2, url: "https://github.com/o/r/pull/2", state: "OPEN", headRefName: head, authorLogin: "remudero-fleet[bot]" },
+    { number: 3, url: "https://github.com/o/r/pull/3", state: "OPEN", headRefName: head },
+  ]);
+  assert.deepEqual(board.readOwnership(() => 0), { owned: 2, foreign: 1, ownedPrNumbers: [2, 3] });
+});
+
 // ── W1-T121 QUEUE GOVERNOR — a WIP limit on DISPATCH only; flow control
 // throttles intake, never drainage (the 23-open-PR incident). ────────────────
 //
