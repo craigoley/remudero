@@ -398,6 +398,8 @@ export interface HeadReadGate {
   wrap(read: GhApiFetcher): GhApiFetcher;
   /** This sweep's counts so far. */
   counts(): HeadReadCounts;
+  /** Drops every kept rollup: a daemon that just took the drain lock re-reads each head it serves. */
+  reset(): void;
 }
 
 export function createHeadReadGate(): HeadReadGate {
@@ -463,6 +465,7 @@ export function createHeadReadGate(): HeadReadGate {
       };
     },
     counts: () => ({ ...counts }),
+    reset: () => kept.clear(),
   };
 }
 

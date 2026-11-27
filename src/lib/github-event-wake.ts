@@ -603,47 +603,72 @@ export function acknowledgeChangedHeads(root: string): void {
   }
 }
 
-/** A take of the acknowledged entries only, claim-by-rename; malformed lines are dropped. */
-export function takeAcknowledgedChangedHeads(root: string): ChangedHeadEntry[] {
-  return takeClaimedEntries(githubAcknowledgedHeadsPath(root));
+function parseChangedHeads(text: string): ChangedHeadEntry[] {
+  const entries: ChangedHeadEntry[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line) as Partial<ChangedHeadEntry>;
+      if (typeof parsed.sha === "string" && typeof parsed.event === "string" && typeof parsed.received_at === "string") {
+        entries.push({ sha: parsed.sha, event: parsed.event, received_at: parsed.received_at });
+      }
+    } catch {
+      // A torn or corrupt line names no head; the recheck interval covers whatever it held.
+      continue;
+    }
+  }
+  return entries;
+}
+
+function readChangedHeads(path: string): ChangedHeadEntry[] {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    // CLAIM: collapses "named" and "unreadable" into "no heads named" (stderr only, no ledger step). Safe because an
+    // unreadable journal names no head a read can trust, and headRecheckMs re-reads every head within one interval.
+    console.error(`github.wake: changed heads unreadable (${String((error as Error)?.message ?? error)})`);
+    return [];
+  }
+  return parseChangedHeads(text);
 }
 
 /**
- * The read plane's take, before it reads: the acknowledged entries AND the live journal, each claim-by-rename.
- * The daemon produces the tick read an accepted sweep consumes BEFORE `runGatedSweep` acknowledges (daemon.ts), so
- * a take of the acknowledged file alone would serve a delivery-woken sweep the rollup kept before that delivery.
- * An entry is consumed only by the read that drops its head's kept rollup and re-reads it, so a held daemon's
- * entry is never lost: that read already reflects it, and every later read is newer.
+ * Every head-read gate's look at the changed heads, before it reads: the acknowledged entries AND the live journal.
+ * NON-DESTRUCTIVE: a standby daemon's pre-lock tick read, the active daemon's read plane and its light-pass reads each
+ * keep their own gate, so a take by one would leave another serving a named head's old rollup until headRecheckMs
+ * (fleet review of #21033). Each gate applies an entry once; only the drain-lock holder prunes
+ * ({@link pruneAcknowledgedChangedHeads}). Both files are read because the daemon produces the tick read an accepted
+ * sweep consumes BEFORE `runGatedSweep` acknowledges (daemon.ts).
  */
-export function takeChangedHeadsForRead(root: string): ChangedHeadEntry[] {
-  return [...takeClaimedEntries(githubAcknowledgedHeadsPath(root)), ...takeClaimedEntries(githubChangedHeadsPath(root))];
+export function peekChangedHeads(root: string): ChangedHeadEntry[] {
+  return [...readChangedHeads(githubAcknowledgedHeadsPath(root)), ...readChangedHeads(githubChangedHeadsPath(root))];
 }
 
-function takeClaimedEntries(path: string): ChangedHeadEntry[] {
+/**
+ * The drain-lock holder's prune of acknowledged entries received before `keepFromMs` (now - headRecheckMs): any kept
+ * read older than such an entry has already aged out, and any newer one reflects it, so no gate needs it. Claim, keep
+ * the recent lines, append them back: an acknowledge appending meanwhile loses nothing.
+ */
+export function pruneAcknowledgedChangedHeads(
+  root: string,
+  keepFromMs: number,
+  append: (path: string, data: string) => void = appendFileSync,
+): void {
+  const path = githubAcknowledgedHeadsPath(root);
   const claimed = claimFile(path);
-  if (claimed === undefined) return [];
-  const entries: ChangedHeadEntry[] = [];
+  if (claimed === undefined) return;
+  const recent = readChangedHeads(claimed).filter((entry) => !(Date.parse(entry.received_at) < keepFromMs));
+  rmSync(claimed, { force: true, recursive: true });
+  if (recent.length === 0) return;
   try {
-    for (const line of readFileSync(claimed, "utf8").split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const parsed = JSON.parse(line) as Partial<ChangedHeadEntry>;
-        if (typeof parsed.sha === "string" && typeof parsed.event === "string" && typeof parsed.received_at === "string") {
-          entries.push({ sha: parsed.sha, event: parsed.event, received_at: parsed.received_at });
-        }
-      } catch {
-        // A torn or corrupt line names no head; the recheck interval covers whatever it held.
-        continue;
-      }
-    }
+    append(path, recent.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
   } catch (error) {
-    // CLAIM: collapses "taken" and "unreadable" into "no heads named" (stderr only, no ledger step). Safe because an unreadable
-    // claim names no head the read plane can trust, and headRecheckMs re-reads every head within one interval.
-    console.error(`github.wake: acknowledged heads unreadable (${String((error as Error)?.message ?? error)})`);
-  } finally {
-    rmSync(claimed, { force: true, recursive: true });
+    // CLAIM: collapses "kept" and "dropped" for the recent entries (stderr only, no ledger step). Safe because a gate
+    // that misses a dropped entry serves that head's kept rollup at most headRecheckMs, then re-reads it.
+    console.error(`github.wake: acknowledged heads not pruned (${String((error as Error)?.message ?? error)})`);
   }
-  return entries;
 }
 
 // ── (v) THE ROUTE — the self-authenticated POST /v1/hooks/github ───────────────────────────

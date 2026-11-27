@@ -427,12 +427,20 @@ under `enforce`, which writes no marker but changed its head's rollup) appends o
 the owning instance's marker (W1-T14806's resolver picks it). `wireSweepWakeToDaemon`'s
 `acknowledge`, the same call that consumes `SWEEP_WAKE_REQUESTED` after STOP/PAUSE and the sweep
 gate accept a pass, claims the journal by rename and appends it to
-`state/github-changed-heads.acked.ndjson`. The read plane takes BOTH files the same way, before it
-reads (`takeChangedHeadsForRead`): the daemon produces the tick read an accepted sweep consumes
-before `runGatedSweep` acknowledges, so taking the acknowledged file alone served the
-delivery-woken sweep the rollup kept before that delivery, and the head was re-read only a cycle
-later (fleet review of #21033). An entry is consumed only by the read that drops its head's kept
-rollup and re-reads it, so a held daemon never loses one: that read already reflects it. The read
+`state/github-changed-heads.acked.ndjson`. Every head-read gate PEEKS both files before it reads
+(`peekChangedHeads`) and applies each entry once (`createHeadReadSweeper` in tick-read-worker.ts).
+Nothing a gate does takes an entry from another gate. Three consumers share one instance's journal:
+a standby daemon's pre-lock tick read (`daemon --standby`, daemon-handoff.ts), the active daemon's
+read plane, and its light pass's own open-PR read (`buildOpenPrViewsAsync`). A destructive take by
+any one of them left the others serving the named head's old rollup until the floor (fleet review
+of #21033, run in hand-over order). Both files are read because the daemon produces the tick read
+an accepted sweep consumes before `runGatedSweep` acknowledges.
+
+The drain lock. A sweeper whose process holds `state/drain.lock` (the lock file names its holder's
+pid, `holdsDrainLock`) prunes acknowledged entries older than `headRecheckMs`
+(`pruneAcknowledgedChangedHeads`). No gate needs them: a read kept before such an entry has aged
+out, and a read kept after it reflects it. A sweeper that has just taken the lock drops every rollup
+it kept before the lock, so a promoted standby's first locked read re-reads every head. The read
 plane may be a worker thread, so the hand-off is a file, never memory.
 
 The head set. ONE `git ls-remote origin 'refs/heads/*' 'refs/pull/*/head'` per tick
@@ -442,7 +450,7 @@ and its reason is recorded.
 
 Only an unknown head set turns skips off. A repository whose webhook is silent keeps its skips:
 the floor (c) re-reads every head within one interval, so a missed delivery is corrected in
-`headRecheckMs`. A failed journal append, acknowledge or take is printed to stderr, and the same
+`headRecheckMs`. A failed journal append, acknowledge, read or prune is printed to stderr, and the same
 floor re-reads the head.
 
 The counts. Each tick adds `head_reads_made`, `head_reads_skipped` and, when skips were off,

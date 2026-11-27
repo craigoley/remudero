@@ -28,7 +28,8 @@ import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
 import { escalationTaskId, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText, escalationHeadSha } from "./escalate.js";
 import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, classifyChangesRequested, pullReviewsRestArgs, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation, combinedStatusRestArgs, openPrsRestArgs, MERGE_STATE_HYDRATION_CAP, SCANNER_BLOCKER_HYDRATION_CAP, REVIEW_QUEUE_HOLD_READ_CAP, CODEQL_HEAD_ALERT_HYDRATION_CAP, WORKFLOW_RUN_HYDRATION_CAP, type MergeStateObservation, createHeadReadGate, recordHeadReadCounts, type HeadReadGate } from "./open-prs-rest.js";
-import { takeChangedHeadsForRead } from "./github-event-wake.js";
+import { peekChangedHeads, pruneAcknowledgedChangedHeads } from "./github-event-wake.js";
+import { readDrainLock } from "./drain-lock.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_HEAD_RECHECK_MS, loadDefaultPolicy, type Policy } from "./policy.js";
 import { createHash } from "node:crypto";
 import { codeqlAlertsReadDue } from "./pr-blocker.js";
@@ -279,7 +280,8 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   let openFiles = files;
   const filingFiles = loadPlanFilingFileCache(join(config.root, "state"));
   const stageReuse = createOpenPrStageReuse();
-  const headReadGate = createHeadReadGate();
+  const headReadSweeper = createHeadReadSweeper();
+  const headReadGate = headReadSweeper.gate;
   if (filingFiles.unreadable !== undefined) log("plan_filing_files.store_unreadable", { reason: filingFiles.unreadable });
   let reads = new Map<string, unknown>();
   let generationClock = 0;
@@ -343,7 +345,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     github.resetFailureFlags?.();
     let openPrRows: OpenPrRest[] | undefined;
     let openPrError: string | undefined;
-    await beginHeadReadSweep(headReadGate, config.root, checkoutRoot, io.headReads);
+    await headReadSweeper.begin(config.root, checkoutRoot, io.headReads);
     try { openPrRows = await fetchTickOpenPrs(owner, repo, fetchAsync, pacer, headReadGate); }
     catch (error) {
       openPrError = String(error);
@@ -3061,6 +3063,8 @@ export interface HeadReadSweepIo {
   lsRemoteHeads?: (checkoutRoot: string) => Promise<ReadonlySet<string>>;
   clock?: Clock;
   recheckMs?: number;
+  /** Whether this process holds the instance's drain lock; absent, {@link holdsDrainLock} reads the lock file. */
+  holdsDrainLock?: (root: string) => boolean;
 }
 
 /** Every branch and pull-request head sha on `origin`, from ONE `git ls-remote` (git upload-pack, never the REST quota). */
@@ -3079,23 +3083,67 @@ export function headRecheckMsFromPolicy(load: () => Pick<Policy, "values"> = loa
   }
 }
 
-/** Starts one sweep's head-read gate: the acknowledged changed heads, then ONE ls-remote. A failed ls-remote
- *  reads every head over REST this sweep, and its reason rides the counts onto `sweep.summary`. */
-export async function beginHeadReadSweep(gate: HeadReadGate, root: string, checkoutRoot: string, io: HeadReadSweepIo = {}): Promise<void> {
-  const changed = takeChangedHeadsForRead(root);
-  let heads: ReadonlySet<string> | undefined;
-  let unguardedReason: string | undefined;
-  try {
-    heads = await (io.lsRemoteHeads ?? lsRemoteHeadShas)(checkoutRoot);
-  } catch (error) {
-    // Not "no heads": an unknown head set turns every skip off, so this sweep reads each head over REST.
-    unguardedReason = `ls-remote failed: ${String((error as Error)?.message ?? error).slice(0, 200)}`;
-  }
-  gate.beginSweep({
-    heads, changed, nowMs: (io.clock ?? systemClock).now(), recheckMs: io.recheckMs ?? headRecheckMsFromPolicy(),
-    ...(unguardedReason === undefined ? {} : { unguardedReason }),
-  });
+/** True when this process holds `<root>/state/drain.lock`: the lock file names its holder's pid (drain-lock.ts). A
+ *  standby daemon's pre-lock reads, and any read outside a daemon, answer false. */
+export function holdsDrainLock(root: string): boolean {
+  return readDrainLock(join(root, "state", "drain.lock"))?.pid === process.pid;
 }
+
+/** One consumer of the changed-heads journal: its gate, the entries it already applied, and whether it held the lock. */
+export interface HeadReadSweeper {
+  gate: HeadReadGate;
+  /** Starts one sweep: applies each changed head not yet applied, then ONE ls-remote. A failed ls-remote reads every
+   *  head over REST this sweep, and its reason rides the counts onto `sweep.summary`. */
+  begin(root: string, checkoutRoot: string | undefined, io?: HeadReadSweepIo): Promise<void>;
+}
+
+/**
+ * W1-T14809 (fleet review of #21033): every consumer PEEKS the journal and applies each entry once, so a standby's
+ * pre-lock read, the read plane and a light pass never take an entry from one another. A sweeper that has just taken
+ * the drain lock first drops every rollup it kept before the lock, so a promoted standby re-reads each head; only the
+ * lock holder prunes entries older than headRecheckMs, which no gate needs.
+ */
+export function createHeadReadSweeper(gate: HeadReadGate = createHeadReadGate()): HeadReadSweeper {
+  let locked = false;
+  const applied = new Map<string, number>();
+  return {
+    gate,
+    async begin(root, checkoutRoot, io = {}) {
+      const nowMs = (io.clock ?? systemClock).now();
+      const recheckMs = io.recheckMs ?? headRecheckMsFromPolicy();
+      const holds = (io.holdsDrainLock ?? holdsDrainLock)(root);
+      if (holds && !locked) {
+        gate.reset();
+        applied.clear();
+      }
+      locked = holds;
+      if (holds) pruneAcknowledgedChangedHeads(root, nowMs - recheckMs);
+      for (const [key, receivedMs] of applied) if (!(nowMs - receivedMs < recheckMs)) applied.delete(key);
+      const changed = peekChangedHeads(root).filter((entry) => {
+        const receivedMs = Date.parse(entry.received_at);
+        // An entry as old as the floor is a no-op: a read kept before it has aged out, and one kept after reflects it.
+        if (!(nowMs - receivedMs < recheckMs)) return false;
+        const key = `${entry.sha}\0${entry.event}\0${entry.received_at}`;
+        if (applied.has(key)) return false;
+        applied.set(key, receivedMs);
+        return true;
+      });
+      let heads: ReadonlySet<string> | undefined;
+      let unguardedReason: string | undefined;
+      try {
+        if (checkoutRoot === undefined) throw new Error("no target checkout to read origin's heads from");
+        heads = await (io.lsRemoteHeads ?? lsRemoteHeadShas)(checkoutRoot);
+      } catch (error) {
+        // Not "no heads": an unknown head set turns every skip off, so this sweep reads each head over REST.
+        unguardedReason = `ls-remote failed: ${String((error as Error)?.message ?? error).slice(0, 200)}`;
+      }
+      gate.beginSweep({ heads, changed, nowMs, recheckMs, ...(unguardedReason === undefined ? {} : { unguardedReason }) });
+    },
+  };
+}
+
+/** The light pass's own sweepers, one per instance and repository in this thread, so its kept reads outlive one pass. */
+const lightPassSweepers = new Map<string, HeadReadSweeper>();
 
 /** W1-T6591: {@link buildOpenPrViews} in ONE pass, every remote read awaited at its own step. */
 export function buildOpenPrViewsAsync(
@@ -3106,6 +3154,8 @@ export function buildOpenPrViewsAsync(
     fetchAsync?: GhApiFetcher;
     fetchCiFailureEvidenceAsync?: OpenPrCiFailureRead;
     readRequiredContextsAsync?: (owner: string, repo: string) => Promise<RequiredContextsRead>;
+    /** W1-T14809: the light pass's head-read sweeper and its seams; absent, this thread's own one for the instance. */
+    headReads?: { sweeper?: HeadReadSweeper; io?: HeadReadSweepIo };
   } = {},
 ): Promise<ClassifiedOpenPrView[]> {
   const transport: GhApiFetcher = deps.fetchAsync ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit));
@@ -3116,7 +3166,18 @@ export function buildOpenPrViewsAsync(
     read: paced,
     concurrent: true,
     dependencyIdentityRead: paced,
-    openPrRows: () => fetchOpenPrsWithPostedIdsAsync(owner, repo, transport, deps.pacer),
+    openPrRows: async () => {
+      // W1-T14809: a light pass's own open-PR read is gated like the tick read's, by this thread's sweeper.
+      const stateDir = dirname(ledgerPath);
+      const key = `${stateDir}\0${owner}/${repo}`;
+      const sweeper = deps.headReads?.sweeper ?? lightPassSweepers.get(key) ?? lightPassSweepers.set(key, createHeadReadSweeper()).get(key)!;
+      await sweeper.begin(dirname(stateDir), deps.ciGateSource?.checkoutRoot, deps.headReads?.io);
+      try {
+        return await fetchOpenPrsWithPostedIdsAsync(owner, repo, transport, deps.pacer, sweeper.gate);
+      } finally {
+        recordHeadReadCounts(stateDir, sweeper.gate.counts());
+      }
+    },
     ciFailures: (o, r, rollup) => paceGhEntryAsync(deps.pacer, isGhRateLimitError, async () => ciFailures(o, r, rollup)),
     requiredContexts: deps.readRequiredContextsAsync ?? readRequiredStatusCheckContextsAsync,
     baseTip: async () => {

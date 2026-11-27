@@ -2,7 +2,7 @@
 // with one token-free ls-remote per sweep and today's REST reads when it fails.
 //
 // Each test drives the read plane's real open-PR read (`fetchOpenPrsWithPostedIdsAsync`, the walk and its
-// W1-T12530 prefetch) through the head-read gate the producer builds, started by `beginHeadReadSweep`. The
+// W1-T12530 prefetch) through the head-read sweeper the producer builds (`createHeadReadSweeper`). The
 // deliveries go through the real signed webhook route and the daemon-side acknowledge, so a head is
 // re-read only by what a verified delivery journaled and an accepted sweep claimed.
 import assert from "node:assert/strict";
@@ -21,7 +21,8 @@ import {
   githubAcknowledgedHeadsPath,
   githubChangedHeadsPath,
   sweepWakeMarkerPath,
-  takeAcknowledgedChangedHeads,
+  peekChangedHeads,
+  pruneAcknowledgedChangedHeads,
   wireSweepWakeToDaemon,
 } from "#src/lib/github-event-wake.js";
 import {
@@ -34,7 +35,10 @@ import {
 } from "#src/lib/open-prs-rest.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_HEAD_RECHECK_MS, loadDefaultPolicy } from "#src/lib/policy.js";
 import { createService } from "#src/lib/service.js";
-import { beginHeadReadSweep, fetchOpenPrsWithPostedIdsAsync, headRecheckMsFromPolicy, lsRemoteHeadShas } from "#src/lib/tick-read-worker.js";
+import {
+  buildOpenPrViewsAsync, createHeadReadSweeper, fetchOpenPrsWithPostedIdsAsync, headRecheckMsFromPolicy, holdsDrainLock, lsRemoteHeadShas,
+  type HeadReadSweeper,
+} from "#src/lib/tick-read-worker.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { gitRepo, originWithClone } from "#test/helpers/git-repo.js";
 
@@ -50,7 +54,7 @@ function clockAt(ms: number): Clock {
 }
 
 /** GitHub as ten open pull requests, each head with one completed check and one status; every read is counted. */
-function openPrReads() {
+function openPrReads(lenient = false) {
   const calls: string[] = [];
   const pull = (n: number) => ({
     number: n, html_url: `https://github.com/o/r/pull/${n}`, state: "open", draft: false, title: `pr ${n}`,
@@ -67,6 +71,7 @@ function openPrReads() {
       return { check_runs: [{ id: 1, name: "ci-gate", status: "completed", conclusion, started_at: "2026-11-25T00:00:00Z" }] };
     }
     if (path.endsWith("/status")) return { statuses: [{ context: "remudero-review", state: "success", created_at: "2026-11-25T00:00:00Z" }] };
+    if (lenient) return [];
     throw new Error(`unexpected read ${path}`);
   };
   const headReads = () => calls.filter((path) => /\/commits\/[0-9a-f]{40}\/(check-runs|status)/.test(path));
@@ -84,12 +89,17 @@ function fixture() {
 
 const allHeads = async () => new Set(PRS.map(sha));
 
-async function sweep(gate: HeadReadGate, root: string, gh: ReturnType<typeof openPrReads>, atMs: number,
-  lsRemoteHeads: (checkoutRoot: string) => Promise<ReadonlySet<string>> = allHeads) {
+async function sweep(sweeper: HeadReadSweeper, root: string, gh: ReturnType<typeof openPrReads>, atMs: number,
+  lsRemoteHeads: (checkoutRoot: string) => Promise<ReadonlySet<string>> = allHeads, locked = true) {
   gh.reset();
-  await beginHeadReadSweep(gate, root, root, { lsRemoteHeads, clock: clockAt(atMs), recheckMs: DEFAULT_GITHUB_EVENT_WAKE_HEAD_RECHECK_MS });
-  const prs = await fetchOpenPrsWithPostedIdsAsync("o", "r", gh.read, undefined, gate);
-  return { prs, headReads: gh.headReads(), counts: gate.counts() };
+  await sweeper.begin(root, root, sweepIo(atMs, lsRemoteHeads, locked));
+  const prs = await fetchOpenPrsWithPostedIdsAsync("o", "r", gh.read, undefined, sweeper.gate);
+  return { prs, headReads: gh.headReads(), counts: sweeper.gate.counts() };
+}
+
+/** The sweeper's seams at `atMs`; `locked` says whether this process holds the drain lock (a standby does not). */
+function sweepIo(atMs: number, lsRemoteHeads: (checkoutRoot: string) => Promise<ReadonlySet<string>> = allHeads, locked = true) {
+  return { lsRemoteHeads, clock: clockAt(atMs), recheckMs: DEFAULT_GITHUB_EVENT_WAKE_HEAD_RECHECK_MS, holdsDrainLock: () => locked };
 }
 
 /** POST one signed delivery to the real webhook route, owned by the daemon at `root`. */
@@ -134,7 +144,7 @@ test("W1-T14809: a sweep skips check reads for a head no webhook named", async (
   const f = fixture();
   try {
     const gh = openPrReads();
-    const gate = createHeadReadGate();
+    const gate = createHeadReadSweeper();
     // A status for a commit that is no PR's head: the webhook is delivering, and it names none of the ten.
     assert.equal(await deliver(f.root, "status", { sha: sha(99), state: "success", context: "deploy" }, "d-live", T0), 202);
     acceptPass(f.root);
@@ -191,7 +201,7 @@ test("W1-T14809: a webhook naming a head re-reads its checks", async () => {
   const f = fixture();
   try {
     const gh = openPrReads();
-    const gate = createHeadReadGate();
+    const gate = createHeadReadSweeper();
     assert.equal(await deliver(f.root, "status", { sha: sha(99), state: "success", context: "deploy" }, "d-live", T0), 202);
     acceptPass(f.root);
     await sweep(gate, f.root, gh, T0);
@@ -213,7 +223,7 @@ test("W1-T14809: a webhook naming a head re-reads its checks", async () => {
     assert.deepEqual(named.counts, { head_reads_made: 2, head_reads_skipped: 18 });
     const pr3 = named.prs.find((pr) => pr.number === 3);
     assert.equal(pr3?.statusCheckRollup?.find((entry) => entry.name === "ci-gate")?.conclusion, "FAILURE", "the woken sweep's read carries the new verdict");
-    assert.equal(existsSync(githubChangedHeadsPath(f.root)), false, "the read consumed the entry it acted on");
+    assert.ok(existsSync(githubChangedHeadsPath(f.root)), "the read never takes the entry: other gates still need it");
 
     // The gated sweep's acknowledge then consumes the marker; the entry was not lost, and is not read twice.
     acceptPass(f.root);
@@ -231,8 +241,18 @@ test("W1-T14809: a webhook naming a head re-reads its checks", async () => {
     assert.equal(changedHeadShaOf("status", null), undefined);
     acceptPass(f.root);
     writeFileSync(githubAcknowledgedHeadsPath(f.root), `${readFileSync(githubAcknowledgedHeadsPath(f.root), "utf8")}{torn\n{"sha":1}\n`);
-    assert.deepEqual(takeAcknowledgedChangedHeads(f.root).map((entry) => entry.sha), [sha(4)], "a torn or malformed line names no head");
-    assert.deepEqual(takeAcknowledgedChangedHeads(f.root), [], "a take consumes the acknowledged entries");
+    assert.deepEqual(peekChangedHeads(f.root).map((entry) => entry.sha), [sha(99), sha(3), sha(4)], "a torn or malformed line names no head");
+    assert.equal(peekChangedHeads(f.root).length, 3, "a peek takes nothing");
+    // The lock holder prunes what no gate needs: entries received before now - headRecheckMs.
+    pruneAcknowledgedChangedHeads(f.root, T0 + 100_000);
+    assert.deepEqual(peekChangedHeads(f.root).map((entry) => entry.sha), [sha(4)]);
+    pruneAcknowledgedChangedHeads(f.root, T0, () => { throw new Error("disk full"); });
+    assert.deepEqual(peekChangedHeads(f.root), [], "a failed re-append drops only what the floor re-reads anyway");
+    acknowledgeChangedHeads(f.root);
+    writeFileSync(githubAcknowledgedHeadsPath(f.root), `${JSON.stringify({ sha: sha(4), event: "pull_request", received_at: new Date(T0 + 150_000).toISOString() })}\n`);
+    pruneAcknowledgedChangedHeads(f.root, T0 + 200_000);
+    assert.equal(existsSync(githubAcknowledgedHeadsPath(f.root)), false, "nothing recent, nothing kept");
+    pruneAcknowledgedChangedHeads(f.root, T0);
     acknowledgeChangedHeads(f.root);
     assert.equal(existsSync(githubAcknowledgedHeadsPath(f.root)), false, "an empty journal acknowledges nothing");
 
@@ -245,9 +265,10 @@ test("W1-T14809: a webhook naming a head re-reads its checks", async () => {
     mkdirSync(githubAcknowledgedHeadsPath(f.root));
     acknowledgeChangedHeads(f.root);
     assert.equal(existsSync(githubChangedHeadsPath(f.root)), false, "the live journal was claimed");
-    // An unreadable acknowledged file is taken as no entries and removed, never thrown into the tick.
-    assert.deepEqual(takeAcknowledgedChangedHeads(f.root), []);
-    assert.equal(existsSync(githubAcknowledgedHeadsPath(f.root)), false, "the unreadable take is removed");
+    // An unreadable acknowledged file reads as no entries, never thrown into the tick; a prune removes it.
+    assert.deepEqual(peekChangedHeads(f.root), []);
+    pruneAcknowledgedChangedHeads(f.root, T0);
+    assert.equal(existsSync(githubAcknowledgedHeadsPath(f.root)), false, "the unreadable file is pruned");
     // A journal append that cannot land still accepts the delivery; the recheck interval covers the head.
     const bare = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14809-nostate-`));
     try {
@@ -265,7 +286,7 @@ test("W1-T14809: a failed ls-remote reads every head over REST", async () => {
   const f = fixture();
   try {
     const gh = openPrReads();
-    const gate = createHeadReadGate();
+    const gate = createHeadReadSweeper();
     assert.equal(await deliver(f.root, "status", { sha: sha(99), state: "success", context: "deploy" }, "d-live", T0), 202);
     acceptPass(f.root);
     await sweep(gate, f.root, gh, T0);
@@ -279,10 +300,10 @@ test("W1-T14809: a failed ls-remote reads every head over REST", async () => {
     // The real default: one `git ls-remote` in a checkout with no origin fails the same way.
     const noOrigin = gitRepo({ kind: "w1-t14809-no-origin" });
     gh.reset();
-    await beginHeadReadSweep(gate, f.root, noOrigin.dir, { clock: clockAt(T0 + 3 * MINUTE) });
-    await fetchOpenPrsWithPostedIdsAsync("o", "r", gh.read, undefined, gate);
+    await gate.begin(f.root, noOrigin.dir, { clock: clockAt(T0 + 3 * MINUTE), holdsDrainLock: () => true });
+    await fetchOpenPrsWithPostedIdsAsync("o", "r", gh.read, undefined, gate.gate);
     assert.equal(gh.headReads().length, 20);
-    assert.match(gate.counts().head_reads_unguarded ?? "", /^ls-remote failed:/);
+    assert.match(gate.gate.counts().head_reads_unguarded ?? "", /^ls-remote failed:/);
 
     // A read that fails keeps nothing for its head, synchronously or not, so the next sweep reads it again.
     const failing = createHeadReadGate();
@@ -299,11 +320,80 @@ test("W1-T14809: a failed ls-remote reads every head over REST", async () => {
     assert.equal(headRecheckMsFromPolicy(() => { throw new Error("unreadable policy"); }), DEFAULT_GITHUB_EVENT_WAKE_HEAD_RECHECK_MS);
 
     // A quiet repository keeps its skips: no delivery for an interval re-reads nothing the floor has not aged out.
-    const quiet = createHeadReadGate();
+    const quiet = createHeadReadSweeper();
     await sweep(quiet, f.root, gh, T0 + 20 * MINUTE);
     const silent = await sweep(quiet, f.root, gh, T0 + 21 * MINUTE);
     assert.deepEqual(silent.headReads, [], "a kept read younger than headRecheckMs is not re-read, delivery or none");
     assert.deepEqual(silent.counts, { head_reads_made: 0, head_reads_skipped: 20 });
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("W1-T14809: a standby's read takes no changed head from the active daemon, and a promotion re-reads", async () => {
+  const f = fixture();
+  try {
+    const gh = openPrReads();
+    const active = createHeadReadSweeper();
+    const standby = createHeadReadSweeper();
+    await sweep(active, f.root, gh, T0);
+    await sweep(standby, f.root, gh, T0, allHeads, false);
+
+    // (a) hand-over order: delivery, then the standby's pre-lock tick read, then the active daemon's next read.
+    gh.fail();
+    const checkRun = { action: "completed", check_run: { id: 9, name: "ci-gate", conclusion: "failure", status: "completed", head_sha: sha(3) } };
+    assert.equal(await deliver(f.root, "check_run", checkRun, "d-handover", T0 + 30_000), 202);
+    const pre = await sweep(standby, f.root, gh, T0 + MINUTE, allHeads, false);
+    assert.equal(pre.headReads.length, 2, "the standby re-reads the named head too");
+    const next = await sweep(active, f.root, gh, T0 + MINUTE + 1_000);
+    assert.equal(next.headReads.length, 2, "the active daemon's next read still re-reads the named head");
+    assert.equal(next.prs.find((pr) => pr.number === 3)?.statusCheckRollup?.find((entry) => entry.name === "ci-gate")?.conclusion, "FAILURE");
+
+    // (b) the standby kept reads before it held the lock; an entry it never saw (here, lost from the journal) is
+    // covered because its first locked read drops every pre-lock rollup and re-reads each head.
+    const late = createHeadReadSweeper();
+    gh.reset();
+    const ok = openPrReads();
+    await sweep(late, f.root, ok, T0 + 2 * MINUTE, allHeads, false);
+    ok.fail();
+    rmSync(githubChangedHeadsPath(f.root), { force: true });
+    rmSync(githubAcknowledgedHeadsPath(f.root), { force: true });
+    const promoted = await sweep(late, f.root, ok, T0 + 3 * MINUTE, allHeads, true);
+    assert.equal(promoted.headReads.length, 20, "the first locked read re-reads every head");
+    assert.equal(promoted.prs.find((pr) => pr.number === 3)?.statusCheckRollup?.find((entry) => entry.name === "ci-gate")?.conclusion, "FAILURE");
+    const steady = await sweep(late, f.root, ok, T0 + 4 * MINUTE, allHeads, true);
+    assert.equal(steady.headReads.length, 0, "a lock already held drops nothing");
+
+    // The lock is read from the lock file itself: this process holds it only when the file names its pid.
+    assert.equal(holdsDrainLock(f.root), false, "no lock file, no lock");
+    writeFileSync(join(f.stateDir, "drain.lock"), JSON.stringify({ pid: process.pid + 1, host: "h", startedAt: new Date(T0).toISOString() }));
+    assert.equal(holdsDrainLock(f.root), false, "another process's lock");
+    writeFileSync(join(f.stateDir, "drain.lock"), JSON.stringify({ pid: process.pid, host: "h", startedAt: new Date(T0).toISOString() }));
+    assert.equal(holdsDrainLock(f.root), true);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("W1-T14809: a light pass's own open-PR read skips the heads its last read kept", async () => {
+  const f = fixture();
+  try {
+    const gh = openPrReads(true);
+    const sweeper = createHeadReadSweeper();
+    const ledgerPath = join(f.stateDir, "ledger.ndjson");
+    writeFileSync(ledgerPath, "");
+    const lightPass = (atMs: number) => buildOpenPrViewsAsync("o", "r", ledgerPath, {
+      fetchAsync: gh.read, ciGateSource: { repository: REPOSITORY, checkoutRoot: f.root, isSelf: false },
+      headReads: { sweeper, io: sweepIo(atMs) }, requiredContexts: () => ["ci-gate"], readCiGateRequired: () => [],
+      readRequiredContextsAsync: async () => ({ kind: "contexts" as const, contexts: ["ci-gate"] }), fetchCiFailureEvidence: () => [],
+    });
+    gh.reset();
+    await lightPass(T0);
+    assert.equal(gh.headReads().length, 20, "positive control: the first light pass reads every head");
+    gh.reset();
+    await lightPass(T0 + MINUTE);
+    assert.deepEqual(gh.headReads(), [], "a quiet repository with fresh kept reads: zero head reads");
+    assert.deepEqual(takeHeadReadCounts(f.stateDir), { head_reads_made: 20, head_reads_skipped: 20 }, "its counts reach sweep.summary");
   } finally {
     f.cleanup();
   }
