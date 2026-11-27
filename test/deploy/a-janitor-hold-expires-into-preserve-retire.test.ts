@@ -229,3 +229,34 @@ test("W1-T14971 criterion 3: a seed store a live checkout uses through a link in
   assert.match(r.stdout, new RegExp(`KEEP ${used}: contains dependency seed store.*seed store used by ${join(live, "node_modules", "pkg")}`));
   assert.deepEqual(preserved(fx, used), []);
 });
+
+test("W1-T14971 criterion 2: a broken clone a live checkout borrows objects from is kept", () => {
+  const fx = fixture();
+  const { main } = repos(fx);
+  const { unit } = brokenUnit(fx, main, "k");
+  const borrower = join(fx.scratch, "borrower-of-k.Ii9999");
+  git(fx.root, "clone", "--quiet", main, borrower);
+  mkdirSync(join(borrower, ".git", "objects", "info"), { recursive: true });
+  writeFileSync(join(borrower, ".git", "objects", "info", "alternates"), `${join(unit, "repo", ".git", "objects")}\n`);
+  age(unit, 10 * DAY_HOURS);
+
+  const r = run(fx, scratchOnly(fx));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(unit), true, r.stdout);
+  assert.match(r.stdout, new RegExp(`KEEP ${unit}: borrows from missing .*lends objects to ${borrower}`));
+  assert.deepEqual(preserved(fx, unit), []);
+});
+
+test("W1-T14971 criterion 3: a seed store used from a home .claude worktree is kept", () => {
+  const fx = fixture();
+  const used = seedUnit(fx, "rmd-seeded-home.Jj0000");
+  const agentTree = join(fx.home, "agent", ".claude", "worktrees", "wt-x");
+  mkdirSync(join(agentTree, "node_modules"), { recursive: true });
+  symlinkSync(join(used, "seeds", "store", "pkg"), join(agentTree, "node_modules", "pkg"));
+  age(used, 10 * DAY_HOURS);
+
+  const r = run(fx, scratchOnly(fx, { RMD_CLEANUP_PRESERVE_ROOTS: "" }));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(used), true, r.stdout);
+  assert.match(r.stdout, new RegExp(`KEEP ${used}: contains dependency seed store.*seed store used by ${join(agentTree, "node_modules", "pkg")}`));
+});

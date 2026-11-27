@@ -1347,6 +1347,23 @@ lender_check() {
 HELD_LINKS_TAKEN=0; HELD_MARK_TAKEN=0
 # held_unit_hosts_nothing <unit>: fails with SCRATCH_REASON when a repository inside the unit registers a linked
 # worktree outside it, or when the registrations cannot be read.
+# held_outside_borrowers <unit>: fails with SCRATCH_REASON when an alternates file outside the unit points into it.
+held_outside_borrowers() {
+  local p="$1" pp file target borrower borrowers=""
+  if [ "$ALTERNATES_OK" != 1 ]; then SCRATCH_REASON="alternates scan failed (unknown)"; return 1; fi
+  pp="$(cd -P -- "$p" 2>/dev/null && pwd -P)" || pp="$p"
+  while IFS='	' read -r file target; do
+    [ -n "$file" ] || continue
+    case "$file" in "$p"/*|"$pp"/*) continue ;; esac
+    case "$target" in
+      "$p"|"$p"/*|"$pp"|"$pp"/*)
+        borrower="${file%/objects/info/alternates}"; borrower="${borrower%/.git}"
+        borrowers="$borrowers${borrowers:+, }$borrower" ;;
+    esac
+  done <<< "$ALTERNATES"
+  [ -z "$borrowers" ] || { SCRATCH_REASON="lends objects to $borrowers"; return 1; }
+  return 0
+}
 held_unit_hosts_nothing() {
   local p="$1" reg target
   while IFS= read -r reg; do
@@ -1374,8 +1391,9 @@ held_seed_links() {
       HELD_SEED_LINKS="$HELD_SEED_LINKS$link	$(normalize_path "$target")
 "
     done <<< "$out"
-  done < <(printf '%s\n' "$SCRATCH_ROOTS" "$SCRATCH_PARENTS" "$WORKTREE_ROOTS" "$LIVE_CHECKOUTS" "$PRESERVE_ROOTS" "$AGENT_SCRATCH" |
-             tr ':' '\n' | awk 'NF && !seen[$0]++')
+  done < <({ printf '%s\n' "$SCRATCH_ROOTS" "$SCRATCH_PARENTS" "$WORKTREE_ROOTS" "$LIVE_CHECKOUTS" "$PRESERVE_ROOTS" \
+                     "$AGENT_SCRATCH" "$PROTECTED_WORKTREE_ROOTS" "$STATE_PARENTS" | tr ':' '\n'
+             for root in "$CLEAN_HOME"/*/.claude/worktrees; do [ -d "$root" ] && printf '%s\n' "$root"; done; } | awk 'NF && !seen[$0]++')
 }
 held_seed_unreferenced() {   # fails with SCRATCH_REASON when a link outside unit $1 points into it, or the walk failed
   local p="$1" pp link target
@@ -1407,6 +1425,8 @@ retire_held_scratch_unit() {
   if ! lender_check "$p"; then
     case "$SCRATCH_REASON" in "borrows from missing "*) ;; *) log "KEEP $p: $why; $SCRATCH_REASON"; return ;; esac
   fi
+  # lender_check stops at the first missing alternate; outside borrowers are checked on their own.
+  if ! held_outside_borrowers "$p"; then log "KEEP $p: $why; $SCRATCH_REASON"; return; fi
   [ "$HELD_LINKS_TAKEN" = 1 ] || { snapshot_links; held_seed_links; HELD_LINKS_TAKEN=1; }
   if ! link_lender_check "$p"; then log "KEEP $p: $why; $SCRATCH_REASON"; return; fi
   if ! held_unit_hosts_nothing "$p"; then log "KEEP $p: $why; $SCRATCH_REASON"; return; fi
