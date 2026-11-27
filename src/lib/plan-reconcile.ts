@@ -151,18 +151,13 @@ export function reconcileRecordStatus(
   if (spans.length !== 1) return { skipped: "no-status-field" };
   const { start, end } = spans[0];
   // The span opens `- `; read it as a lone record's body so a record that opens with `status:` is read like the rest.
-  const body = `  ${text.slice(start + 2, end)}`.replace(SHARED_FLIP_MARK_RE, "");
+  const body = `  ${text.slice(start + 2, end)}`;
   const out = reconcileShardStatus(body, taskId, isCreditedMerged);
   if (out.text === undefined) return out;
-  // A file whose other records already read merged holds every `status:` line the flip writes, so the landing's proof
-  // would match main too. The marked status line is the flip's own: a lifecycle line, unique to this landing.
-  const marked = out.text.replace(/^ {2}status: merged$/m, () => `  status: merged${sharedFlipMark(taskId)}`);
-  return { text: text.slice(0, start) + "- " + marked.slice(2) + text.slice(end) };
+  // Keep the edit a pure status flip. Besides preserving the status-only lint carve, this makes the
+  // same record eligible for reconciliation exactly once: on the next pass it reads `merged`.
+  return { text: text.slice(0, start) + "- " + out.text.slice(2) + text.slice(end) };
 }
-
-/** W1-T15048: the end-of-line mark a shared file's flip writes on its record's status line. */
-export const sharedFlipMark = (taskId: string): string => ` # plan reconcile: ${taskId} credited`;
-export const SHARED_FLIP_MARK_RE = /(?<=^ {2}status: merged) # plan reconcile: \S+ credited$/m;
 
 /** W1-T15048: every record of one file flipped onto that file's text, in record order. Undefined when none flips. */
 export function composeRecordStatuses(

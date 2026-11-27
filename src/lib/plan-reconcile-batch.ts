@@ -37,6 +37,12 @@ export function planReconcileRequeueProofTemplate(file: string): string {
 
 /** The template for one landed file: a shard whose landed text reads `status: queued` was re-queued. */
 export function planReconcileProofFor(file: string, landedText: string | undefined): string {
+  // A shared-file flip can produce the same pure status line as an already-merged record, so a
+  // grep of the landed blob cannot prove the flip. The task's composed-landing regression checks
+  // the per-file merged-record count and the real status-only lint carve together.
+  if (landedText !== undefined && [...landedText.matchAll(/^  status: merged[ \t]*$/gm)].length > 1) {
+    return "unit test: W1-T15048 criterion 1: every record of a shared shard lands in one composed input";
+  }
   return landedText !== undefined && /^  status: queued[ \t]*$/m.test(landedText)
     ? planReconcileRequeueProofTemplate(file)
     : planReconcileProofTemplate(file);

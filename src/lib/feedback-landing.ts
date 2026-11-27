@@ -1979,7 +1979,12 @@ function planReconcileLandingKindSteps(
     {
       family: "plan-reconcile",
       commitMessage: (files) => [PLAN_RECONCILE_LANDING_PR_TITLE, "", "Automated plan-status reconciliation from the measurement cadence.", "", ...files.map((file) => `- ${file}`)].join("\n"),
-      prBody: (files, content) => planReconcilePrBody(files, (file) => landingProof(file, planReconcileProofFor(file, content?.head(file)), content)),
+      prBody: (files, content) => planReconcilePrBody(files, (file) => {
+        const proof = planReconcileProofFor(file, content?.head(file));
+        // A status-line grep cannot distinguish a shared-file flip from the same status already
+        // present on another record. Preserve the batch's count-driven unit-test proof in that case.
+        return proof.startsWith("unit test:") ? proof : landingProof(file, proof, content);
+      }),
     },
     root,
     opts,

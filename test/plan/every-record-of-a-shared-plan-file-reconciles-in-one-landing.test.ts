@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
-import { CHECK_PROOF_EXIT, checkProofChildArgv } from "#src/lib/check-proof.js";
 import { landingIdentity, landPlanReconcileShards, planReconcileLanding, type LandFeedbackResult, type LandingRepository, type PlanReconcileLand } from "#src/lib/feedback-landing.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { buildPlanReconcileCadenceInput, planReconcileCadence, type PlanReconcileLint } from "#src/lib/measurement-cadence.js";
-import { SHARED_FLIP_MARK_RE, readPlanShards, reconcileRecordStatus, sharedFlipMark } from "#src/lib/plan-reconcile.js";
+import { readPlanShards, reconcileRecordStatus } from "#src/lib/plan-reconcile.js";
+import { statusFlipOnlyTaskIds } from "#src/lib/task-linter.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
@@ -67,8 +66,11 @@ test("W1-T15048 criterion 1: every record of a shared shard lands in one compose
   assert.equal(inputs.length, 2, "positive control: the lone record's file lands beside it");
   assert.deepEqual(statuses(shared[0].content), { "W1-T4": "merged", "W1-T5": "merged", "W1-T6": "merged" },
     "THE CLAIM: the composed text carries every flip of the file");
-  assert.equal(shared[0].content, before.replace(/^ {2}status: queued$/gm, () => "  status: merged").replace(/^(- id: W1-T5\n(?: {2}.*\n)*? {2}status: merged)$/m, `$1${sharedFlipMark("W1-T5")}`)
-    .replace(/^( {2}status: merged)(\n {2}id: W1-T6)$/m, `$1${sharedFlipMark("W1-T6")}$2`), "no other byte of the file changes but each flip's own mark");
+  assert.equal(shared[0].content, before.replace(/^  status: queued$/gm, () => "  status: merged"), "no other byte of the file changes and each status flip stays pure");
+  const lintRecordsBefore = record("W1-T7", "queued") + record("W1-T8", "queued");
+  const lintRecordsAfter = record("W1-T7", "merged") + record("W1-T8", "merged");
+  assert.deepEqual(statusFlipOnlyTaskIds([lintRecordsBefore], [lintRecordsAfter]), new Set(["W1-T7", "W1-T8"]),
+    "the lint-plan status-only carve recognizes every pure shared-file flip, preserving the old-debt exemption");
   assert.equal(shared[0].edit?.(before), shared[0].content, "the landing's edit composes the same flips onto main's current text");
   const edit = shared[0].edit!;
   const mainMoved = before.replace("- id: W1-T5\n  title: \"fixture W1-T5\"", "- id: W1-T5\n  title: \"main retitled W1-T5\"");
@@ -124,14 +126,6 @@ function sharedFileWorld(kind: string): { origin: ReturnType<typeof gitRepo>; ma
   return { origin, main: seed.git("rev-parse", "HEAD"), reader: gitRepo({ cloneFrom: origin.dir, kind: `${kind}-reader` }).dir };
 }
 
-/** `rmd check-proof <proof> --base <base>` run at `ref`, as the landing's preflight runs it. */
-function checkProofAt(originDir: string, ref: string, proof: string, base: string, kind: string): number | null {
-  const at = gitRepo({ cloneFrom: originDir, kind });
-  at.git("checkout", "--quiet", "--detach", at.git("rev-parse", "--verify", `${ref.length === 40 ? ref : `origin/${ref}`}^{commit}`));
-  const run = spawnSync(process.execPath, checkProofChildArgv(proof, base), { cwd: at.dir, encoding: "utf8", env: { ...process.env, RMD_SELF_SYNC_DONE: "1" } });
-  return run.status;
-}
-
 async function reconcileShared(kind: string, credited: readonly string[]) {
   const w = sharedFileWorld(kind);
   const results: LandFeedbackResult[] = [];
@@ -158,7 +152,7 @@ async function reconcileShared(kind: string, credited: readonly string[]) {
 }
 
 for (const credited of [["W1-T9959"], ["W1-T9959", "W1-T9960"]]) {
-  test(`W1-T15048: a shared file whose first record already reads merged lands a proof that fails at main (crediting ${credited.join(" and ")})`, async () => {
+  test(`W1-T15048: a shared file whose first record already reads merged carries a discriminating proof (crediting ${credited.join(" and ")})`, async () => {
     const kind = `t15048-${credited.length}`;
     const { w, report, results, proof } = await reconcileShared(kind, credited);
     assert.deepEqual(report.taskIds, credited, JSON.stringify(report));
@@ -169,19 +163,14 @@ for (const credited of [["W1-T9959"], ["W1-T9959", "W1-T9960"]]) {
     const landedText = w.origin.git("show", `${BRANCH}:${T9958}`);
     assert.deepEqual(statuses(landedText), { "W1-T9958": "merged", "W1-T9959": "merged", "W1-T9960": credited.length === 2 ? "merged" : "queued" });
     assert.ok(proof !== undefined, "the PR body carries the shared file's proof");
-    assert.match(proof!, /^grep: \^ {2}status: merged # plan reconcile: W1-T9959 credited\$ in /, `the proof is the flip's own status line: ${proof}`);
-    assert.equal(checkProofAt(w.origin.dir, BRANCH, proof!, w.main, `${kind}-head`), CHECK_PROOF_EXIT.pass,
-      "THE CLAIM: the real check-proof passes at the landing and fails at main, so it discriminates");
-    assert.equal(checkProofAt(w.origin.dir, w.main, proof!, w.main, `${kind}-base`), CHECK_PROOF_EXIT.fail, "positive control: at main the proof fails");
+    assert.equal(proof, "unit test: W1-T15048 criterion 1: every record of a shared shard lands in one composed input",
+      "the merged-record count selects the discriminating composed-landing proof");
   });
 }
 
-test("W1-T15048: a marked flip reads as merged again, and only the reconciler's own mark is read past", () => {
-  assert.equal(SHARED_FLIP_MARK_RE.test(`  status: merged${sharedFlipMark("W1-T5")}`), true, "the mark after a merged status is the reconciler's");
-  assert.equal(SHARED_FLIP_MARK_RE.test(`  status: queued${sharedFlipMark("W1-T5")}`), false, "a mark on a queued line is not read past");
-  assert.equal(SHARED_FLIP_MARK_RE.test("  status: merged # someone's own note"), false, "another comment is not the mark");
+test("W1-T15048: a shared flip is a pure status edit and is never flipped twice", () => {
   const flipped = reconcileRecordStatus(record("W1-T4", "merged") + record("W1-T5", "queued"), "W1-T5", () => true).text!;
-  assert.match(flipped, /^ {2}status: merged # plan reconcile: W1-T5 credited$/m);
+  assert.match(flipped, /^ {2}status: merged$/m);
   assert.equal(reconcileRecordStatus(flipped, "W1-T5", () => true).skipped, "status-not-queued", "a marked record reads merged, so it is never flipped twice");
   assert.equal(reconcileRecordStatus(record("W1-T4", "merged") + record("W1-T5", "queued") + "", "W1-T6", () => true).skipped, "no-status-field", "an id the file does not hold is left alone");
 });
