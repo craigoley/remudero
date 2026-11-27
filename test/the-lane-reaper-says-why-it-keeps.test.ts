@@ -15,9 +15,6 @@ import {
   writeRunLock,
 } from "../src/lib/worker.js";
 import { gitRepo } from "./helpers/git-repo.js";
-import { emptyHostProcessTable } from "./helpers/empty-process-table.js";
-
-emptyHostProcessTable(); // W1-T15026: the reapers here decide removals on an owned process table, not the host's
 
 function fixture() {
   const root = makeTempDir("lane-census");
