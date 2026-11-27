@@ -30,6 +30,7 @@ import {
   type ShadowMemoryPorts,
 } from "./host-memory-shadow.js";
 import { loadLaneGovernorMode, type LaneGovernorMode } from "./policy.js";
+import { publishStaticWorkProjection } from "./test-slot.js";
 
 export const LANE_TARGET_STEP = "dispatch.lane_target";
 
@@ -492,8 +493,11 @@ export const SHARED_HOST_MEMORY_STALE_MS = 10 * 60_000;
 export function publishSharedHostMemory(reading: LaneMemoryReading | { unread: string }, atMs: number): void {
   if ("unread" in reading || reading.hostBaseAvailableMib === null || !Number.isFinite(reading.hostBaseAvailableMib)) {
     publishedSharedHostMemory = null;
+    publishStaticWorkProjection(null, atMs);
     return;
   }
+  // W1-T15179: a static stage (a warm tsc) in this process is admitted against the same projection, not raw headroom.
+  publishStaticWorkProjection(reading.hostBaseAvailableMib, atMs);
   publishedSharedHostMemory = {
     atMs,
     availableMib: reading.hostBaseAvailableMib,

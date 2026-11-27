@@ -76,6 +76,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { DAEMON_PID_ENV, type LedgerLine } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { installPolicyPath } from "./policy.js";
+import { readLiveStaticWork, type LiveStaticWork } from "./test-slot.js";
 
 export const SHADOW_STEP = "memory_budget.shadow";
 export const SHADOW_ERROR_STEP = "memory_budget.shadow_error";
@@ -309,7 +310,12 @@ export interface ShadowInputs {
   strictEvidence?: StrictPressureEvidence;
   /** The learned review estimate, for the counterfactual review (W1-T7095). Absent: the class default. */
   reviewEstimateMib?: number;
+  /** W1-T15179: each admitted static stage (a tsc) and the part of its named peak the projection charges. */
+  staticWork?: { records: StaticWorkCharge[] } | { unread: string };
 }
+
+/** W1-T15179: one admitted static stage's charge: its named peak less what its process tree already holds. */
+export interface StaticWorkCharge { label: string; peakMib: number; treeMib: number; chargeMib: number; basis: string }
 
 /** The host swap-in's parts as every memory_budget row carries them (OPERATOR RULING 2026-10-19 (4)). Pure. */
 export function swapInRowFields(numbers: Pick<ShadowVerdict["numbers"], "swapInDiskPagesPerSec" | "swapInZswapPagesPerSec" | "swapInZswapBasis">): {
@@ -518,6 +524,11 @@ export interface ShadowVerdict {
      * process RSS and cgroup charging have different sharing rules. Null when either side is unavailable. */
     unattributedContainerMibApprox: number | null;
     unattributedContainerBasis: "approximate-cgroup-current-minus-reservation-rss";
+    /** W1-T15179: admitted static stages' remaining claims, summed; only when one was read. */
+    staticWorkChargeMib?: number;
+    staticWorkStages?: number;
+    /** W1-T15179: why the static records could not be read (nothing was charged). */
+    staticWorkUnread?: string;
   };
 }
 
@@ -719,6 +730,9 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     }
   }
 
+  // W1-T15179: an admitted static stage's unrealized peak is a claim like a tree's (no record: nothing, as before).
+  const staticRecords = inputs.staticWork !== undefined && "records" in inputs.staticWork ? inputs.staticWork.records : [];
+  const staticCharge = staticRecords.reduce((sum, r) => sum + r.chargeMib, 0);
   let memAvailable: number | null = null;
   let projected: number | null = null;
   let projectedAllPeaks: number | null = null;
@@ -729,10 +743,10 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     // Staged so each reason names what tipped it: measured headroom less the daemons' typical growth, then the claims
     // (typical growth plus one tail), then uncertainty.
     const base = memAvailable - daemonTypical - coldStartReserve;
-    projected = base - hostClaim - marginMib;
-    projectedAllPeaks = memAvailable - daemonGrowth - coldStartReserve - unrealized - marginMib;
+    projected = base - hostClaim - staticCharge - marginMib;
+    projectedAllPeaks = memAvailable - daemonGrowth - coldStartReserve - unrealized - staticCharge - marginMib;
     if (base < policy.hostReserveMib) reasons.add("memory-available");
-    else if (base - hostClaim < policy.hostReserveMib) reasons.add("unrealized-reservations");
+    else if (base - hostClaim - staticCharge < policy.hostReserveMib) reasons.add("unrealized-reservations");
     else if (projected < policy.hostReserveMib) reasons.add("uncertainty");
   } else {
     reasons.add("uncertainty"); // No measured headroom: a fit cannot be shown.
@@ -807,6 +821,8 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       reservationRssMib: reservationRss,
       unattributedContainerMibApprox: containerCurrent === null || reservationRss === null ? null : containerCurrent - reservationRss,
       unattributedContainerBasis: "approximate-cgroup-current-minus-reservation-rss",
+      ...(staticRecords.length > 0 ? { staticWorkChargeMib: staticCharge, staticWorkStages: staticRecords.length } : {}),
+      ...(inputs.staticWork !== undefined && "unread" in inputs.staticWork ? { staticWorkUnread: inputs.staticWork.unread } : {}),
     },
   };
 }
@@ -1188,6 +1204,10 @@ export interface ShadowMemoryPorts {
   /** Writes the instance's pressure store (its prior swap-in sample and its swap-in history). `exclusive`: only create
    *  it, throwing EEXIST over an existing file, for a writer that could not read what is there. */
   writeFile: (path: string, content: string, options?: { exclusive?: boolean }) => void;
+  /** W1-T15179: the live static admission records (test-slot.ts). */
+  readStaticWork?: () => { records: LiveStaticWork[] } | { unread: string };
+  /** W1-T15179: the names under /proc, to find a static stage's process tree. */
+  listProc?: () => string[];
 }
 
 let installedSink: ShadowMemoryPorts["write"];
@@ -1267,6 +1287,8 @@ export function defaultShadowMemoryPorts(): ShadowMemoryPorts {
       return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
     },
     listStateDir: (dir) => readdirSync(dir),
+    readStaticWork: () => readLiveStaticWork(),
+    listProc: () => readdirSync("/proc"),
     estimate: (workerClass) => classEstimate(workerClass).estimateMib,
     typical: (workerClass) => classTypical(workerClass).estimateMib,
     survival: (workerClass, ageMs) => classSurvival(workerClass, ageMs),
@@ -2065,6 +2087,70 @@ export function serveScenarioOf(rows: readonly TailRow[], now: number, coverageM
 }
 
 /** One bounded snapshot for one start. `admitted`: its start runs whatever the verdict (a shadow-mode class). */
+/**
+ * W1-T15179: what each admitted static stage still claims. INVARIANT never-counted-twice: its tree's rss+swap is already
+ * out of MemAvailable, so only max(0, named peak - that) is charged; a process inside a reservation's recorded tree,
+ * and the daemon's own main process, are left out of the tree (a reservation's resident and the daemon's growth count
+ * them). A stage still waiting for admission holds nothing yet and is not charged. INVARIANT no-typecheck-no-change:
+ * with no record the inputs carry nothing.
+ */
+function staticWorkOf(ports: ShadowMemoryPorts, entryPaths: readonly string[]): Pick<ShadowInputs, "staticWork"> {
+  if (ports.readStaticWork === undefined) return {};
+  let read: ReturnType<NonNullable<ShadowMemoryPorts["readStaticWork"]>>;
+  try { read = ports.readStaticWork(); }
+  catch (error) {
+    // Charges nothing; the row names why.
+    return { staticWork: { unread: reasonOf(error) } };
+  }
+  if ("unread" in read) return { staticWork: read };
+  const admitted = read.records.filter((r) => r.admitted);
+  if (admitted.length === 0) return {};
+  const reserved = new Set<string>();
+  for (const path of entryPaths) {
+    const t = recordedTree(ports.readFile, path);
+    if (!("unread" in t)) for (const p of t.tree) reserved.add(identityKey(p));
+  }
+  const daemonPid = ports.daemonPid();
+  let procs: Map<number, { parent: number; start: string }> | undefined, unlisted: string | undefined;
+  try {
+    procs = new Map();
+    for (const name of (ports.listProc ?? (() => readdirSync("/proc")))()) {
+      if (!/^[0-9]+$/.test(name)) continue;
+      try {
+        const stat = parseProcStat(ports.readFile(`/proc/${name}/stat`));
+        if (stat && !stat.zombie) procs.set(Number(name), { parent: stat.parent, start: stat.start });
+      } catch (error) {
+        void error; // Exited between the listing and the read: it holds nothing now.
+      }
+    }
+  } catch (error) {
+    // Each stage then claims its whole peak, named.
+    procs = undefined;
+    unlisted = reasonOf(error);
+  }
+  const records = admitted.map((r): StaticWorkCharge => {
+    const peakMib = r.memoryBytes / 1024 ** 2;
+    const root = procs?.get(r.pid);
+    if (!procs || !root || (r.processStart?.startsWith("proc:") && root.start !== r.processStart)) {
+      const basis = !procs ? `process listing unread (${unlisted ?? "unknown"}): the whole peak` : "holder not found: the whole peak";
+      return { label: r.label, peakMib, treeMib: 0, chargeMib: peakMib, basis };
+    }
+    const tree: ProcessIdentity[] = [];
+    const queue = [r.pid];
+    while (queue.length > 0 && tree.length < MAX_TREE_PROCESSES) {
+      const pid = queue.shift()!;
+      const proc = procs.get(pid)!;
+      if (pid !== daemonPid && !reserved.has(identityKey({ pid, start: proc.start }))) tree.push({ pid, start: proc.start });
+      for (const [child, c] of procs) if (c.parent === pid) queue.push(child);
+    }
+    const resident = treeResident(ports.readFile, tree, { left: MAX_TREE_PROCESSES }, false);
+    const chargeMib = Math.max(0, peakMib - resident.mib);
+    return { label: r.label, peakMib, treeMib: resident.mib, chargeMib,
+      basis: `peak ${Math.round(peakMib)} MiB less ${Math.round(resident.mib)} MiB its tree holds${resident.complete ? "" : ` (partial: ${resident.reason ?? "unread"})`}` };
+  });
+  return { staticWork: { records } };
+}
+
 export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts, policy: HostMemoryBudgetPolicy,
   options: { admitted?: boolean; strictEvidence?: boolean } = {}): ShadowInputs {
   const now = ports.clock.now();
@@ -2119,6 +2205,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     daemonGrowth: [own, ...others],
     serve: serveOf(ports, tail, now, start.root),
     reviewEstimateMib: estimateOf(ports, "review"),
+    ...staticWorkOf(ports, recorded.map((entry) => entry.path)),
   };
   const gathered = { ...inputs, ...readContainerPressure(ports, start.root, now, policy, inputs, options.admitted === true, strict) };
   if (policy.claimModel !== JOINT_MODEL) return gathered;

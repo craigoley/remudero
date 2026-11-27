@@ -2523,6 +2523,65 @@ function staticSlotAdmission(why: string, lease: TestSlotLease, opts: Pick<TestS
     note: `${why}; ${lease.note}`, ...(lease.childEnvironment ? { childEnvironment: lease.childEnvironment } : {}), release: () => lease.release() };
 }
 
+/** W1-T15179 — a live static admission record (`static-<nonce>.json`): who holds it and the peak it named. */
+export interface LiveStaticWork { name: string; label: string; pid: number; processStart?: string; memoryBytes: number; admitted: boolean }
+
+/**
+ * W1-T15179 — the live static records beside the slot records, judged live as {@link admitStaticWork}'s own scan
+ * judges them (same host and namespace: the pid and its start; another: the boot id, or the lease). The host memory
+ * projection charges each admitted one its unrealized peak. Absent directory: none. Unreadable: `unread`, said.
+ */
+export function readLiveStaticWork(opts: Pick<TestSlotOptions, "dir" | "hostname" | "bootId" | "isPidAlive" | "pidNamespace" | "clock"> = {}):
+  { records: LiveStaticWork[] } | { unread: string } {
+  const host = opts.hostname ?? hostname, bootId = opts.bootId ?? (() => readBootId());
+  const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive, pidNamespace = opts.pidNamespace ?? (() => readPidNamespace());
+  let dir: string, names: string[];
+  try {
+    dir = opts.dir ?? resolveTestSlotDir().dir;
+    names = readdirSync(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { records: [] };
+    return { unread: `static records unreadable: ${String((error as Error)?.message ?? error)}` };
+  }
+  const now = (opts.clock ?? systemClock).now(), records: LiveStaticWork[] = [];
+  for (const name of names.sort()) {
+    if (!STATIC_RECORD.test(name)) continue;
+    let held: (TestSlotHolder & { admittedAt?: string }) | null;
+    try {
+      const path = join(dir, name), st = lstatSync(path);
+      const text = st.isFile() ? readTestSlotRecordText(path, st) : null;
+      held = text === null ? null : parseTestSlotHolder(text);
+    } catch (error) {
+      void error; // Gone or unreadable between the listing and the read: it names no peak, as the admission's scan treats it.
+      continue;
+    }
+    if (!held || !(typeof held.memoryBytes === "number" && held.memoryBytes > 0)) continue;
+    if (testSlotHolderStale(held, now, { hostname: host, bootId, isPidAlive, pidNamespace })) continue;
+    records.push({ name, label: held.label, pid: held.pid, memoryBytes: held.memoryBytes, admitted: held.admittedAt !== undefined,
+      ...(held.processStart ? { processStart: held.processStart } : {}) });
+  }
+  return { records };
+}
+
+/** W1-T15179 — a published projection older than this is not read (the shared host memory snapshot's own bound). */
+const STATIC_WORK_PROJECTION_STALE_MS = 10 * 60_000;
+let staticWorkProjection: { availableBytes: number; atMs: number } | undefined;
+
+/**
+ * W1-T15179 — the daemon publishes the host projection its lanes cut from (MemAvailable after every in-flight
+ * worker's remaining claim and every admitted static stage's unrealized peak); a static stage in this process is
+ * admitted only while that projection holds its own peak. Null clears it: the raw headroom alone decides.
+ */
+export function publishStaticWorkProjection(availableMib: number | null, atMs: number): void {
+  staticWorkProjection = availableMib === null || !Number.isFinite(availableMib) ? undefined
+    : { availableBytes: Math.max(0, availableMib) * 1024 ** 2, atMs };
+}
+
+function freshStaticWorkProjection(nowMs: number): number | undefined {
+  const p = staticWorkProjection;
+  return p === undefined || nowMs - p.atMs > STATIC_WORK_PROJECTION_STALE_MS ? undefined : p.availableBytes;
+}
+
 /** The admission both drivers step: each yield is a poll's sleep; `slotReason` hands the judgment to a slot. */
 function* staticAdmission(label: string, opts: Omit<TestSlotOptions, "sleep"> & { memoryBytes: number },
   headroomOf: () => number | undefined): Generator<number, StaticAdmission | { slotReason: string }> {
@@ -2671,17 +2730,22 @@ function* staticAdmission(label: string, opts: Omit<TestSlotOptions, "sleep"> & 
         ...(unrecorded ? {} : { childEnvironment: { [TEST_SLOT_DIR_ENV]: dir,
           NODE_COMPILE_CACHE: join(dir, "node-compile-cache") } }) };
     };
-    if (headroom === undefined || Number.isNaN(headroom)) return admit("open", "static admission OPEN: no memory reading on this host");
-    if (seen.holders.length === 0 || headroom >= need) {
-      return admit("admitted", `static admission by memory: headroom ${mib(headroom)} MiB holds ${mib(need)} MiB for this stage and ${seen.holders.length} live holder(s)`);
+    // W1-T15179: the workers' remaining claims, published by this daemon, must hold this stage's own peak too.
+    const projected = freshStaticWorkProjection(clock.now());
+    const projectedShort = projected !== undefined && projected < opts.memoryBytes;
+    const beside = projected === undefined ? "" : `; projection ${mib(projected)} MiB after the workers' claims`;
+    if (!projectedShort && (headroom === undefined || Number.isNaN(headroom))) return admit("open", "static admission OPEN: no memory reading on this host");
+    if (!projectedShort && (seen.holders.length === 0 || headroom! >= need)) {
+      return admit("admitted", `static admission by memory: headroom ${mib(headroom!)} MiB holds ${mib(need)} MiB for this stage and ${seen.holders.length} live holder(s)${beside}`);
     }
     if (waited() >= waitBoundMs) {
       log(JSON.stringify({ step: "test_slot.static_wait_bound_exceeded", label, waitedMs: waited(), holders: seen.holders }));
-      return admit("wait_bound_exceeded", `static admission WAIT BOUND EXCEEDED after ${Math.round(waited() / 1000)}s headroom ${mib(headroom)} MiB < ${mib(need)} MiB beside ${seen.holders.join("; ")}; ran anyway`);
+      return admit("wait_bound_exceeded", `static admission WAIT BOUND EXCEEDED after ${Math.round(waited() / 1000)}s headroom ${mib(headroom ?? 0)} MiB < ${mib(need)} MiB beside ${seen.holders.join("; ")}${beside}; ran anyway`);
     }
     if (!announced) {
       announced = true;
-      log(JSON.stringify({ step: "test_slot.static_waiting", label, headroomMiB: mib(headroom), needMiB: mib(need), holders: seen.holders }));
+      log(JSON.stringify({ step: "test_slot.static_waiting", label, headroomMiB: mib(headroom ?? 0), needMiB: mib(need), holders: seen.holders,
+        ...(projected === undefined ? {} : { projectedMiB: mib(projected) }) }));
     }
     yield Math.min(pollMs, Math.max(0, waitBoundMs - waited()));
   }
