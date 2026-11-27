@@ -48,8 +48,14 @@ memory_high_pressure_tier() {
   local reserve="${MH_RESERVE_MIB}" avail="${MH_AVAIL_MIB}" corroborated=0 why=""
   MH_TIER=0 MH_TIER_WHY="calm: MemAvailable ${avail} MiB is over two ${reserve} MiB host reserves"
   [ "${avail}" -lt $((2 * reserve)) ] || return 0
-  if [ "${MH_SWAPIN_RATE:-0}" -gt 0 ] && [ "${MH_SWAPIN_RATE:-0}" -gt "${MH_PREV_SWAPIN_RATE:-0}" ]; then
-    corroborated=$((corroborated + 1)); why="${why}, swap-in rising (${MH_PREV_SWAPIN_RATE:-0} -> ${MH_SWAPIN_RATE} KiB/s, pswpin+zswpin; ${MH_SWAPIN_ZSWAP_BASIS:-zswpin})"
+  # W1-T15172: a swap-in this container's own memory.high throttling causes is not host pressure. The host rate
+  # less the container's own anon refaults is what corroborates; the sample stores that net rate for the next tick.
+  local swapin="${MH_SWAPIN_RATE:-0}" own="${MH_OWN_SWAPIN_RATE:-0}" ownwhy=""
+  case "${own}" in ''|*[!0-9]*) own=0 ;; esac
+  [ "${own}" -eq 0 ] || ownwhy=" after ${own} KiB/s of its own anon refaults"
+  swapin=$((swapin > own ? swapin - own : 0))
+  if [ "${swapin}" -gt 0 ] && [ "${swapin}" -gt "${MH_PREV_SWAPIN_RATE:-0}" ]; then
+    corroborated=$((corroborated + 1)); why="${why}, swap-in rising (${MH_PREV_SWAPIN_RATE:-0} -> ${swapin} KiB/s, pswpin+zswpin; ${MH_SWAPIN_ZSWAP_BASIS:-zswpin}${ownwhy})"
   fi
   if [ "${MH_PSI_FULL10:-0}" -gt 0 ]; then
     corroborated=$((corroborated + 1)); why="${why}, PSI memory full avg10 ${MH_PSI_FULL10}/100 %"
@@ -72,8 +78,9 @@ memory_high_pressure_tier() {
 # MH_HIGH_EVENTS (memory.events high delta), MH_REFAULT_MIB (file refaults this interval, per 5 min),
 # MH_FURTHEST (1 furthest above policy, 0 another peer is further, unknown ordering unavailable),
 # plus the tier inputs above. Sets MH_ACTION (grow|shrink|restore|floor|hold), MH_TARGET_MIB, MH_REASON.
+# W1-T15172: MH_ANON_MIB and MH_FILE_MIB (reclaimable file pages) bound a shrink; empty means unknown.
 memory_high_decide() {
-  local live="${MH_LIVE_MIB}" policy="${MH_POLICY_MIB}" cap="" headroom room step target excess
+  local live="${MH_LIVE_MIB}" policy="${MH_POLICY_MIB}" cap="" headroom room step target excess anonfloor
   memory_high_pressure_tier
   MH_ACTION=hold MH_TARGET_MIB="${live}" MH_REASON=""
   [ -n "${MH_MAX_MIB:-}" ] && cap=$((MH_MAX_MIB * RMD_MEMORY_HIGH_MAX_PCT / 100))
@@ -103,6 +110,20 @@ memory_high_decide() {
       return 0
     fi
     target=$((live - step)); [ "${target}" -ge "${policy}" ] || target="${policy}"
+    # W1-T15172: memory.high frees only what the kernel reclaims without swapping. With no file cache to give back,
+    # or a target under the anon the container holds, a shrink pushes it into swap and frees nothing on the host.
+    if [ -n "${MH_FILE_MIB:-}" ] && [ "${MH_FILE_MIB}" -lt "$(mht_step)" ]; then
+      MH_REASON="tier ${MH_TIER} (${MH_TIER_WHY}); only ${MH_FILE_MIB} MiB of file cache to give back, under one $(mht_step) MiB quantum: a shrink would swap its anon"
+      return 0
+    fi
+    if [ -n "${MH_ANON_MIB:-}" ]; then
+      anonfloor="$(mht_round_up $((MH_ANON_MIB + $(mht_step))))"
+      [ "${target}" -ge "${anonfloor}" ] || target="${anonfloor}"
+      if [ "${target}" -ge "${live}" ]; then
+        MH_REASON="tier ${MH_TIER} (${MH_TIER_WHY}); ${MH_ANON_MIB} MiB anon plus one quantum is not under the live ${live} MiB"
+        return 0
+      fi
+    fi
     MH_ACTION=shrink MH_TARGET_MIB="${target}"
     MH_REASON="tier ${MH_TIER} (${MH_TIER_WHY}); ${excess} MiB above the policy's ${policy} MiB"
     return 0
@@ -292,7 +313,7 @@ memory_high_tune() {
   done
   [ -n "${container}" ] && [ -n "${state_root}" ] || { echo "memory-high-tuner: --container and --state-dir are required" >&2; return 2; }
   local state="${state_root}/state" id cg unit now high_b max_b events refault pswpin zswpin stall psi_full avail
-  local sample prev v pts pid pev prf psw pst prate rate interval x
+  local sample prev v pts pid pev prf psw pst prate rate interval x anon file shmem refanon pra own net
   # shellcheck disable=SC2034 # read by resource-policy.sh's resource_policy_tuned_file
   STATE_DIR="${state_root}"
   MHT_FLEET_LISTED=""
@@ -312,6 +333,11 @@ memory_high_tune() {
   max_b="$(cat "${cg}/memory.max" 2>/dev/null)"
   events="$(mht_stat high "${cg}/memory.events")"
   refault="$(mht_stat workingset_refault_file "${cg}/memory.stat")"
+  # W1-T15172: what a shrink can actually free. shmem (tmpfs) counts in file but only leaves through swap.
+  anon="$(mht_stat anon "${cg}/memory.stat")"
+  file="$(mht_stat file "${cg}/memory.stat")"
+  shmem="$(mht_stat shmem "${cg}/memory.stat")" || shmem=0
+  refanon="$(mht_stat workingset_refault_anon "${cg}/memory.stat")" || refanon=0
   # OPERATOR RULING 2026-10-19 (4): a swap-in served from zswap's pool counts in zswpin, never pswpin; the counter
   # is their sum. A kernel without zswap has no zswpin line: 0, and the reason names it.
   pswpin="$(mht_stat pswpin "${RMD_VMSTAT_PATH}")"
@@ -325,19 +351,22 @@ memory_high_tune() {
   MH_MAX_MIB="$(mht_bytes_mib "${max_b}")" || MH_MAX_MIB=""
   MH_POLICY_MIB="$(mht_policy_mib "${container}")" || { echo "memory-high-tuner: ${container} — hold: no policy memory.high (${RP_HIGH_NOTE:-unreadable})"; return 0; }
   MH_LEARNED_MIB="$(resource_policy_tuned_high "${container}")" || MH_LEARNED_MIB=""
-  for v in "${events}" "${refault}" "${pswpin}" "${stall}" "${avail}"; do
+  for v in "${events}" "${refault}" "${pswpin}" "${stall}" "${avail}" "${anon}" "${file}" "${shmem}" "${refanon}"; do
     case "${v}" in ''|*[!0-9]*) echo "memory-high-tuner: ${container} — hold: a counter is unreadable"; return 0 ;; esac
   done
   # The previous sample: deltas only within the SAME container (a recycle resets its counters).
   sample="${state}/memory-high-sample-${container}.txt"
   prev="$(cat "${sample}" 2>/dev/null)"
-  read -r v pts pid pev prf psw pst prate <<< "${prev}"
+  read -r v pts pid pev prf psw pst prate pra <<< "${prev}"
   for x in "${pts}" "${pev}" "${prf}" "${psw}" "${pst}" "${prate}"; do
     case "${x}" in ''|*[!0-9]*) v="" ;; esac
   done
+  case "${pra}" in ''|*[!0-9]*) pra="" ;; esac # a sample from before W1-T15172 has no anon refault count
   interval=0; [ "${v}" = v1 ] && interval=$((now - pts))
   rate=0; [ "${interval}" -gt 0 ] && [ "${psw}" -le "${pswpin}" ] && rate=$(((pswpin - psw) * 4 / interval))
-  printf 'v1 %s %s %s %s %s %s %s\n' "${now}" "${id}" "${events}" "${refault}" "${pswpin}" "${stall}" "${rate}" \
+  own=0; [ "${interval}" -gt 0 ] && [ -n "${pra}" ] && [ "${pra}" -le "${refanon}" ] && own=$(((refanon - pra) * 4 / interval))
+  net=$((rate > own ? rate - own : 0))
+  printf 'v1 %s %s %s %s %s %s %s %s\n' "${now}" "${id}" "${events}" "${refault}" "${pswpin}" "${stall}" "${net}" "${refanon}" \
     > "${sample}.tmp.$$" 2>/dev/null && mv -f "${sample}.tmp.$$" "${sample}" 2>/dev/null
   if [ "${v}" != v1 ] || [ "${pid}" != "${id}" ] || [ "${interval}" -le 0 ] || [ "${pev}" -gt "${events}" ] || [ "${prf}" -gt "${refault}" ]; then
     echo "memory-high-tuner: ${container} — hold: first sample of ${id:0:12}; deltas next tick (memory.high ${MH_LIVE_MIB} MiB)"
@@ -345,7 +374,8 @@ memory_high_tune() {
   fi
   MH_HIGH_EVENTS=$((events - pev))
   MH_REFAULT_MIB=$(((refault - prf) * 4 * 300 / 1024 / interval))
-  MH_SWAPIN_RATE="${rate}" MH_PREV_SWAPIN_RATE="${prate}"
+  MH_SWAPIN_RATE="${rate}" MH_PREV_SWAPIN_RATE="${prate}" MH_OWN_SWAPIN_RATE="${own}"
+  MH_ANON_MIB=$((anon / 1048576)) MH_FILE_MIB=$(((file > shmem ? file - shmem : 0) / 1048576))
   MH_ALLOCSTALL=$((stall - pst)); [ "${MH_ALLOCSTALL}" -ge 0 ] || MH_ALLOCSTALL=0
   MH_PSI_FULL10="${psi_full:-0}" MH_AVAIL_MIB="${avail}" MH_RESERVE_MIB="${RMD_HOST_RESERVE_MIB}"
   mht_peer_order "${container}" "${id}"

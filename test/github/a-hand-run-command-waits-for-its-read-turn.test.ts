@@ -40,7 +40,8 @@ function fixture(t: TestContext, mode?: "enforce" | "advisory" | "wait") {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   // Whole seconds: a stamp's mtime is read back at the filesystem's resolution.
   let now = Math.floor(Date.now() / 1000) * 1000;
-  const env: NodeJS.ProcessEnv = { RMD_GH_CACHE_HOME: dir };
+  // W1-T15055: these tests pin the full 180 s floor, which an explicit RMD_GH_COOLDOWN_S keeps in wait mode.
+  const env: NodeJS.ProcessEnv = { RMD_GH_CACHE_HOME: dir, RMD_GH_COOLDOWN_S: "180" };
   if (mode !== undefined) env.RMD_GH_TRANSPORT_FLOOR = mode;
   const stamp = ghReadCadenceStampPath(env)!;
   // Another fleet process read five seconds ago: this command's first read is inside the window.

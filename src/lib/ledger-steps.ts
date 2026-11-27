@@ -614,6 +614,18 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["escalated"],
   },
   {
+    step: "fix.learnings_shadow",
+    meaning: "At first fix prompt assembly, the round recorded its task's arm and the learning IDs selected by symbol or error evidence. The prompt carries neither arm's learning text.",
+    writer: ["runFixRung"],
+    outcomes: ["observed", "unavailable"],
+  },
+  {
+    step: "fix.learnings_outcome",
+    meaning: "The round observed a terminal CI result for its own pushed head or ended without publishing a head. A green result includes the task's completed round count.",
+    writer: ["runFixRung"],
+    outcomes: ["green", "red", "no_push"],
+  },
+  {
     step: "fix.economy_escalated",
     meaning: "A fix round moved from the Codex economy tier to the mount tier after a failed round. " +
       "The row joins the failed round, names the failure and records the served model when available.",

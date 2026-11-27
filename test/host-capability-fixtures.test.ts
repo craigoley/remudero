@@ -181,6 +181,18 @@ const DECLARED: readonly Declared[] = [
       "not whether the OS denies a write, so it holds for every uid.",
   },
   {
+    kind: "chmod", file: "review/an-unregistered-run-tree-is-reclaimed.test.ts", key: "0o444", count: 1,
+    reason:
+      "W1-T14928: makes a fixture tree's files read-only the way a run's -source view is. The asserted condition is that " +
+      "the sweep removes the tree, which holds for every uid; no assertion expects an OS permission denial.",
+  },
+  {
+    kind: "chmod", file: "review/an-unregistered-run-tree-is-reclaimed.test.ts", key: "0o555", count: 1,
+    reason:
+      "W1-T14928: makes a fixture tree's directories read-only the way a run's -source view is. The asserted condition " +
+      "is that the sweep removes the tree, which holds for every uid; no assertion expects an OS permission denial.",
+  },
+  {
     kind: "chmod", file: "dependency-seeds.test.ts", key: "0o444", count: 4,
     reason:
       "These sites restore sealed payload and manifest modes and seal an external symlink target. " +
