@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -125,6 +126,23 @@ test("W1-T14745 criterion 1: a hosted pass outside the audit skips the host and 
   assert.equal(differentBase.result.proofUniqueRuns, 2);
 });
 
+test("W1-T14745 criterion 1: repeated identical proofs reuse one all-pass hosted outcome", async t => {
+  const f = fixture(t, true);
+  await f.review(training);
+  const { reused } = sampledProofs(f.advance());
+  const { result, shadow } = await f.review([reused, reused]);
+  assert.equal(result.proofUniqueRuns, 0);
+  assert.deepEqual(result.criteria.map(c => c.met), [true, true]);
+  assert.ok(result.criteria.every(c => /reused hosted proof PASS \(run 77, job 88\)/.test(c.reason)));
+  assert.deepEqual(shadow.reused_proofs, [reused]);
+  assert.deepEqual(shadow.audited_proofs, []);
+
+  // A duplicate hosted record is reusable only when every recorded outcome passes.
+  const mixed = await f.review([reused, reused], { hosted: ["pass", "fail"] });
+  assert.equal(mixed.result.proofUniqueRuns, 2);
+  assert.deepEqual(mixed.shadow.reused_proofs, []);
+});
+
 test("W1-T14745 ordinary grep-only review verifies the base tree merge-base and reuses an unaudited pass", async t => {
   const f = fixture(t);
   const cold = await f.review(training);
@@ -190,6 +208,13 @@ test("W1-T14745 criterion 3: agreement reduces the audit share and a disagreemen
   const reset = await f.review([audited]);
   assert.equal(reset.shadow.audit_share, 1);
   assert.equal(reset.result.proofUniqueRuns, 1);
+
+  f.advance();
+  const duplicateDisagreement = await f.review([audited, audited]);
+  assert.equal(duplicateDisagreement.result.state, "failure");
+  assert.deepEqual(duplicateDisagreement.shadow.audited_proofs, [audited]);
+  assert.deepEqual(duplicateDisagreement.disagreements.map(row => [row.proof, row.host]), [[audited, "executed_fail"]]);
+  assert.equal(duplicateDisagreement.shadow.audit_share, 1);
 });
 
 test("W1-T14745 criterion 4: the shadow row names real audits and reused passes beside a host failure", async t => {
@@ -217,4 +242,28 @@ test("an unavailable audit state leaves the hosted pass to the host executor", a
   assert.equal(result.proofUniqueRuns, 1);
   assert.deepEqual(shadow.reused_proofs, []);
   assert.match(String(shadow.audit_unavailable), /EEXIST/);
+});
+
+test("a locked audit database waits for the competing review and records the audit", async t => {
+  const f = fixture(t, true);
+  await f.review(training);
+  const auditPath = join(f.auditDir, `${createHash("sha256").update(`${owner}/${repo}`).digest("hex")}.sqlite`);
+  const child = spawn(process.execPath, ["--input-type=module", "-e",
+    "import { DatabaseSync } from 'node:sqlite'; const db = new DatabaseSync(process.argv[1]); db.exec('BEGIN IMMEDIATE'); console.log('LOCKED'); setTimeout(() => { db.exec('COMMIT'); db.close(); }, 3000);",
+    auditPath], { stdio: ["ignore", "pipe", "pipe"] });
+  t.after(() => child.kill());
+  await new Promise<void>((resolve, reject) => {
+    let output = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", chunk => {
+      output += chunk;
+      if (output.includes("LOCKED")) resolve();
+    });
+    child.once("error", reject);
+    child.once("exit", code => reject(new Error(`audit lock helper exited before locking (${code}): ${output}`)));
+  });
+
+  const { shadow } = await f.review([proof(80)]);
+  assert.equal("audit_unavailable" in shadow, false);
+  assert.equal(typeof shadow.audit_share, "number");
 });

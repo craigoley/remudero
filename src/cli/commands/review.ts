@@ -997,7 +997,7 @@ function proofReuseLogRow(comparison: ProofReuseComparison, input: ProofReuseSha
 
 function proofAuditTransaction<T>(path: string, act: (db: DatabaseSync) => T): T {
   mkdirSync(dirname(path), { recursive: true });
-  const db = new DatabaseSync(path);
+  const db = new DatabaseSync(path, { timeout: 5_000 });
   try {
     db.exec(`
       BEGIN IMMEDIATE;
@@ -1054,7 +1054,14 @@ type PreparedReview = Awaited<ReturnType<typeof preparePromisedReviewDecision>>;
 
 async function prepareHostedProofs(comparison: Extract<ProofReuseComparison, { eligible: true }>, input: ProofReuseInput,
   args: Pick<Parameters<typeof runReview>[1], "owner" | "repo" | "ledgerPath" | "baseCheckoutDir" | "baseIsCheckout" | "baseIsGrepTree" | "log">) {
-  const passes = new Map((comparison.record.proofs ?? []).filter(p => p.verdict === "pass").map(p => [p.proof, p]));
+  const hostedOutcomes = new Map<string, Array<NonNullable<typeof comparison.record.proofs>[number]>>();
+  for (const outcome of comparison.record.proofs ?? []) {
+    const proof = outcome.proof.trim();
+    hostedOutcomes.set(proof, [...(hostedOutcomes.get(proof) ?? []), outcome]);
+  }
+  const passes = new Map<string, NonNullable<typeof comparison.record.proofs>[number]>(
+    [...hostedOutcomes].filter(([, outcomes]) => outcomes.length > 0 && outcomes.every(outcome => outcome.verdict === "pass"))
+      .map(([proof, outcomes]) => [proof, outcomes[0]!] as const));
   if (passes.size === 0) return undefined;
   const repository = `${args.owner}/${args.repo}`.toLowerCase();
   const path = join(dirname(args.ledgerPath), "review-proof-audit", createHash("sha256").update(repository).digest("hex") + ".sqlite");
@@ -1078,7 +1085,7 @@ async function prepareHostedProofs(comparison: Extract<ProofReuseComparison, { e
     }
     for (const key of keys) {
       const previous = byCommand.get(key);
-      if (previous !== undefined) { shared.add(previous); shared.add(proof); }
+      if (previous !== undefined && previous !== proof) { shared.add(previous); shared.add(proof); }
       byCommand.set(key, proof);
     }
   }
