@@ -2244,12 +2244,14 @@ function missingAskTasks(plan: Plan, proposals: readonly Proposal[]): Set<string
   return named;
 }
 
-/** W1-T15105: `plan` plus the tasks the asks name that only `readCombined` holds, else `plan`. */
+/** W1-T15105: compose the catalog for classification when an ask names any ops-only task. */
 export function askTaskPlan(plan: Plan, proposals: readonly Proposal[], readCombined: () => Plan | undefined): Plan {
   const named = missingAskTasks(plan, proposals);
   if (named.size === 0) return plan;
   const combined = readCombined();
-  const tasks = combined && combined !== plan ? [...named].flatMap(id => combined.byId.get(id) ?? []) : [];
+  // Keep the whole catalog available: a named task may depend on another ops task which is not
+  // itself named by this proposal. Its classification must see the same dependency graph as Inbox.
+  const tasks = combined && combined !== plan ? combined.tasks.filter(task => !plan.byId.has(task.id)) : [];
   if (tasks.length === 0) return plan;
   const ids = [...new Set(tasks.map(task => task.id))].sort().join("\0");
   let byCombined = askTaskPlanMemo.get(plan);

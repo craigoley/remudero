@@ -355,7 +355,7 @@ test("W1-T3216: an unknown but well-formed task id is refused AS A TASK, not as 
 // …/plan/tasks.yaml)" for a queued verify:human task that the host's second catalog holds. The verb
 // read the local checkouts only, so it could release no such task. Each test below drives the real command.
 
-const OPS_REPOSITORY = "fixture-private/ops", OPS_ID = "W1-T900201", PUBLIC_ID = "W1-T1041", NOWHERE_ID = "W1-T900299";
+const OPS_REPOSITORY = "fixture-private/ops", OPS_ID = "W1-T900201", OPS_DEPENDENCY_ID = "W1-T900202", PUBLIC_ID = "W1-T1041", NOWHERE_ID = "W1-T900299";
 const shardText = (id: string): string =>
   `- id: ${id}\n  title: Fixture ${id}\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: human\n  status: queued\n`;
 
@@ -941,8 +941,10 @@ test("W1-T13785 criterion 2: the public loader still normalizes scalar dependenc
 
 // W1-T15105: serve's Inbox judges an ask for an ops-catalog task on that task, and its Approve spawns `rmd approve <ask>`,
 // so the terminal verbs judge it the same way, from the same catalog read.
-const writeAsk = (host: ReturnType<typeof hostWithSecondCatalog>, id: string) =>
-  writeFileSync(join(host.stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [{ id, summary: `Release ${OPS_ID}`, evidenceAnchors: [] }] }));
+const writeAsk = (host: ReturnType<typeof hostWithSecondCatalog>, id: string, also: string[] = []) =>
+  writeFileSync(join(host.stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [id, ...also].map(proposalId => ({
+    id: proposalId, summary: `Release ${OPS_ID}`, evidenceAnchors: [],
+  })) }));
 const rowsOf = (host: ReturnType<typeof hostWithSecondCatalog>) => host.rawLines().map(line => JSON.parse(line) as Record<string, unknown>);
 
 test("W1-T15105 criterion 1: an ask whose task is only in the ops catalog is judged on that task — by `rmd inbox` too", async t => {
@@ -967,9 +969,11 @@ test("W1-T15105 criterion 1: an ask whose task is only in the ops catalog is jud
 });
 
 test("W1-T15105 criterion 2: Approve judges an ops-catalog task's ask as the Inbox that offered it did — the `rmd approve <ask>` serve spawns releases it", async t => {
-  const host = hostWithSecondCatalog(t), said = everythingSaid(t);
+  const target = shardText(OPS_ID).replace("depends_on: []", `depends_on: [${OPS_DEPENDENCY_ID}]`);
+  const mergedDependency = shardText(OPS_DEPENDENCY_ID).replace("status: queued", "status: done");
+  const host = hostWithSecondCatalog(t, { opsText: target + mergedDependency }), said = everythingSaid(t);
   const ask = `verify-human:${OPS_ID}`;
-  writeAsk(host, ask);
+  writeAsk(host, ask, [`machine-judge:${OPS_DEPENDENCY_ID}`]);
   assert.equal(await approveCommand([ask], { config: host.config, planPath: host.planPath, taskLookup: { api: host.api }, github: fakeGitHub() }), 0, said.join("\n"));
   assert.equal(host.releaseRows(OPS_ID).length, 1, "the ask's ops task is released");
   assert.ok(rowsOf(host).some(row => row.step === "ratify.approved" && row.task_id === ask && row.release_task_id === OPS_ID),
