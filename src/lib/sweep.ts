@@ -21963,6 +21963,17 @@ export function inFlightReviewCount(): number {
   return inFlightReviewRuns.size;
 }
 
+/** Inbox draft batches running in this process. The rung runs inside a background sweep pass, so a freshness restart
+ *  read the daemon as idle and killed a batch's Architects mid-draft (2026-11-28 14:48Z, three proposals). */
+let inboxDraftBatches = 0;
+export function inboxDraftBatchesInFlight(): number {
+  return inboxDraftBatches;
+}
+export async function trackInboxDraftBatch<T>(work: () => Promise<T>): Promise<T> {
+  inboxDraftBatches++;
+  try { return await work(); } finally { inboxDraftBatches--; }
+}
+
 /** W1-T15116: this process's admitted full reviews still running, from every pass and surface (a light pass's
  *  per-PR runSweep included), each of which the memory.high admission charges until it settles. */
 export function inFlightFullReviewCount(): number {

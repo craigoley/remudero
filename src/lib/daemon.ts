@@ -144,6 +144,7 @@ import {
   abandonDetachedSweepAction,
   drainInFlightReviews,
   inFlightReviewCount,
+  inboxDraftBatchesInFlight,
   inFlightReviewRunsNow,
   installReviewLaneTransition,
   runningReviewLaneIds,
@@ -6323,6 +6324,7 @@ export async function runDaemon(
     const busyReasons = [
       ...(lanes.length - (adoptableLanes ?? 0) > 0 ? ["lanes"] : []),
       ...(reviews > 0 ? ["reviews"] : []),
+      ...(inboxDraftBatchesInFlight() > 0 ? ["inbox_draft"] : []),
       ...(interruptible > 0 ? ["detached_work"] : []),
       ...(directMergeOperationsInFlight().length > 0 ? ["direct_merge"] : []),
     ];
