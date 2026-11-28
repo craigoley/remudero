@@ -10,7 +10,7 @@ import { operatorReleaseContractChanged, qualifyReleaseEvidence, releaseContract
 import type { RunResult } from "./run-result.js";
 import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
-import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
+import { expeditePastWipInFlight, EXPEDITE_PAST_WIP, EXPEDITE_PAST_WIP_SETTLED, queueGovernorDeferralFields, type CostGovernorResult, type MemoryGovernorResult, type QueueGovernorResult } from "./sweep.js";
 import { checkDispatchGovernors, checkNewBuildReservation, consultMemoryReads, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadHold, type MemoryReadTracker, type NewBuildReservationVerdict } from "./dispatch-governor.js";
 import { loadPlanKeepingUnseenDependencies, loadPlanQuarantiningDuplicates, unmetDependencies, unmetTaskPrecondition, type KeepsUnseenDependency, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
 import { createPlanRevisionStore, type PlanRevisionStore } from "./plan-revision-store.js";
@@ -385,6 +385,7 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
   /** W1-T14654: the lane total the expedite share is derived from. Absent, `inFlight.length + limit`: right for a
    *  pass that fills the free lanes, too many for a refill whose pool spans every lane. */
   expediteLanes?: number;
+  expeditesOnly?: boolean;
   /** W1-T14654: observation only, once per returned task the expedite lane admitted. */
   onExpedited?: (task: Task, start: ExpeditedStart) => void;
   /** W1-T8514: measured run lengths for the priority reservation's backfill release. Absent, a reservation
@@ -495,10 +496,14 @@ function applyMachineShare(ordered: Task[], opts: NextRunnableOpts): Task[] {
 export const EXPEDITED_STEP = "dispatch.expedited";
 const OPERATOR_RULING_ORIGIN = "operator-ruling#";
 
+function declaredExpediteReason(task: Task): string {
+  return typeof task.expedite === "string" ? task.expedite.trim() : "";
+}
+
 /** Why a task goes ahead of the stride order: its trimmed `expedite` text, else "operator ruling" for an
  *  operator-ruling origin, else undefined. Only a non-blank string declares an expedite. */
 export function expediteReason(task: Task): string | undefined {
-  const declared = typeof task.expedite === "string" ? task.expedite.trim() : "";
+  const declared = declaredExpediteReason(task);
   if (declared !== "") return declared;
   return typeof task.origin === "string" && task.origin.startsWith(OPERATOR_RULING_ORIGIN) ? "operator ruling" : undefined;
 }
@@ -949,6 +954,7 @@ function dispatchEligibleCandidates(plan: Plan, isMerged: MergedSet, opts: NextR
     opts.machineShare === undefined;
   const eligible: Task[] = [];
   for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext, opts.resumableTaskIds)) {
+    if (opts.expeditesOnly && declaredExpediteReason(t) === "") continue;
     if (isDispatchEligible(plan, t, isMerged, opts)) {
       eligible.push(t);
       if (stopAtFirst) break;
@@ -1446,6 +1452,7 @@ function nextCurated(
  *  open-PR in-flight guard and the pushed-run-branch backstop. Shared by {@link nextCurated}
  *  (single lane) and {@link curatedCandidates} (lanes) so the two paths cannot drift. */
 function curatedTaskSelectable(t: Task, opts: NextRunnableOpts): boolean {
+  if (opts.expeditesOnly && declaredExpediteReason(t) === "") return false;
   const id = t.id;
   if (opts.isIndependentFailureBlocked?.(id)) {
     opts.onFiltered?.(t, "blocked");
@@ -2024,15 +2031,8 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     const queueRead = readPassGovernor("queue", () => deps.checkQueueGovernor?.(), log);
     if (queueRead.kind === "unreadable") return summary(queueRead.stopReason, queueRead.stopDetail);
     const queueGoverned = queueRead.result;
-    if (queueGoverned) {
-      log("drain.queue_governor", {
-        observed_open_count: queueGoverned.observedOpenCount,
-        wip_limit: queueGoverned.wipLimit,
-      });
-      return summary(
-        "queue_governor_deferred",
-        `${queueGoverned.observedOpenCount} open PRs at/over the ${queueGoverned.wipLimit} WIP limit — new dispatch deferred`,
-      );
+    if (queueGoverned && !canExpeditePastWip(queueGoverned, plan, deps)) {
+      return summary("queue_governor_deferred", queueHeldStop(queueGoverned, log));
     }
 
     // HOST MEMORY FLOOR (W1-T5404): ordered after queue as `checkDispatchGovernors` orders it. A
@@ -2201,6 +2201,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       // Never re-offer a task this pass already continued past — see the guard in
       // isDispatchEligible for why this cannot rely on `isOpenPr` alone.
       excludeIds: continuedIds,
+      expeditesOnly: queueGoverned !== undefined,
     };
     // CURATION (W1-T140): a curated selection overrides the natural DAG scan entirely. RESET PER
     // SELECTION, NOT ACCUMULATED: the terminal's question is about the pass that actually GAVE UP,
@@ -2211,7 +2212,14 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       : nextRunnable(plan, isMerged, skipOpts);
     if (!next) {
       await flushLifetimePressure();
+      if (queueGoverned) return summary("queue_governor_deferred", queueHeldStop(queueGoverned, log));
       return summary("no_runnable", noRunnableDetail({ indeterminate: indeterminateDeclines }));
+    }
+
+    const start = queueGoverned ? checkExpeditedStart(plan, deps) : undefined;
+    if (start?.verdict) {
+      const held = allLanesHeldStop(start.verdict);
+      return summary(held.stopReason, held.stopDetail);
     }
 
     // After ALL awaited reads and both natural/curated selection paths; never a pass/tick gate.
@@ -2225,7 +2233,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     attempted.push(next.id);
     let result: RunResult;
     try {
-      result = await deps.runOne(next.id);
+      result = await (start?.governor ? runExpeditedPastWip(deps, next, start.governor) : deps.runOne(next.id));
     } catch (e) {
       await flushLifetimePressure();
       // W1-T11136: the same classifier as the parallel settle, so one task's delivery failure ends its lane here too.
@@ -2339,6 +2347,58 @@ function readPassGovernor<T>(
       stopDetail: `${source} governor reading unreadable (${error}) — failing closed, new dispatch deferred`,
     };
   }
+}
+
+function wipOnlyHold(result: QueueGovernorResult | undefined): result is QueueGovernorResult {
+  return result?.deferred === true && result.tier === "growing" &&
+    result.pressureHeld === false && result.measuredBound !== 0;
+}
+
+function canExpeditePastWip(result: QueueGovernorResult | undefined, plan: Plan, deps: DrainDeps): boolean {
+  if (!wipOnlyHold(result) || !deps.readLedgerLines || !deps.log ||
+    !plan.tasks.some((task) => declaredExpediteReason(task) !== "")) return false;
+  try {
+    return !expeditePastWipInFlight(deps.readLedgerLines());
+  } catch (e) {
+    deps.log("drain.queue_governor.unreadable", { source: "expedite history", error: String(e) });
+    return false;
+  }
+}
+
+async function runExpeditedPastWip(deps: DrainDeps, task: Task, governor: QueueGovernorResult): Promise<RunResult> {
+  const log = deps.log!;
+  log(EXPEDITE_PAST_WIP, { task_id: task.id, governor: queueGovernorDeferralFields(governor) });
+  let result: RunResult | undefined;
+  try {
+    result = await deps.runOne(task.id);
+    return result;
+  } finally {
+    log(EXPEDITE_PAST_WIP_SETTLED, {
+      task_id: task.id, build_run_id: result?.runId, pr_url: result?.prUrl, merged: result?.merged,
+    });
+  }
+}
+
+function queueHeldStop(result: QueueGovernorResult, log: NonNullable<DrainDeps["log"]>): string {
+  log("drain.queue_governor", { observed_open_count: result.observedOpenCount, wip_limit: result.wipLimit });
+  return `${result.observedOpenCount} open PRs at/over the ${result.wipLimit} WIP limit — new dispatch deferred`;
+}
+
+function checkExpeditedStart(plan: Plan, deps: DrainDeps): {
+  verdict?: DispatchGovernorVerdict;
+  governor?: QueueGovernorResult;
+} {
+  let governor: QueueGovernorResult | undefined;
+  const verdict = checkDispatchGovernors({
+    ...deps,
+    checkQueueGovernor: () => {
+      const current = deps.checkQueueGovernor?.();
+      if (!current || !canExpeditePastWip(current, plan, deps)) return current;
+      governor = current;
+      return undefined;
+    },
+  }, undefined);
+  return { verdict, governor };
 }
 
 /** W1-T7720 — the stop detail of a SUSTAINED unreadable memory reading: the source, the streak age, and
@@ -2555,20 +2615,13 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     const queueRead = readPassGovernor("queue", () => deps.checkQueueGovernor?.(), log);
     if (queueRead.kind === "unreadable") return summary(queueRead.stopReason, queueRead.stopDetail);
     const queueGoverned = queueRead.result;
-    if (queueGoverned) {
-      log("drain.queue_governor", {
-        observed_open_count: queueGoverned.observedOpenCount,
-        wip_limit: queueGoverned.wipLimit,
-      });
-      return summary(
-        "queue_governor_deferred",
-        `${queueGoverned.observedOpenCount} open PRs at/over the ${queueGoverned.wipLimit} WIP limit — new dispatch deferred`,
-      );
+    if (queueGoverned && !canExpeditePastWip(queueGoverned, plan, deps)) {
+      return summary("queue_governor_deferred", queueHeldStop(queueGoverned, log));
     }
 
     const openCount = deps.openPrCount?.();
     const queueAdmission = deps.readQueueAdmission?.();
-    const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: openCount, queueAdmission });
+    const budget = queueGoverned ? 1 : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: openCount, queueAdmission });
     const passSize = Math.min(budget, max - attempted.length);
     if (passSize <= 0) {
       log("dispatch.wip_deferred", {
@@ -2702,6 +2755,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       // PARITY WITH THE SINGLE-LANE LOOP: a task this drain already continued past is never
       // re-offered on a later pass. Wiring one loop and not the other is exactly the drift hazard.
       excludeIds: continuedIds,
+      expeditesOnly: queueGoverned !== undefined,
     };
 
     // RESET PER SELECTION, NOT ACCUMULATED. `onIndeterminate` fires only from the selection call
@@ -2716,6 +2770,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     for (const id of passedOverStates.keys()) if (!plan.byId.has(id)) passedOverStates.delete(id);
     if (candidates.length === 0) {
       await flushLifetimePressure();
+      if (queueGoverned) return summary("queue_governor_deferred", queueHeldStop(queueGoverned, log));
       return summary("no_runnable", noRunnableDetail({ indeterminate: indeterminateDeclines }));
     }
 
@@ -2731,9 +2786,11 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     // in one event-loop tick. Concurrent lanes cannot see each other's spend; this catches other
     // writers and newly unreadable readings. INVARIANT: refusal stops admission, never admitted lanes.
     const admitted: Task[] = [];
+    let expediteGovernor: QueueGovernorResult | undefined;
     let refusal: DispatchGovernorVerdict | undefined;
     for (const t of dispatchSet) {
-      const verdict = checkDispatchGovernors(deps, undefined);
+      const start = queueGoverned ? checkExpeditedStart(plan, deps) : undefined;
+      const verdict = start ? start.verdict : checkDispatchGovernors(deps, undefined);
       if (verdict) {
         refusal = verdict;
         // Distinguish partial admission from pass-level cost/queue refusal.
@@ -2746,6 +2803,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
         });
         break;
       }
+      expediteGovernor = start?.governor;
       admitted.push(t);
     }
     // W1-T5482: all lanes refused means governor deferral, never no_runnable; name the actual gate.
@@ -2782,7 +2840,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
         phase = "start";
         const runOne = deps.runOne;
         let run: Promise<RunResult>;
-        try { run = runOne.call(deps, t.id); }
+        try { run = expediteGovernor ? runExpeditedPastWip(deps, t, expediteGovernor) : runOne.call(deps, t.id); }
         catch (reason) { /* A synchronous worker throw is a rejected actual settlement, never success. */ run = Promise.reject(reason); }
         const index = work.length;
         // Attach BOTH handlers immediately after the real invocation, before any bookkeeping or
