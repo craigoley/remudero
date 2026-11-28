@@ -3057,6 +3057,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
               subtype: escalated.subtype,
               prompt_chars: escalated.promptChars ?? escalationPrompt.length,
               plan_index_chars: planIndexChars,
+              ...(planIndex.shortlist ? { plan_index_mode: "topk" } : {}),
               num_turns: escalated.numTurns,
               ...workerLedgerFields(escalated),
             });

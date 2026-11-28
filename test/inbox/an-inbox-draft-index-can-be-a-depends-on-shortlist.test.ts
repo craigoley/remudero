@@ -75,11 +75,12 @@ function worker(): WorkerResult {
   };
 }
 
-async function rungPrompt(proposal: Proposal, plan: string, indexMode?: "full" | "topk"): Promise<{ prompt: string; logs: Record<string, unknown>[] }> {
+async function rungPrompt(proposal: Proposal, plan: string, indexMode?: "full" | "topk", escalate = false): Promise<{ prompt: string; logs: Record<string, unknown>[] }> {
   let prompt: string | undefined;
   const logs: Record<string, unknown>[] = [];
   await runDraftRung([proposal], plan, {
     ...(indexMode === undefined ? {} : { indexMode }),
+    ...(escalate ? { escalate: async () => worker() } : {}),
     spawn: async (_proposal, p) => { prompt ??= p; return worker(); },
     log: (step, extra) => { logs.push({ step, ...extra }); },
   }, "run-short");
@@ -152,6 +153,10 @@ test("the depends_on shortlist reads repo paths from the proposal text, never a 
   assert.deepEqual(pathsInText("see `.github/workflows/ci.yml`, `src/lib/foo.ts:12`, " +
     "src/lib/bar.ts#L13-L14, ./test/inbox/x.test.ts, ../plan/tasks.yaml and https://example.com/a/b."),
   [".github/workflows/ci.yml", "src/lib/foo.ts", "src/lib/bar.ts", "test/inbox/x.test.ts", "plan/tasks.yaml"]);
+  // A citation that ends a sentence keeps its file path: punctuation comes off before the location suffix.
+  for (const cited of ["src/lib/rare.ts:12.", "src/lib/rare.ts:12:", "src/lib/rare.ts:12:5.", "src/lib/rare.ts#L12.", "src/lib/rare.ts#L12-L14:"]) {
+    assert.deepEqual(pathsInText(`Read ${cited}`), ["src/lib/rare.ts"], cited);
+  }
 });
 
 test("proposal text paths rank exact dot-directory files over a shared directory, and rare line-cited paths over common ones", () => {
@@ -179,6 +184,14 @@ test("proposal text paths rank exact dot-directory files over a shared directory
   ].join("\n");
   assert.deepEqual(projectedIds(draftPlanIndex(citedPathProposal, citedPathPlan, "topk", 1).text), ["W1-T20"],
     "the :line and #L citations normalize to file paths, and the rare exact path outranks the common one");
+  // Titles share no word with the text, so only the cited path can keep the row (before the fix the index came back empty).
+  const pathOnlyPlan = ["- id: W1-T30", '  title: "the guard"', "  status: queued", "  type: implement", "  files: [src/lib/rare.ts]",
+    ...[31, 32, 33].flatMap((id) => [`- id: W1-T${id}`, '  title: "a runner"', "  status: queued", "  type: implement",
+      "  files: [src/run-task.ts]"]), ""].join("\n");
+  for (const summary of ["Fix src/lib/rare.ts:12.", "Fix src/lib/rare.ts:12: now", "Fix src/lib/rare.ts#L12."]) {
+    assert.deepEqual(projectedIds(draftPlanIndex({ id: "P-cite", summary, evidenceAnchors: [] } as unknown as Proposal, pathOnlyPlan, "topk", 1).text),
+      ["W1-T30"], `a sentence-final citation still keeps the row that declares the file: ${summary}`);
+  }
 });
 
 test("invariant: with inboxDraftIndex full, or absent, the draft prompt is byte-identical to the current function's output", async () => {
@@ -217,6 +230,11 @@ test("with inboxDraftIndex topk the index carries the shortlist line and only th
     assert.equal(r["plan_index_mode"], "topk");
     assert.equal(r["plan_index_chars"], index.text.length);
   }
+  const escalated = (await rungPrompt(SHORTLIST_PROPOSAL, SHORTLIST_PLAN, "topk", true)).logs;
+  assert.ok(escalated.some((r) => r["step"] === "inbox.draft_escalated"), "control: the rung must escalate");
+  const rescued = escalated.filter((r) => r["step"] === "inbox.draft_synthesized");
+  assert.ok(rescued.length >= 2, "control: the escalation logs its own synthesized row");
+  for (const r of rescued) assert.equal(r["plan_index_mode"], "topk", "the escalated draft's row names the topk index too");
 });
 
 test("config.json inboxDraftIndex accepts only full or topk", () => {
