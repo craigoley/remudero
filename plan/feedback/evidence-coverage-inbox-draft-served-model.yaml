@@ -4,8 +4,8 @@ raw: >-
   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
   `inbox-draft`, field `servedModel`.
 
-  Coverage: 0/96 joined worker calls (0.0%) in the trailing 7-day window; the
-  field is absent: no row in the window records it.
+  Coverage: 1799/2110 joined worker calls (85.3%) in the trailing 7-day window;
+  below the field's 90.0% floor — a chronic gap no baseline excuses.
 
   First seen: 2026-09-27T17:53:48.271Z.
 
@@ -14,6 +14,9 @@ raw: >-
   lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
   reads), or record why this lane legitimately lacks it. The evidence-coverage
   gardener updates this entry in place while the gap persists.
+
+  Evidence coverage reopened 2026-11-28T06:02:52.270Z: 85.3% (1799/2110); window
+  2026-11-21T06:02:52.270Z through 2026-11-28T06:02:52.270Z; overrides rejected.
 attachments: []
 origin: cli
 status: rejected
@@ -24,3 +27,63 @@ expansion: null
 submission_key: null
 thread_id: null
 answered_by: null
+evidence_coverage_last_reopened: "85.3"
+evidence_coverage_revision:
+  version: 1
+  mainSha: 06f2e72d4b014105c8cb6aff381cd4d1a0abcbdb
+  expectedRecord: >
+    id: evidence-coverage-inbox-draft-served-model
+
+    ts: 2026-09-27T17:53:52.249Z
+
+    raw: >-
+      Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+      `inbox-draft`, field `servedModel`.
+
+      Coverage: 0/96 joined worker calls (0.0%) in the trailing 7-day window; the
+      field is absent: no row in the window records it.
+
+      First seen: 2026-09-27T17:53:48.271Z.
+
+
+      This follow-up never gates a PR or blocks work. Restore the field at the
+      lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+      reads), or record why this lane legitimately lacks it. The evidence-coverage
+      gardener updates this entry in place while the gap persists.
+    attachments: []
+
+    origin: cli
+
+    status: rejected
+
+    reply_to: null
+
+    proposal_pr: null
+
+    summary: null
+
+    expansion: null
+
+    submission_key: null
+
+    thread_id: null
+
+    answered_by: null
+  expectedPlan:
+    plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+    plan/tasks.d: 22dc57280c137a7f6d0c7e56a85471bd235998e1
+  measurement:
+    lane: inbox-draft
+    field: servedModel
+    observed: 1799
+    denominator: 2110
+    floor: 0.9
+    baseline: 0.9199663016006739
+    at: 2026-11-28T06:02:52.270Z
+    since: 2026-11-21T06:02:52.270Z
+    line: "Coverage: 1799/2110 joined worker calls (85.3%) in the trailing 7-day
+      window; below the field's 90.0% floor — a chronic gap no baseline
+      excuses."
+  closure:
+    eligible: true
+    reason: rejected with a measured gap
