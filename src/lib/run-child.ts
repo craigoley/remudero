@@ -677,6 +677,8 @@ export interface SpawnRunChildInput {
   onPending?: (pending: RunChildPending) => void;
   /** W1-T9114: set, the child hosts detached work (a review, a fix dispatch) and its spec names it for the boot's adoption. */
   work?: DetachedWorkSpec;
+  /** Rechecks a fix's exact-head review claim after memory admission and before any run spec or child exists. */
+  reviewInFlight?: () => string | undefined;
 }
 
 /** A run waiting for its child's memory admission. `abort` abandons the wait; it resolves once the wait has ended. */
@@ -830,13 +832,16 @@ export function runChildOutsideKill(err: unknown): "oom_kill" | "container_stop"
 export const RUN_CHILD_SPAWN_WITHHELD_STEP = "run_child.spawn_withheld";
 
 /** W1-T10000: the wait for admission was abandoned. No claim was taken and no spec written, so nothing may run in-process. */
-export interface RunChildAbandoned {
+export type RunChildAbandoned = {
   started: false;
   abandoned: true;
-  reason: "admission-abandoned";
   runId: string;
   waitedMs: number;
-}
+} & (
+  { reason: "admission-abandoned" }
+  /** Present when the post-admission review check withheld a fix child. */
+  | { reason: "review-in-flight"; reviewRun: string }
+);
 
 export type RunChildLaunch = { started: false; reason: string; abandoned?: undefined } | RunChildAbandoned | RunChildHandle;
 
@@ -1011,6 +1016,14 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
       reservation = undefined;
       log(RUN_CHILD_SPAWN_WITHHELD_STEP, { task_id: input.taskId, run_id: runId, hold: `fleet ${hold.control} hold: ${hold.detail}` });
       return { started: false, abandoned: true, reason: "admission-abandoned", runId, waitedMs: 0 };
+    }
+    // A review may claim this head while the fix waits for memory. Recheck in the daemon, after admission,
+    // before writing a run spec or starting a child; the child's own review mutex cannot see this claim.
+    const reviewRun = input.work?.kind === "fix-dispatch" ? input.reviewInFlight?.() : undefined;
+    if (reviewRun !== undefined) {
+      reservation.releaseOccupancy();
+      reservation = undefined;
+      return { started: false, abandoned: true, reason: "review-in-flight", reviewRun, runId, waitedMs: admissionWaitMs };
     }
     // A held reservation spends any carried wait; a state root that refuses the removal fails the spawn like writeSpec would.
     rmSync(admissionWaitPath(input.stateRoot, input.taskId), { force: true });
@@ -1443,6 +1456,8 @@ export interface DetachedWorkChildHost {
     envelope: object;
     /** W1-T13440: told the run id and an abort while the child waits for its reservation. */
     onPending?: (pending: RunChildPending) => void;
+    /** Re-reads the exact-head review claim in the daemon after child admission. */
+    reviewInFlight?: () => string | undefined;
   }) => Promise<{ runId: string; pid?: number; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | RunChildAbandoned | undefined>;
   spawnRetro: (input: { decision: Record<string, unknown> }) => ReturnType<DetachedWorkChildHost["spawnFix"]>;
 }
@@ -1935,7 +1950,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       return { runId: launch.runId, pid: launch.pid, settled: launch.settled, acknowledge: launch.acknowledge,
         readPhase: () => readOwnedChildPhase(launch.dir, launch.runId) };
     },
-    async spawnFix({ pr, fixKey, envelope, onPending }) {
+    async spawnFix({ pr, fixKey, envelope, onPending, reviewInFlight }) {
       // A fix has no shadow probe of its own: the review's probe already round-trips the contract. Only `on` moves it.
       if (mode() !== "on") return undefined;
       const placement = detachedWorkPlacement("fix-dispatch", { mode: "on", hosted: HOSTED_DETACHED_WORK_KINDS, ...ledgerEvidence() });
@@ -1944,6 +1959,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "sweep-fix", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
         plan: async () => ({ plan: { tasks: [] } }), options: options(), log, work, ...(onPending === undefined ? {} : { onPending }),
+        ...(reviewInFlight === undefined ? {} : { reviewInFlight }),
       });
       if (!launch.started) return launch.abandoned ? launch : undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };

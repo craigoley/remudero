@@ -7,13 +7,18 @@
 // failed retries now use the shared cause probes and progress judge.
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { classifyScannerBlocker, type ScannerBlockerCandidate } from "#src/lib/open-prs-rest.js";
 import {
   CODEQL_BLOCKER_DISPATCH_STEP,
   DEFAULT_SWEEP_POLICY,
   codeqlBlockerDedupeKey,
   drainDetachedSweepActions,
+  registerChildWork,
   runSweep,
+  settleChildWork,
   type OpenPrView,
   type SweepDeps,
 } from "#test/helpers/sweep-test.js";
@@ -88,7 +93,7 @@ async function pass(pr: OpenPrView, seed: Array<Record<string, unknown>>, over: 
     escalate: (_pr, reason) => {
       escalations.push(reason);
     },
-    ledgerPath: "/nonexistent/rmd-w1-t5951/rows.ndjson",
+    ledgerPath: over.ledgerPath ?? "/nonexistent/rmd-w1-t5951/rows.ndjson",
     runId: "SWEEP-W1-T5951",
     now: () => NOW,
     readLedger: () => [...seed, ...rows],
@@ -163,6 +168,36 @@ test("a CodeQL repair dispatch that started still dedups on its codeql key", asy
     const next = await pass(blockedPr(), seed);
     assert.equal(next.dispatched, 0, JSON.stringify(seed));
     assert.match(String(next.row.stand_down_reason), DEDUPED);
+  }
+});
+
+test("a CodeQL fix deferred for an in-flight exact-head review re-earns its dedupe key after the verdict", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-codeql-review-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  const reviewRun = "review-codeql-t15005";
+  registerChildWork({ runId: reviewRun, kind: "review", taskId: TASK, prNumber: PR, headSha: HEAD,
+    reviewKey: `${TASK}@${HEAD}` });
+  try {
+    const pr = blockedPr();
+    const pendingReview = { step: "review.pending_posted", run_id: reviewRun, task_id: TASK, pr_number: PR,
+      pr_url: pr.prUrl, head_sha: HEAD };
+    writeFileSync(ledgerPath, `${JSON.stringify(pendingReview)}\n`);
+    const waiting = await pass(pr, [pendingReview], { detachFixWait: true, ledgerPath });
+    assert.equal(waiting.dispatched, 0, "the live exact-head review defers before a fix starts");
+    assert.ok(waiting.rows.some(row => row.step === "sweep.fix_deferred_review_in_flight" && row.dedupe_key === KEY),
+      `the review deferral carries the CodeQL key whose prior dispatch intent it voids: ${JSON.stringify(waiting.rows)}`);
+    assert.equal(waiting.rows.some(row => row.step === CODEQL_BLOCKER_DISPATCH_STEP && row.dedupe_key === KEY), true,
+      "the intent row remains auditable before the deferral row voids it");
+
+    const postedReview = { step: "review.posted", run_id: reviewRun, task_id: TASK, pr_number: PR,
+      pr_url: pr.prUrl, head_sha: HEAD, state: "failure" };
+    writeFileSync(ledgerPath, `${JSON.stringify(pendingReview)}\n${JSON.stringify(postedReview)}\n`);
+    settleChildWork(reviewRun);
+    const resumed = await pass(pr, [pendingReview, ...waiting.rows, postedReview], { detachFixWait: true, ledgerPath });
+    assert.equal(resumed.dispatched, 1, "after the review posts its verdict, a fresh sweep dispatches the CodeQL repair");
+  } finally {
+    settleChildWork(reviewRun);
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

@@ -50,7 +50,7 @@ import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyV
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
-import { isDispatchedRunBranch } from "../../lib/sweep.js";
+import { holdReviewOfHead, isDispatchedRunBranch } from "../../lib/sweep.js";
 import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "../../lib/sweep.js";
 import { readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest } from "../../lib/sweep.js";
 import { REVIEW_RUN_SETTLED_STEPS, REVIEWER_START_FAILED_OUTCOME } from "../../lib/sweep.js";
@@ -1573,6 +1573,12 @@ export async function runReview(host: ReviewCommandHost, args: {
   // eligible for retry and withhold terminal publication.
   const inputBody = args.reviewInputBody ?? (args.reportIsSubstitute ? undefined : report);
   const inputDigest = inputBody === undefined ? undefined : reviewInputDigest(headSha, inputBody);
+  // W1-T15005: daemon task reviews call runReview directly, without reviewCommand's claim hook, and their pending claim
+  // names this process's pid, which the sweep sharing this process cannot judge. Hold the exact head from before that
+  // claim until every return or throw from this attempt has settled. Holds are counted, so the hold an enclosing
+  // reviewCommand already took on this head stays in place for its own outer finally.
+  const releaseHeadClaim = args.shadow ? undefined : holdReviewOfHead({ prUrl, headSha });
+  try {
   // W1-T913 (fb-1784901239119-1be356, PR #707): post `remudero-review=pending` the MOMENT this
   // head is detected as needing review — before the diff fetch, the advisory reviewer spawn or
   // worktree materialization consume the review's own latency budget. Before this, the required
@@ -2790,6 +2796,9 @@ export async function runReview(host: ReviewCommandHost, args: {
   } finally {
     decisionClaim.release();
   }
+  } finally {
+    releaseHeadClaim?.();
+  }
 }
 
 /**
@@ -2961,6 +2970,8 @@ export async function readMoverRemoval(args: {
  * be a brand-new, never-invoked-under-test line this same gate would then flag).
  */
 export interface ReviewCommandDeps {
+  /** W1-T15005: test seam for the claim's process-local liveness key; the outer command releases it in finally. */
+  onReviewClaim?: (release: () => void) => void;
   taskLookup?: TaskLookupOptions;
   /** W1-T14195: the mover-removal read; the real two-repository read by default. */
   readMoverRemoval?: typeof readMoverRemoval;
@@ -3189,7 +3200,15 @@ export async function withMaterializedWorktree<T>(
 }
 
 export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}, exit?: ReviewExit): Promise<number> {
-  if (exit === undefined) return reportingReviewExit(rest, (opened) => reviewCommand(host, prArg, rest, deps, opened));
+  if (exit === undefined) {
+    let releaseReview: (() => void) | undefined;
+    try {
+      return await reportingReviewExit(rest, (opened) => reviewCommand(host, prArg, rest,
+        { ...deps, onReviewClaim: (release) => { releaseReview = release; deps.onReviewClaim?.(release); } }, opened));
+    } finally {
+      releaseReview?.();
+    }
+  }
   const { acceptedReviewAttemptId, materializeReviewWorktree, realDeps, reviewPostedDescription } = host;
   // W1-T11261: time every step before the first ledger row; a step that throws still records its elapsed time and error class.
   const commandStartedAt = systemClock.now();
@@ -3709,6 +3728,9 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   try {
     let claimHeld: string | undefined;
     let claimPosted = false;
+    // W1-T15005: held from before the claim is posted, so no read of the ledger ever finds this claim unheld; released
+    // in the outer command's finally, after materialization and the review.
+    if (!shadow) deps.onReviewClaim?.(holdReviewOfHead({ headSha: view.headRefOid, prUrl: view.url }));
     if (!shadow) try {
       const claimLedger = await readLedgerUnionRecords(dirname(ledgerPath), {
         selectRotation: () => false,
