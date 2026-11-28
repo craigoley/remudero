@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from "node:fs";
+import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {test} from "node:test";
-import {runDraftRung, parseDraftedCandidate, type Proposal} from "#src/lib/inbox.js";
+import {inboxDraftExampleFragmentYaml, runDraftRung, parseDraftedCandidate, type Proposal} from "#src/lib/inbox.js";
+import {DRAFT_AUTOFIX_OFF_FILE} from "#src/lib/draft-repair.js";
 import {workerTranscript, type WorkerResult} from "#src/lib/worker.js";
 import {buildInboxDraftSpawnArgs} from "#src/run-task.js";
 import type {Config} from "#src/lib/config.js";
+import {RMD_TMP_PREFIX} from "#src/lib/tmp.js";
 import {REPO_ROOT} from "#test/helpers/repo-root.js";
 
 const proposal: Proposal = {id: "machine-judge:W1-T1", summary: "Existing parked task", evidenceAnchors: []};
@@ -89,4 +93,23 @@ test("draft rejection telemetry counts the same final message that the parser re
   const {outcome, events} = await draft(worker(malformed));
   assert.equal(outcome?.ok, false);
   assert.equal(events.find(x => x.step === "inbox.draft_error")?.output_chars, malformed.length);
+});
+
+test("the in-spawn draft evaluation judges an answer the repair makes clean as clean, unless the kill switch is set", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}draft-autofix-evaluate-`));
+  const fixable = inboxDraftExampleFragmentYaml().replace('title: "Tighten', 'title: "NEW-1: Tighten').replace("verify: auto", "verify: manual");
+  // A summary-only STAMP, as the draft prompt asks for: the evaluation composes it as the rung does before it lints.
+  const answer = `=== FRAGMENT START ===\n${fixable}\n=== FRAGMENT END ===\nSTAMP: tighten the guard`;
+  try {
+    const evaluate = () => buildInboxDraftSpawnArgs({cwd: REPO_ROOT, settingsFile: join(REPO_ROOT, "fixture-settings-not-read.json"),
+      prompt: "fixture only; do not spawn", mount: {model: "sonnet", effort: "medium", maxTurns: 1, contextBudget: 8192},
+      config: {root, claudeBin: "/never-spawned"} as Config, disallowedTools: [], proposalId: "P9", draftRoutingLog: () => {}})
+      .draftRouting?.evaluate(worker(answer));
+    assert.deepEqual(evaluate(), {contractFailed: false, clean: true});
+    mkdirSync(join(root, "state"));
+    writeFileSync(join(root, "state", DRAFT_AUTOFIX_OFF_FILE), "");
+    assert.deepEqual(evaluate(), {contractFailed: false, clean: false});
+  } finally {
+    rmSync(root, {recursive: true, force: true});
+  }
 });
