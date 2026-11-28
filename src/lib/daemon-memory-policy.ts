@@ -31,7 +31,9 @@ import { parse as parseYaml } from "yaml";
 import { systemClock, type Clock } from "./clock.js";
 import { configPath } from "./config.js";
 import { FOOTPRINT_MAX_SAMPLES, FOOTPRINT_RETAIN_MS } from "./daemon-footprint.js";
+import { sampleCgroupMemory } from "./daemon-memory-telemetry.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { CROSSING_WINDOW_MS, psiLiftNoise, readPsi, SWAP_STALL_HISTORY_MS, SWAP_STALL_MIN_SAMPLES, SWAP_STALL_WINDOW_MS } from "./host-memory-shadow.js";
 import { loadRunChildMode, type RunChildMode } from "./policy.js";
 import {
   bootRunChildModeTracker, readRunChildModeUnion, runChildModeEvidence, runChildModeFor, runChildModeWindow, type RunChildModeTracker,
@@ -1300,4 +1302,277 @@ export function reclaimLedgerFields(record: SlackReclaimRecord | undefined): Rec
     reclaim_measurable: record.measurable,
     reclaim_reason: record.reason,
   };
+}
+
+// ── W1-T15181 — a container held at memory.high while its loop misses ticks sheds its youngest disposable round ─────
+//
+// OBSERVED 2026-11-27 (core, three stalls): memory.high swung 15892-24852 MiB under the tuner, swap sat at its cap, and
+// daemon.loop_lag reached 528 s and 1417 s while 8-14 fix and review children held the memory; each stall ended only when
+// children finished. Nothing ended an ADMITTED child under memory pressure. This rung does, one child at a time:
+// {@link decideContainerShed} is pure, the daemon's in-flight tick keeps its history and ends the child it names.
+// INVARIANT only-disposable-rounds-are-shed: a review, or a detached fix-dispatch, run child; nothing else is a candidate.
+// INVARIANT unknown-is-never-pressure: any unread input holds. No PSI percentage or MiB literal decides: the calm band is
+// learned from this instance's own readings with W1-T10085's windows, minimum and noise rule (host-memory-shadow.ts).
+
+/** One shed: its row, written once the child's end has resolved. */
+export const MEMORY_SHED_STEP = "memory.shed";
+/** A hold while the shed conditions are partly met: at most one per episode, naming what is missing. */
+export const MEMORY_SHED_HELD_STEP = "memory.shed_held";
+
+/** One in-flight tick's reading of the daemon's own cgroup and loop. An absent field is unread and named in `unread`. */
+export interface ContainerShedReading {
+  at_ms: number;
+  /** memory.events `high`: how many times the cgroup was throttled at memory.high. */
+  events_high?: number;
+  /** memory.pressure `full avg60`. */
+  psi_full_avg60?: number;
+  memory_current_mib?: number;
+  memory_high_mib?: number;
+  /** Whole poll intervals the tick ending at this reading arrived late by (the daemon.loop_lag rule). */
+  missed_ticks?: number;
+  unread?: string[];
+}
+
+/** What ending a run child returned: run-child.ts `AbortRunChildOutcome`, structurally. */
+export type ContainerShedEndOutcome =
+  | { signalled: false; reason: string }
+  | { signalled: true; ended: "terminal" | "lost"; killed?: boolean };
+
+/** A sweep restart-drain inventory entry, structurally (sweep.ts `RestartDrainInventoryEntry`), so this module takes no
+ *  edge to the sweep hub. Only an entry with a run id and an end can be shed. */
+export interface ContainerShedEntry {
+  what: string;
+  kind: string;
+  task_id?: string;
+  pr?: number;
+  admitted_at_ms: number;
+  run_id?: string;
+  settled: Promise<void>;
+  end?: () => Promise<ContainerShedEndOutcome>;
+}
+
+/** The episode the rung is in: a shed waiting to settle and be judged, a suspension, and whether its held row is written. */
+export interface ContainerShedEpisode {
+  shed?: { run_id: string; at_ms: number; reading: ContainerShedReading; settled_at_ms?: number };
+  suspended?: boolean;
+  held_written?: boolean;
+}
+
+/** Earlier fully read readings (oldest first, the current one excluded) and the episode state. */
+export interface ContainerShedHistory {
+  readings: readonly ContainerShedReading[];
+  episode: ContainerShedEpisode;
+}
+
+/** The highest PSI full avg60 this instance has read calm; `null` (unlearned) below the minimum, and the PSI condition
+ *  is then dropped. */
+export interface ContainerCalmBand {
+  band: number | null;
+  source: "learned" | "unlearned";
+  samples: number;
+  basis: string;
+}
+
+export interface ContainerShedDecision {
+  action: "hold" | "shed" | "suspend";
+  reason: string;
+  /** shed: the youngest disposable child. */
+  entry?: ContainerShedEntry;
+  /** hold: the conditions not met. */
+  missing: string[];
+  unread?: string[];
+  band: ContainerCalmBand;
+  /** The episode after this decision: the caller keeps it for the next. */
+  episode: ContainerShedEpisode;
+  /** hold: the first partly met hold of this episode, so the caller writes its one memory.shed_held row. */
+  write_held: boolean;
+  /** Set on the first fresh reading after a shed settled. */
+  shed_effect?: "effective" | "ineffective";
+}
+
+const MISSING_HIGH = "memory.events high did not rise since the previous reading";
+const MISSING_TICKS = "missed ticks not seen in two readings an avg60 window apart";
+const MISSING_PSI = "PSI full avg60 inside the calm band";
+const MISSING_CANDIDATE = "no disposable candidate";
+
+/** INVARIANT only-disposable-rounds-are-shed: a review or a detached fix-dispatch, hosted in a run child it can end. */
+export function isDisposableShedEntry(entry: ContainerShedEntry): boolean {
+  const kindOk = entry.what === "review" || (entry.what === "detached" && entry.kind === "fix-dispatch");
+  return kindOk && entry.run_id !== undefined && Number.isFinite(entry.admitted_at_ms) && entry.end !== undefined;
+}
+
+/**
+ * The calm band, learned with W1-T10085's windows, minimum and noise rule: a reading is HARMED when the next reading
+ * reports a missed tick. The late tick belongs to the interval after the preceding reading, even when the loop only
+ * records the late arrival after the avg60 window. With fewer than SWAP_STALL_MIN_SAMPLES calm readings the band is
+ * unlearned. The band is the highest level with an observed calm reading. W1-T10085's lift/noise calculation is
+ * reported for each PSI level; harm is attributed to the next tick, so a level with no calm observations cannot enter
+ * the band by raising the population baseline with its own harmed readings.
+ */
+export function containerCalmBandOf(readings: readonly ContainerShedReading[], nowMs: number): ContainerCalmBand {
+  const ordered = [...readings].sort((a, b) => a.at_ms - b.at_ms);
+  const closed = ordered.flatMap((r, i) => {
+    const next = ordered[i + 1];
+    if (r.psi_full_avg60 === undefined || nowMs - r.at_ms < SWAP_STALL_WINDOW_MS || nowMs - r.at_ms > SWAP_STALL_HISTORY_MS || next === undefined) return [];
+    return [{ level: r.psi_full_avg60, harmed: (next.missed_ticks ?? 0) >= 1 }];
+  }).sort((x, y) => x.level - y.level);
+  const calm = closed.filter((r) => !r.harmed).length;
+  if (calm < SWAP_STALL_MIN_SAMPLES) {
+    return { band: null, source: "unlearned", samples: calm, basis: `${calm} of ${SWAP_STALL_MIN_SAMPLES} calm readings with a closed window` };
+  }
+  let band: number | null = null;
+  let bandSamples = 0;
+  let basis = "";
+  const overallHarmShare = closed.filter((sample) => sample.harmed).length / closed.length;
+  for (let k = 0; k < closed.length;) {
+    const level = closed[k]!.level;
+    let end = k + 1;
+    while (end < closed.length && closed[end]!.level === level) end++;
+    const group = closed.slice(k, end);
+    const hurt = group.filter((sample) => sample.harmed).length;
+    const share = hurt / group.length;
+    // Compare this PSI level's harm rate with the instance-wide rate, as W1-T10085 does for its flagged cohort.
+    // A mostly harmed level can move the baseline, but cannot make its own excess harm disappear.
+    const baseline = overallHarmShare;
+    const noise = psiLiftNoise(baseline, group.length);
+    const lifted = share - baseline > noise;
+    basis = `${hurt} of ${group.length} readings at full avg60 ${level} were followed by a missed tick ` +
+      `(harm share ${Math.round(share * 100)}%, instance baseline ${Math.round(baseline * 100)}%, ` +
+      `lift noise ${Math.round(noise * 100)}%; ${lifted ? "lifted" : "within noise"})`;
+    const calmAtLevel = group.length - hurt;
+    // A statistically lifted level is not calm, including when one on-time tick is mixed into a mostly harmed level.
+    if (calmAtLevel > 0 && !lifted) {
+      band = level;
+      bandSamples += calmAtLevel;
+    }
+    k = end;
+  }
+  if (band === null || calm < SWAP_STALL_MIN_SAMPLES) {
+    return { band: null, source: "unlearned", samples: calm,
+      basis: `${calm} of ${SWAP_STALL_MIN_SAMPLES} calm readings; ${band === null ? "no calm level within noise" : "below minimum"}: ${basis}` };
+  }
+  return { band, source: "learned", samples: bandSamples, basis: `learned ${band}: ${basis}` };
+}
+
+/** A field's own noise: twice the standard deviation of its tick-to-tick change over the readings. Fewer than two
+ *  changes read: zero, so any fall counts. */
+function readingNoise(readings: readonly ContainerShedReading[], field: "psi_full_avg60" | "memory_current_mib"): number {
+  const values = readings.map((r) => r[field]).filter((v): v is number => v !== undefined);
+  const deltas = values.slice(1).map((v, i) => v - values[i]!);
+  if (deltas.length < 2) return 0;
+  const mean = deltas.reduce((a, b) => a + b, 0) / deltas.length;
+  return 2 * Math.sqrt(deltas.reduce((a, d) => a + (d - mean) ** 2, 0) / (deltas.length - 1));
+}
+
+/**
+ * W1-T15181 — pure: shed the youngest disposable child when, together, the container's memory.events high count rose
+ * since the previous reading, the loop missed a tick in this reading and in one at least an avg60 window older, and PSI
+ * full avg60 is above the learned calm band (dropped while unlearned). One at a time: after a shed, nothing more until
+ * that child settled and a fresh reading is taken; a shed after which neither PSI nor memory.current fell by more than
+ * its noise suspends shedding until a reading is back inside the band (unlearned: a clear reading). A clear reading
+ * ends the episode. Every unread input holds.
+ */
+export function decideContainerShed(
+  reading: ContainerShedReading,
+  history: ContainerShedHistory,
+  inventory: readonly ContainerShedEntry[] | { unread: string },
+): ContainerShedDecision {
+  const band = containerCalmBandOf(history.readings, reading.at_ms);
+  let episode: ContainerShedEpisode = { ...history.episode };
+  const hold = (reason: string, extra: Partial<ContainerShedDecision> = {}): ContainerShedDecision =>
+    ({ action: "hold", reason, missing: [], band, episode, write_held: false, ...extra });
+  const unread = [...(reading.unread ?? [])];
+  const required = ["events_high", "psi_full_avg60", "memory_current_mib", "memory_high_mib", "missed_ticks"] as const;
+  for (const field of required) if (reading[field] === undefined && (reading.unread ?? []).length === 0) unread.push(`${field} absent`);
+  if (!Array.isArray(inventory)) unread.push(`the inventory: ${(inventory as { unread: string }).unread}`);
+  if (unread.length > 0) return hold(`unread: ${unread.join("; ")}`, { unread });
+  const entries = inventory as readonly ContainerShedEntry[];
+  const prior = [...history.readings].reverse();
+  const previous = prior.find((r) => r.events_high !== undefined);
+  const highRose = previous !== undefined && reading.events_high! > previous.events_high!;
+  const missedNow = reading.missed_ticks! >= 1;
+  const earlier = prior.find((r) => r.at_ms <= reading.at_ms - CROSSING_WINDOW_MS);
+  const missedTwice = missedNow && (earlier?.missed_ticks ?? 0) >= 1;
+  const inBand = band.band !== null && reading.psi_full_avg60! <= band.band;
+  const psiAbove = band.band === null || !inBand;
+  const clear = !highRose && !missedNow && (band.band === null || inBand);
+  let shedEffect: ContainerShedDecision["shed_effect"];
+  if (episode.suspended) {
+    if (!(band.band === null ? clear : inBand)) return hold("shedding suspended: the last shed was ineffective, and no reading is back inside the calm band yet");
+    episode = { ...episode };
+    delete episode.suspended;
+  }
+  if (episode.shed) {
+    const shed = episode.shed;
+    if (shed.settled_at_ms === undefined) return hold(`waiting for shed child ${shed.run_id} to settle`);
+    if (reading.at_ms <= shed.settled_at_ms) return hold(`waiting for a fresh reading after shed child ${shed.run_id} settled`);
+    const psiFell = shed.reading.psi_full_avg60! - reading.psi_full_avg60! > readingNoise(history.readings, "psi_full_avg60");
+    const memFell = shed.reading.memory_current_mib! - reading.memory_current_mib! > readingNoise(history.readings, "memory_current_mib");
+    episode = { ...(episode.held_written ? { held_written: true } : {}) };
+    if (!psiFell && !memFell) {
+      episode.suspended = true;
+      return { action: "suspend", shed_effect: "ineffective", missing: [], band, episode, write_held: false,
+        reason: `shed of ${shed.run_id} was ineffective: neither PSI full avg60 nor memory.current fell by more than its noise` };
+    }
+    shedEffect = "effective";
+  }
+  if (clear) return hold("clear: no high-count rise, no missed tick", { episode: {}, ...(shedEffect ? { shed_effect: shedEffect } : {}) });
+  const missing: string[] = [];
+  if (!highRose) missing.push(MISSING_HIGH);
+  if (!missedTwice) missing.push(MISSING_TICKS);
+  if (!psiAbove) missing.push(MISSING_PSI);
+  const candidates = entries.filter(isDisposableShedEntry);
+  if (missing.length === 0 && candidates.length === 0) missing.push(MISSING_CANDIDATE);
+  if (missing.length > 0) {
+    const writeHeld = !episode.held_written;
+    episode = { ...episode, held_written: true };
+    const why = missing.includes(MISSING_CANDIDATE)
+      ? `no disposable candidate among ${entries.length} in-flight entries (a review or a detached fix-dispatch run child)`
+      : `partly met: ${missing.join("; ")}`;
+    return hold(why, { missing, write_held: writeHeld, ...(shedEffect ? { shed_effect: shedEffect } : {}) });
+  }
+  // The youngest: the latest admission; a tie goes to the later inventory entry.
+  const entry = candidates.reduce((young, e) => (e.admitted_at_ms >= young.admitted_at_ms ? e : young));
+  episode = { ...episode, shed: { run_id: entry.run_id!, at_ms: reading.at_ms, reading } };
+  return { action: "shed", entry, missing: [], band, episode, write_held: false, ...(shedEffect ? { shed_effect: shedEffect } : {}),
+    reason: `memory.high throttling (high ${previous!.events_high} -> ${reading.events_high}), ${reading.missed_ticks} missed tick(s) ` +
+      `after ${earlier!.missed_ticks} an avg60 window earlier, PSI full avg60 ${reading.psi_full_avg60} ` +
+      (band.band === null ? `(calm band unlearned: ${band.basis})` : `above the calm band ${band.band}`) };
+}
+
+export interface ContainerShedReadIo {
+  readFile?: (path: string) => string;
+  cgroupRoot?: string;
+  platform?: string;
+}
+
+/**
+ * One reading of the daemon's own cgroup: memory.current and memory.events `high` through sampleCgroupMemory
+ * (daemon-memory-telemetry.ts), memory.high as {@link readDaemonMemory} reads it, and memory.pressure full avg60 through
+ * host-memory-shadow.ts's readPsi. Off
+ * Linux nothing is read and the reading is unread. `missedTicks` is the in-flight tick's own lateness.
+ */
+export function readContainerShedReading(atMs: number, missedTicks: number | undefined, io: ContainerShedReadIo = {}): ContainerShedReading {
+  const platform = io.platform ?? process.platform;
+  if (platform !== "linux") return { at_ms: atMs, unread: [`cgroup reads skipped off Linux (${platform})`] };
+  const read = io.readFile ?? ((path: string) => readFileSync(path, "utf8"));
+  const root = io.cgroupRoot ?? "/sys/fs/cgroup";
+  const reading: ContainerShedReading = { at_ms: atMs };
+  const unread: string[] = [];
+  const cg = sampleCgroupMemory(read, root);
+  if (cg.cg_memory_current_bytes === undefined) unread.push(`memory.current (${cg.mem_cgroup ?? "absent"})`);
+  else reading.memory_current_mib = Math.round(cg.cg_memory_current_bytes / MIB_BYTES);
+  if (cg.cg_events_high === undefined) unread.push(`memory.events (${cg.mem_cgroup ?? "no high line"})`);
+  else reading.events_high = cg.cg_events_high;
+  const high = finiteBytes(read, join(root, "memory.high"));
+  if (high === undefined) unread.push("memory.high (unreadable, or max)");
+  else reading.memory_high_mib = Math.round(high / MIB_BYTES);
+  const psi = readPsi(read, join(root, "memory.pressure"));
+  if ("unread" in psi) unread.push(`memory.pressure (${psi.unread})`);
+  else if (psi.fullAvg60 === undefined) unread.push("memory.pressure (no full avg60)");
+  else reading.psi_full_avg60 = psi.fullAvg60;
+  if (missedTicks === undefined || !Number.isFinite(missedTicks) || missedTicks < 0) unread.push("loop-lag reading");
+  else reading.missed_ticks = missedTicks;
+  if (unread.length > 0) reading.unread = unread;
+  return reading;
 }
