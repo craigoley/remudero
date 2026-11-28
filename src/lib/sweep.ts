@@ -30079,12 +30079,7 @@ async function runSweepPinned(
                   recordForcedRefresh(deps, pr, "stale-base"); // W1-T7735: W1-T2789
                   try {
                     const outcome = await deps.updateBranch!(pr);
-                    let refreshed: LiveStateResult | undefined;
-                    if (outcome === "updated" && deps.readLiveState) {
-                      try {
-                        refreshed = await deps.readLiveState(pr);
-                      } catch { /* successful update; unreadable attribution leaves `new_head_sha` absent */ }
-                    }
+                    const updatedHead = outcome === "updated" ? await confirmedUpdateHead(deps.readLiveState, pr, pr.headSha) : undefined;
                     appendLine(deps.ledgerPath, {
                       run_id: deps.runId,
                       task_id: pr.taskId ?? "SWEEP",
@@ -30093,8 +30088,7 @@ async function runSweepPinned(
                       pr_number: pr.prNumber,
                       pr_url: pr.prUrl,
                       head_sha: pr.headSha,
-                      ...(refreshed?.ok === true && typeof refreshed.headSha === "string"
-                        ? { new_head_sha: refreshed.headSha } : {}),
+                      ...(updatedHead !== undefined ? { new_head_sha: updatedHead } : {}),
                       main_tip_sha: staleBaseReleaseTarget.mainTipSha,
                       behind_by: decision.behindBy,
                       matching_base_files: decision.matchingBaseFiles,
@@ -30921,12 +30915,8 @@ async function runSweepPinned(
       });
       try {
         const outcome = await deps.updateBranch(target);
-        let refreshed: LiveStateResult | undefined;
-        if (outcome === "updated" && deps.readLiveState) {
-          try {
-            refreshed = await deps.readLiveState(viewOf(target));
-          } catch { /* successful update; unreadable attribution leaves `new_head_sha` absent */ }
-        }
+        const updatedHead = outcome === "updated"
+          ? await confirmedUpdateHead(deps.readLiveState, viewOf(target), target.headSha) : undefined;
         appendLine(deps.ledgerPath, {
           run_id: deps.runId,
           task_id: target.taskId ?? "SWEEP",
@@ -30934,7 +30924,7 @@ async function runSweepPinned(
           pr_number: target.prNumber,
           pr_url: target.prUrl,
           head_sha: target.headSha,
-          ...(refreshed?.ok === true && typeof refreshed.headSha === "string" ? { new_head_sha: refreshed.headSha } : {}),
+          ...(updatedHead !== undefined ? { new_head_sha: updatedHead } : {}),
           ...staleWorkflowFields,
           ...behindFields,
           ...updateReasonFields,
@@ -31456,14 +31446,9 @@ export async function runArmedRatchetRejudge(
     appendLine(deps.ledgerPath, { ...update, step: "sweep.update_branch.attempted" });
     try {
       const outcome = await deps.updateBranch(target);
-      let live: LiveStateResult | undefined;
-      if (outcome === "updated" && deps.readLiveState) {
-        try {
-          live = await deps.readLiveState(pr);
-        } catch { /* successful update; unreadable attribution leaves `new_head_sha` absent */ }
-      }
+      const updatedHead = outcome === "updated" ? await confirmedUpdateHead(deps.readLiveState, pr, pr.headSha) : undefined;
       appendLine(deps.ledgerPath, { ...update, step: `sweep.update_branch.${outcome}`,
-        ...(live?.ok === true && typeof live.headSha === "string" ? { new_head_sha: live.headSha } : {}) });
+        ...(updatedHead !== undefined ? { new_head_sha: updatedHead } : {}) });
     } catch (e) {
       appendLine(deps.ledgerPath, { ...update, step: "sweep.update_branch.error", error: String((e as Error)?.message ?? e) });
     }
@@ -33089,6 +33074,26 @@ export function lightPassEarlyReviewBatch(
   return earlyCandidates.filter((pr) => inQueueOrder([pr, oldestDelayed])[0] === pr);
 }
 
+/** W1-T15162 — the head a successful update-branch produced, under the W1-T9949 post-update lag guard: GitHub applies
+ *  the update asynchronously, so a live read still naming `oldHead` is re-read once, and a read that stays lagging, is
+ *  not ok, or throws confirms nothing (`new_head_sha` stays unset rather than recording the old head). */
+async function confirmedUpdateHead(
+  read: SweepDeps["readLiveState"], pr: OpenPrView, oldHead: string,
+): Promise<string | undefined> {
+  if (read === undefined) return undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let live: LiveStateResult;
+    try {
+      live = await read(pr);
+    } catch {
+      return undefined; // unreadable: the update stands, its head is unconfirmed
+    }
+    if (live.ok !== true || typeof live.headSha !== "string" || live.headSha === "") return undefined;
+    if (live.headSha !== oldHead) return live.headSha;
+  }
+  return undefined;
+}
+
 /** W1-T14073 — A RE-ENTERED REVIEW INPUT QUEUES FROM WHEN IT BECAME ELIGIBLE, NOT FROM ITS PR'S AGE. Generalizes
  *  W1-T12534's absent-repush map, folded from the ledger view the pass already holds (no second scan). A head
  *  absent-repush minted keeps W1-T12534's key (its first eligible ts, else its mint ts). A PR that was eligible at an
@@ -33096,8 +33101,8 @@ export function lightPassEarlyReviewBatch(
  *  sha, so a fix head is a new key), else `now`: this pass writes that key's first row. A PR's first head keeps its
  *  createdAt (W1-T12534 criteria 2 and 3), which is never later than its first eligibility.
  *  W1-T15162 — A HEAD THE SWEEP'S OWN BRANCH UPDATE MADE KEEPS THE QUEUE PLACE OF THE HEAD IT REPLACED. A branch update
- *  adds no new work to review, so a head first eligible after a `sweep.update_branch.updated` row of an unreviewed
- *  earlier head inherits that head's key. INVARIANT a-new-head-of-new-work-requeues: a head with no such update before
+ *  adds no new work to review, so the head a `sweep.update_branch.updated` row of an unreviewed earlier head confirms
+ *  ({@link confirmedUpdateHead}) inherits that head's key. INVARIANT a-new-head-of-new-work-requeues: a head with no such update before
  *  it, a head after a fix dispatch or another new head, and a head whose earlier head has a verdict keep the key above. */
 function reviewInputQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>, now: number): ReviewQueuedAt {
   const byKey = new Map<string, string>();
@@ -33140,12 +33145,13 @@ function reviewInputQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>
     const heads = eligibleHeads.get(prKey) ?? new Set<string>();
     eligibleHeads.set(prKey, heads.add(head));
   }
-  // Older update rows may not carry `new_head_sha`; the next eligible head is the update's result.
+  // The update's head is the next eligible head after its row, credited only when the row's lag-guarded
+  // `new_head_sha` confirms it: a row without one, or a later push, fix head or stale read, credits nothing.
   for (const [prKey, updates] of sweepUpdates) {
     const events = eligibleEvents.get(prKey) ?? [];
     for (const update of updates) {
-      if (update.to !== undefined) continue;
-      update.to = events.find((event) => event.rowIndex > update.rowIndex && event.head !== update.from)?.head;
+      const next = events.find((event) => event.rowIndex > update.rowIndex && event.head !== update.from)?.head;
+      if (update.to !== undefined && next !== undefined && next !== update.to) update.to = undefined;
     }
   }
   const nowIso = clockFromMillisFn(() => now).iso();
