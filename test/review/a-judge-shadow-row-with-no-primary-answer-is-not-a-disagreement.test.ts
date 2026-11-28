@@ -12,7 +12,7 @@ import {
   judgeCashCandidate, judgeShadowPrimaryUnanswered, judgeShadowSwitchCandidate, judgeShadowThresholds, judgeShadowTypedAnswers, JUDGE_SWITCH_BAR, type ConfigInventory,
 } from "#src/lib/config-gardener.js";
 import type { askDecisionModel, DecisionAnsweredRow } from "#src/lib/decision-model.js";
-import { judgeShadowSummary, shadowJudgeCall, type ShadowJudgeCall } from "#src/lib/judge-shadow.js";
+import { judgeShadowSummary, runJudgeShadow, shadowJudgeCall, type ShadowJudgeCall } from "#src/lib/judge-shadow.js";
 import { loadMounts, mountsPath, type DecisionCandidate, type JudgeMount } from "#src/lib/mounts.js";
 import { scoreTypedAnswers } from "#src/lib/typed-answer-scores.js";
 import type { SpawnWorkerArgs } from "#src/lib/worker.js";
@@ -83,6 +83,19 @@ test("W1-T15164 criterion 1: a decision-arm compared row whose primary gave no a
   assert.equal(row.shadow_answer, "high");
   assert.equal(row.agreement, null);
   assert.equal(row.primary_unanswered, true);
+
+  const cashRows: Array<Record<string, unknown>> = [];
+  const cashMount: JudgeMount = { ...mount, shadow: { provider: "cash", deployment: "DeepSeek-V4-Flash" } };
+  const outcome = await runJudgeShadow({ surface: "ci-judge", key: "PR7@abc1234", mount: cashMount,
+    primaryArgs: { cwd: REPO_ROOT, prompt: "judge this change", tools: [] } as unknown as SpawnWorkerArgs,
+    primaryVerdict: undefined, parse: (text) => text === "agree" ? "agree" : undefined, agreementKey: (answer) => answer,
+    spawn: async () => ({ text: "agree", costUsd: 0.001, routedModel: "DeepSeek-V4-Flash" } as never),
+    log: (step, fields = {}) => { cashRows.push({ step, role: "ci-judge", ...fields }); } });
+  assert.deepEqual(outcome, { kind: "paired", agreement: null });
+  assert.equal(cashRows.length, 1);
+  assert.equal(cashRows[0]!.step, "judge_shadow.paired");
+  assert.equal(cashRows[0]!.agreement, null);
+  assert.equal(cashRows[0]!.primary_unanswered, true);
 });
 
 test("W1-T15164 criterion 2: judgeShadowThresholds and the switch-bar count leave primary-unanswered rows out of the agreement share and report their count separately", () => {
@@ -115,6 +128,16 @@ test("W1-T15164 criterion 2: judgeShadowThresholds and the switch-bar count leav
       noAnswerShare: 0, refused: 0, primaryMedianCostUsd: null, shadowMedianCostUsd: null }], form);
     assert.equal(judgeCashCandidate({ ...inventory(cashRows), judgeShadows: summary }, REPO_ROOT), undefined, form);
   }
+  // Legacy cash-arm rows used a null primary verdict and false agreement without the marker.
+  const legacyCashRows = [
+    { ts: ISO, step: "judge_shadow.paired", role: "feedback_summary", primary_verdict: "agree", shadow_verdict: "agree", agreement: true },
+    ...Array.from({ length: 199 }, () => ({ ts: ISO, step: "judge_shadow.paired", role: "feedback_summary",
+      primary_verdict: null, shadow_verdict: "agree", agreement: false })),
+  ];
+  const legacySummary = judgeShadowSummary(legacyCashRows, WINDOW);
+  assert.deepEqual(legacySummary, [{ role: "feedback_summary", paired: 1, primaryUnanswered: 199, agreeShare: 1,
+    noAnswerShare: 0, refused: 0, primaryMedianCostUsd: null, shadowMedianCostUsd: null }]);
+  assert.equal(judgeCashCandidate({ ...inventory(legacyCashRows), judgeShadows: legacySummary }, REPO_ROOT), undefined);
 });
 
 test("W1-T15164 criterion 3: invariant:answered-pairs-unchanged — a row where both answered keeps agreement equal to primary === shadow, and its count is unchanged", async () => {

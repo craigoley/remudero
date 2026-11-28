@@ -93,7 +93,7 @@ export function thresholdFor(threshold: JudgeThreshold | undefined, model: strin
 
 /** What one shadow call came to. `refused` is a capacity or budget refusal; nothing is acted on in any case. */
 export type JudgeShadowOutcome =
-  | { kind: "paired"; agreement: boolean }
+  | { kind: "paired"; agreement: boolean | null }
   | { kind: "refused"; refusal: "capacity" | "budget"; reason: string }
   | { kind: "unavailable"; reason: string }
   | { kind: "skipped" }
@@ -235,8 +235,10 @@ export async function runJudgeShadow<T>(request: JudgeShadowRequest<T>): Promise
     record("judge_shadow.unavailable", { ...ask.spend, reason: ask.reason });
     return { kind: "unavailable", reason: ask.reason };
   }
-  record("judge_shadow.paired", { ...ask.spend, shadow_verdict: ask.verdict, agreement: ask.agreement });
-  return { kind: "paired", agreement: ask.agreement };
+  const unanswered = ask.primaryKey === null;
+  record("judge_shadow.paired", { ...ask.spend, shadow_verdict: ask.verdict,
+    agreement: unanswered ? null : ask.agreement, ...(unanswered ? { primary_unanswered: true } : {}) });
+  return { kind: "paired", agreement: unanswered ? null : ask.agreement };
 }
 
 // ── W1-T12187: the risk judge and the decision summary ──────────────────────────────────────
@@ -317,8 +319,10 @@ export async function shadowJudgeCall<T>(call: ShadowJudgeCall<T>): Promise<void
   const ask = await askShadow<T>({ spawn: call.spawn, parse: call.parse, primaryVerdict: call.primaryAnswer, agreementKey: keyed ?? (() => "") }, args);
   const shadow = { shadow_model: ask.spend?.served_model ?? null, shadow_cost_usd: ask.spend?.cost_usd ?? null };
   if (ask.kind === "answered") {
+    const unanswered = ask.primaryKey === null;
     record("judge_shadow.compared", { ...shadow,
-      ...(keyed === undefined ? { parses: true } : { primary_answer: ask.primaryKey, shadow_answer: ask.shadowKey, agreement: ask.agreement }) });
+      ...(keyed === undefined ? { parses: true } : { primary_answer: ask.primaryKey, shadow_answer: ask.shadowKey,
+        agreement: unanswered ? null : ask.agreement, ...(unanswered ? { primary_unanswered: true } : {}) }) });
   } else if (ask.kind === "unavailable" && ask.unparseable && keyed === undefined) {
     record("judge_shadow.compared", { ...shadow, parses: false, reason: ask.reason });
   } else {
@@ -474,6 +478,14 @@ function median(values: number[]): number | null {
   return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
 }
 
+/** Older rows predate the marker but encode a missing primary answer as null. */
+function isPrimaryUnansweredShadowRow(row: Record<string, unknown>): boolean {
+  if (row.primary_unanswered === true) return true;
+  return (row.step === "judge_shadow.compared" && row.primary_answer === null &&
+      (typeof row.shadow_answer === "string" || (row.model_surface === "decisions" && Array.isArray(row.distribution)))) ||
+    (row.step === "judge_shadow.paired" && row.primary_verdict === null && row.shadow_verdict !== undefined);
+}
+
 /** The shadow record of each role in `rows`, from `sinceMs` on when it is given. A refused, failed or unusable
  *  shadow call is never counted as paired or as agreement. A usable answer with no primary answer is counted apart. */
 export function judgeShadowSummary(rows: ReadonlyArray<Record<string, unknown>>, sinceMs?: number): JudgeShadowRoleSummary[] {
@@ -489,8 +501,7 @@ export function judgeShadowSummary(rows: ReadonlyArray<Record<string, unknown>>,
     if (typeof row.primary_cost_usd === "number") tally.primary.push(row.primary_cost_usd);
     if (row.step === "judge_shadow.refused" || row.refusal !== undefined) tally.refused += 1;
     else if (row.step === "judge_shadow.skipped" || row.step === "judge_shadow.unavailable" || row.parses === false) tally.noAnswer += 1;
-    else if (row.primary_unanswered === true || (row.step === "judge_shadow.compared" && row.model_surface === "decisions" &&
-      row.primary_answer === null && Array.isArray(row.distribution))) tally.primaryUnanswered += 1;
+    else if (isPrimaryUnansweredShadowRow(row)) tally.primaryUnanswered += 1;
     else {
       tally.paired += 1;
       if (typeof row.agreement === "boolean") {

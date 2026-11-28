@@ -1258,11 +1258,13 @@ export function judgeShadowTypedAnswers(rows: ReadonlyArray<Record<string, unkno
 
 /**
  * W1-T15164: a compared shadow row whose own judge gave no answer: it says so, or (rows written before W1-T15164) it is
- * a decision row with a distribution and a null primary answer, which recorded agreement false.
+ * a compared/paired row with a null primary answer, which recorded agreement false.
  */
 function isPrimaryUnanswered(row: Record<string, unknown>): boolean {
   if (row.primary_unanswered === true) return true;
-  return row.step === "judge_shadow.compared" && row.model_surface === "decisions" && row.primary_answer === null && Array.isArray(row.distribution);
+  return (row.step === "judge_shadow.compared" && row.primary_answer === null &&
+      (typeof row.shadow_answer === "string" || (row.model_surface === "decisions" && Array.isArray(row.distribution)))) ||
+    (row.step === "judge_shadow.paired" && row.primary_verdict === null && row.shadow_verdict !== undefined);
 }
 
 /** W1-T15164: how many compared rows of one role and shadow model had no answer of the judge's own to compare. */
