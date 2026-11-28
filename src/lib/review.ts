@@ -8260,9 +8260,13 @@ async function postRenewingOnce<S>(post: (status: S) => Promise<void> | void, st
   }
 }
 
-/** W1-T15030: GitHub refused the token a `gh` call presented. */
+/** W1-T15030: GitHub refused the token a `gh` call presented. Read from stderr only, where gh writes its own
+ *  "gh: <message> (HTTP <code>)": the Error's message echoes the command, including `-f description=`, and stdout
+ *  carries the response body, so a 422 or 502 whose description names HTTP 401 is not a 401. */
 export function ghUnauthorizedError(error: unknown): boolean {
-  return /\bHTTP 401\b|Bad credentials/i.test(ghErrorText(error));
+  const stderr = (error as { stderr?: string | Buffer | null } | null | undefined)?.stderr;
+  const text = typeof stderr === "string" ? stderr : (stderr?.toString("utf8") ?? "");
+  return /\bHTTP 401\b|Bad credentials/i.test(text);
 }
 
 async function replayPublisher(

@@ -380,6 +380,41 @@ test("W1-T15030 criterion 2: no poster the guarded retry wraps renews on its own
   assert.deepEqual(observed, Object.fromEntries(Object.keys(sites).map((site) => [site, once])));
 });
 
+test("W1-T15030 criterion 2: a non-401 refusal whose description names HTTP 401 is not renewed", async (t) => {
+  // OBSERVED (review of 8ce48309c): the 401 check read the Error's message, which echoes the gh command and so the
+  // `-f description=`; a 422 status POST whose description named HTTP 401 renewed, retried and was recorded as
+  // token_unrenewable instead of failing as the 422 it was. gh writes its own refusal to stderr, so only stderr counts.
+  const { root, app } = await withAppToken(t, "non-401-names-401");
+  const ledgerPath = join(root, "ledger.ndjson");
+  const sha = "e".repeat(40);
+  const fresh = { status: "fresh" as const, codeSha: "c".repeat(40), originMainSha: "c".repeat(40), advance: "none" as const };
+  const posts = await withGhShim([{ when: "-X POST", stderr: "gh: Validation Failed (HTTP 422)", exit: 1 }, ...READS], async (shim) => {
+    await postReviewStatusGuarded({ owner: "acme", repo: "remudero", sha, state: "failure",
+      description: "the reviewer saw HTTP 401 from a proof", taskId: "W1-T15030", runId: "review-PR15030-422", ledgerPath: ledgerPath,
+      prUrl: "https://github.com/acme/remudero/pull/15030", reviewInputDigest: reviewInputDigest(sha, "Remudero-Task: W1-T15030"),
+      evidence: "executed", reviewerCodeFreshness: fresh, fetchLifecycle: () => ({ merged: false, closed: false }) }).catch(() => undefined);
+    return shim.calls().filter((call) => call.includes("-X POST"));
+  });
+  assert.ok(posts.some((call) => call.includes("HTTP 401")), `fixture assumption: the POST's description names HTTP 401: ${posts.join(" | ")}`);
+  const rows = readLedgerLines(ledgerPath);
+  assert.equal(posts.length, 1, "THE CLAIM: a 422 is not retried as a 401");
+  assert.equal(app.exchanges.length - 1, 0, "THE CLAIM: a 422 mints no new token");
+  assert.equal(rows.some((row) => row.step === "review.post_refused" && row.reason === "token_unrenewable"), false,
+    "THE CLAIM: a 422 is never recorded as token_unrenewable");
+  // Control: the same POST answered with gh's real 401 on stderr renews once and retries once.
+  const { root: root401, app: app401 } = await withAppToken(t, "real-401-on-stderr");
+  const ledger401 = join(root401, "ledger.ndjson");
+  const posts401 = await withGhShim([{ when: "-X POST", stderr: "gh: Bad credentials (HTTP 401)", exit: 1 }, ...READS], async (shim) => {
+    await postReviewStatusGuarded({ owner: "acme", repo: "remudero", sha, state: "failure",
+      description: "the reviewer saw HTTP 401 from a proof", taskId: "W1-T15030", runId: "review-PR15030-401", ledgerPath: ledger401,
+      prUrl: "https://github.com/acme/remudero/pull/15030", reviewInputDigest: reviewInputDigest(sha, "Remudero-Task: W1-T15030"),
+      evidence: "executed", reviewerCodeFreshness: fresh, fetchLifecycle: () => ({ merged: false, closed: false }) }).catch(() => undefined);
+    return shim.calls().filter((call) => call.includes("-X POST")).length;
+  });
+  assert.equal(posts401, 2, "control: a real 401 is retried once");
+  assert.equal(app401.exchanges.length - 1, 1, "control: a real 401 mints one new token");
+});
+
 test("W1-T15030 criterion 2: an ops task's terminal post refused twice still lands its private findings", async (t) => {
   // W1-T15077 lands an outboxed terminal status's private findings at once; a token_unrenewable refusal leaves the same
   // outbox entry for a later drain, so it must land them too (review of #21071, 2026-11-27).
