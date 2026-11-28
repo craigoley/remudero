@@ -33681,7 +33681,9 @@ export interface QueueGovernorFlow {
 export interface QueueGovernorResult {
   measuredBound?: number;
   pressure?: FixHostPressure;
-  /** true ⇒ the dispatch path MUST defer — do not open a new PR this pass. */
+  /** Whether the host can accommodate a new implement worker. */
+  pressureHeld?: boolean;
+  /** true ⇒ ordinary dispatch defers. */
   deferred: boolean;
   /** The FLEET-OWNED open-PR count the decision was made against (design (i)) — an open PR the
    *  fleet did not author never inflates this field. */
@@ -33747,7 +33749,7 @@ export function checkQueueGovernor(
   const movable = flow.movableStuckOwnedCount;
   const common = {
     observedOpenCount: openPrCount, wipLimit: limit, observedForeignCount, trailingMergedCount, trailingOpenedCount,
-    baseWipLimit: policy.wipLimit, stuckOwnedCount, headroomFraction: flow.headroomFraction, measuredBound, pressure,
+    baseWipLimit: policy.wipLimit, stuckOwnedCount, headroomFraction: flow.headroomFraction, measuredBound, pressure, pressureHeld,
     ...(movable === undefined ? {} : { movableStuckOwnedCount: Math.min(stuckOwnedCount, Math.max(0, movable)) }),
   };
   if (!pressureHeld && openPrCount - stuckOwnedCount < limit) return { deferred: false, tier: "under_limit", ...common };
@@ -33803,6 +33805,12 @@ export function logQueueGovernorDeferral(
     run_id: runId,
     task_id: "GOVERNOR",
     step: "dispatch_deferred_wip",
+    ...queueGovernorDeferralFields(result),
+  });
+}
+
+export function queueGovernorDeferralFields(result: QueueGovernorResult): Record<string, unknown> {
+  return {
     observed_open_count: result.observedOpenCount,
     wip_limit: result.wipLimit,
     observed_foreign_count: result.observedForeignCount ?? 0,
@@ -33814,6 +33822,7 @@ export function logQueueGovernorDeferral(
     ...(result.movableStuckOwnedCount === undefined ? {} : { movable_stuck_owned_count: result.movableStuckOwnedCount }),
     headroom_fraction: result.headroomFraction ?? null,
     measured_bound: result.measuredBound,
+    pressure_held: result.pressureHeld,
     pressure_available_mib: result.pressure?.availableMib,
     pressure_floor_mib: result.pressure?.floorMib,
     pressure_reason: result.pressure?.reason,
@@ -33821,7 +33830,38 @@ export function logQueueGovernorDeferral(
     pressure_tier: result.pressure?.tier,
     pressure_host_available_mib: result.pressure?.hostAvailableMib,
     ...reclaimLedgerFields(result.pressure?.reclaim),
-  });
+  };
+}
+
+export const EXPEDITE_PAST_WIP = "dispatch.expedite_past_wip";
+export const EXPEDITE_PAST_WIP_SETTLED = "dispatch.expedite_past_wip_settled";
+
+/** Admission precedes the build's start row. Follow its run id, then its PR's terminal row. */
+export function expeditePastWipInFlight(lines: readonly string[]): boolean {
+  let active: { taskId: string; runId?: string; pr?: string } | undefined;
+  for (const raw of lines) {
+    if (!raw.includes(EXPEDITE_PAST_WIP) && (!active ||
+      !/run\.start|pr\.opened|pr\.terminal|verdict/.test(raw))) continue;
+    const row = JSON.parse(raw) as Record<string, unknown>;
+    if (row.step === EXPEDITE_PAST_WIP && typeof row.task_id === "string") {
+      active = { taskId: row.task_id };
+    } else if (active) {
+      if (row.step === EXPEDITE_PAST_WIP_SETTLED && row.task_id === active.taskId) {
+        if (typeof row.build_run_id === "string") active.runId = row.build_run_id;
+        active.pr = prUrlKey(row.pr_url) ?? active.pr;
+        if (row.merged === true || active.pr === undefined) active = undefined;
+      } else if (active.pr !== undefined && prUrlKey(row.pr_url) === active.pr &&
+        (isMergedLedgerRow(row) || (row.step === PR_TERMINAL_STEP && row.state === "closed"))) {
+        active = undefined;
+      } else if (row.task_id === active.taskId && typeof row.run_id === "string") {
+        if (row.step === "run.start") active.runId ??= row.run_id;
+        if (row.run_id !== active.runId) continue;
+        if (row.step === "pr.opened" || row.step === "verdict") active.pr = prUrlKey(row.pr_url) ?? active.pr;
+        if (row.step === "verdict" && (row.verdict === "merged" || active.pr === undefined)) active = undefined;
+      }
+    }
+  }
+  return active !== undefined;
 }
 
 // ── W1-T148 — THE COST GOVERNOR (the $206/60-run spin-loop incident) ─────────────────────────

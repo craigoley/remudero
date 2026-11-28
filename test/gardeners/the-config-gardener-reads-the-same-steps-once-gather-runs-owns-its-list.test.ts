@@ -5,8 +5,8 @@ import { GATHER_RUNS_LEDGER_STEPS } from "#src/lib/retro.js";
 
 // The steps `gatherRuns` reads moved out of CONFIG_GARDEN_LEDGER_STEPS into GATHER_RUNS_LEDGER_STEPS (retro.ts),
 // beside the function that reads them, so a second reader (`rmd procedures`) spreads the same list. The config
-// gardener retains that historical set, plus the history-guard and automatic follow-up filing receipts.
-const CONFIG_GARDEN_STEPS_BEFORE_THE_MOVE = [
+// gardener retains that historical set alongside the steps it reads for its own inventory.
+const GATHER_RUNS_STEPS_BEFORE_THE_MOVE = [
   // gatherRuns, by name.
   "run.start", "verdict", "verdict.merged", "recon.done", "implement.done", "implement.resumed", "implement.continued", "implement.preopen_continued", "pr.opened", "correction.provenance",
   // gatherRuns' pr_url fallback.
@@ -15,25 +15,29 @@ const CONFIG_GARDEN_STEPS_BEFORE_THE_MOVE = [
   "review.semantic_setup_refused", "review.semantic_incomplete", "review.replay_input",
   "review.unwired_advisory", "review.post_refused", "review.stood_down", "acceptance.repaired", "trailer_stamp.failed",
   "trailer_stamp.raced",
+];
+
+const CONFIG_GARDEN_ADDITIONAL_STEPS = [
   // capDerivation: the knowledge-budget pressure, and the cache-hit mix's call rows.
   "learnings.injected", "review.reviewer", "inbox.draft_synthesized", "triage.synthesized", "retro.synthesized",
   "retro.preflight_repair", "fix.done", "fix.contract_hold", "fix.commit_line_answered", "census_push.strike", "plan.synthesized", "diagnose.worker_done",
   // W1-T5668: the rest that can be a worker run's first pr_url row.
   "acceptance.repair.unrepresentable", "changeset_claim.repaired", "retro.pr.recovered", "pr.body_normalize.error",
   "pr.body_normalize.raced",
+  "review.history_guarded", "followup.filed", "review.semantic_pass_refused", "proof_reuse.disagreement",
+  "review.refused_after_finished_review", "dispatch.expedite_past_wip_settled",
+  // W1-T12187: the judges' cash shadow rows.
+  "judge_shadow.compared", "judge_shadow.skipped", "judge_shadow.paired", "judge_shadow.refused", "judge_shadow.unavailable",
 ];
 
 test("the config gardener reads the same step set after GATHER_RUNS_LEDGER_STEPS moved to retro.ts", () => {
   assert.deepEqual(new Set(CONFIG_GARDEN_LEDGER_STEPS), new Set([
-    ...CONFIG_GARDEN_STEPS_BEFORE_THE_MOVE, "review.history_guarded", "followup.filed", "review.semantic_pass_refused", "proof_reuse.disagreement",
-    "review.refused_after_finished_review",
-    // W1-T12187: the judges' cash shadow rows.
-    "judge_shadow.compared", "judge_shadow.skipped", "judge_shadow.paired", "judge_shadow.refused", "judge_shadow.unavailable",
+    ...GATHER_RUNS_LEDGER_STEPS, ...CONFIG_GARDEN_ADDITIONAL_STEPS,
   ]));
   assert.equal(CONFIG_GARDEN_LEDGER_STEPS.length, new Set(CONFIG_GARDEN_LEDGER_STEPS).size, "no step is listed twice");
 });
 
 test("GATHER_RUNS_LEDGER_STEPS is the gatherRuns groups the config gardener's list now spreads", () => {
-  assert.deepEqual(GATHER_RUNS_LEDGER_STEPS, CONFIG_GARDEN_STEPS_BEFORE_THE_MOVE.slice(0, 28));
+  assert.deepEqual(GATHER_RUNS_LEDGER_STEPS, GATHER_RUNS_STEPS_BEFORE_THE_MOVE);
   assert.deepEqual(CONFIG_GARDEN_LEDGER_STEPS.slice(0, GATHER_RUNS_LEDGER_STEPS.length), GATHER_RUNS_LEDGER_STEPS);
 });
