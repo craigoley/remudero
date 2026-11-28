@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import * as deployJudge from "#src/lib/deploy-judge.js";
 import { expediteReason, runnableCandidates } from "#src/lib/drain.js";
+import { operatorReleasePin } from "#src/lib/operator-release.js";
 import { loadPlanFromYaml, parseTasksFromYaml } from "#src/lib/plan.js";
 import { lintTask } from "#src/lib/task-linter.js";
 
@@ -111,5 +112,7 @@ test("W1-T15193 criterion 5: lint blocks invalid expedite values and names their
       severity: "block",
       message: `task ${EXPEDITED_ID}: expedite must be a string or boolean, got ${type}`,
     }]);
+    const [withoutExpedite] = parseTasksFromYaml(record(EXPEDITED_ID, `  origin: ${ORIGIN}\n  priority: 0.2`), "test-catalog.yaml");
+    assert.equal(operatorReleasePin(task!), operatorReleasePin(withoutExpedite!), "invalid scheduling metadata does not alter the approved contract");
   }
 });

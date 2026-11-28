@@ -917,6 +917,7 @@ export function parseTasksFromYaml(
     if (!TASK_TYPES.includes(type as TaskType)) {
       throw new PlanError(`task ${id}: invalid type '${type}' (must be ${TASK_TYPES.join("|")})`);
     }
+    const expediteFields = taskExpediteFields(e.expedite, e.origin);
     const task: Task = {
       id,
       title: req(e.title as string, "title", id),
@@ -933,7 +934,7 @@ export function parseTasksFromYaml(
       risk,
       band_meaning: bandMeaning,
       priority: typeof e.priority === "number" ? e.priority : undefined,
-      ...taskExpediteFields(e.expedite, e.origin),
+      expedite: expediteFields.expedite,
       status,
       dispatch_hold: e.dispatch_hold as boolean | undefined,
       new_path_approval_ref: e.new_path_approval_ref as string | undefined,
@@ -966,6 +967,14 @@ export function parseTasksFromYaml(
       sourcePath: sourceLabel,
       ...(e.needs_input !== undefined ? { needs_input: readNeedsInput(e.needs_input) } : {}),
     };
+    // Invalid expedite metadata is for linting only. Keep it off enumerable contract fields so
+    // operatorReleasePin's structural hash cannot treat an invalid scheduling value as a term.
+    if (expediteFields.expedite_invalid !== undefined) {
+      Object.defineProperty(task, "expedite_invalid", {
+        value: expediteFields.expedite_invalid,
+        enumerable: false,
+      });
+    }
     byId.set(id, task);
     return task;
   });
