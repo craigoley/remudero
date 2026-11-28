@@ -2480,15 +2480,11 @@ export function issueIsCodeRepositorys(issue: Pick<OpenIssue, "title" | "body">,
   return named === undefined || named.toLowerCase() === codeRepository.toLowerCase();
 }
 
-/** W1-T14998 — whether a consumer that resolves an issue's task or PR number on `codeRepository` and may CLOSE it (the
- *  escalation reconciler, the revalidation garden) may judge `issue` from a ROUTED listing — one whose escalation
- *  repository is a pool other code repositories file in too. It must not record another code repository, and the PR
- *  it names, in its body or title, must not be another repository's. A legacy issue recording none is judged by the
- *  PR it names, as the routed gateway's listing judges it. A listing that is not routed applies no such rule. */
+/** W1-T14998 — whether `issue`, read from a ROUTED listing (a pool other code repositories file in too), is
+ *  `codeRepository`'s, for the owner-reply reader, the reconciler and the garden. A recorded code repository decides
+ *  (its quoted PR links may be another's); with none, the PR its body and title name must not be another's. */
 export function pooledIssueIsCodeRepositorys(issue: Pick<OpenIssue, "title" | "body">, codeRepository: string): boolean {
   const recorded = escalationCodeRepository(issue.body);
-  // The machine field is the issue's ownership record. Its PR links can point elsewhere (for
-  // example, a routed grill about a public PR); use those links only for pre-field legacy issues.
   if (recorded !== undefined) return recorded.toLowerCase() === codeRepository.toLowerCase();
   const same = (named: string | undefined) => named === undefined || named.toLowerCase() === codeRepository.toLowerCase();
   return same(prReferentRepositoryFromIssueText(issue.body)) && same(prReferentRepositoryFromIssueText(issue.title));

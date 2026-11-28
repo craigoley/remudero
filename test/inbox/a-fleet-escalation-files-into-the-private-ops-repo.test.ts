@@ -12,8 +12,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
-  ESCALATION_REPOSITORY_ENV, escalate, escalationCodeRepository, escalationDestinationAt, escalationListingIsRouted, escalationIssueRepositories, escalationIssueRepository, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, issueGatewayRepository, issueGatewayUnfiled,
-  issueUrlRepository, NEEDS_HUMAN_LABEL, renderIssueBody, tryEscalate, withCodeRepositoryField, type Escalation, type EscalationDestinationRead,
+  ESCALATION_REPOSITORY_ENV, escalate, escalateAsync, escalationCodeRepository, escalationDestinationAt, escalationListingIsRouted, escalationIssueRepositories, escalationIssueRepository, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, issueGatewayRepository, issueGatewayUnfiled,
+  issueUrlRepository, NEEDS_HUMAN_LABEL, prReferentRepositoryFromIssueText, renderIssueBody, tryEscalate, withCodeRepositoryField, type Escalation, type EscalationDestinationRead,
 } from "#src/lib/escalate.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { sreOperatorEscalation } from "#src/lib/sre-runbooks.js";
@@ -32,6 +32,7 @@ import { terminalRulePr } from "#src/lib/issue-revalidation-garden.js";
 import { buildBatchedGithub, fetchEscalationIssuesRest, ghGateway } from "#src/lib/status.js";
 import { createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
 import { ghEscalationAnswerGateway, readEscalationAnswers } from "#src/lib/escalation-answers.js";
+import { buildGrillEscalation } from "#src/lib/triage.js";
 
 const CODE = { owner: "craigoley", repo: "remudero" };
 const OPS = "craigoley/remudero-ops";
@@ -650,6 +651,66 @@ test("W1-T14998 criterion 6: an owner reply on this repository's own issue lands
   assert.deepEqual(ownRead.stored, [["W1-T15503", "issue#6:comment:600"], ["W1-T15503", "issue#6:reaction:601"],
     ["W1-T15504", "issue#7:comment:700"]]);
   assert.deepEqual([own.reacted, ownRead.result.accepted, ownRead.ignored], [[600, 6, 700], 3, []]);
+});
+
+test("W1-T14998 criterion 6: an owner reply on this repository's own issue lands as before, on a routed triage grill"
+  + " quoting another repository's PR, by comment, reaction and the Console", async (t) => {
+  // The reviewer's path: core routes to ops, and `rmd triage` grills on Console feedback linking the console repo's PR.
+  // The issue records core, so its recorded field (not the quoted link) decides; a pre-field one in core lands as on main.
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14998-grill-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const ledgerPath = join(root, "state", "ledger.ndjson"), threadStorePath = join(root, "threads.jsonl");
+  const CONSOLE_PR = "https://github.com/craigoley/console/pull/77";
+  const gh = fakeGh();
+  const reads: string[] = [];
+  const exec = async (args: string[]): Promise<string> => {
+    const at = args[0] === "api" ? args[1]! : "";
+    reads.push(at);
+    const item = /^repos\/([^/]+\/[^/]+)\/issues\/(\d+)\/(comments|reactions)\?per_page=100$/.exec(at);
+    if (item?.[3] === "comments") return JSON.stringify([{ id: Number(item[2]) * 100, body: "re-run", author_association: "OWNER",
+      user: { login: "craigoley", type: "User" }, updated_at: "2026-11-27T08:00:00Z" }]);
+    if (item) return JSON.stringify([{ id: Number(item[2]) * 100 + 1, content: "+1", user: { login: "craigoley", type: "User" },
+      created_at: "2026-11-27T08:00:00Z" }]);
+    if (at.includes("/issues/comments?")) return "[]";
+    return gh.exec(args);
+  };
+  const entry: FeedbackEntry = { id: "fb-w1-t14998-grill", ts: "2026-11-27T07:00:00Z", raw: `The console PR ${CONSOLE_PR} broke the inbox.`,
+    attachments: [], origin: "ui", status: "new", proposal_pr: null };
+  const grill = buildGrillEscalation({ entry, taskId: `TRIAGE-${entry.id}`, runId: "RUN-TRIAGE", decision: { action: "grill",
+    status: "grilling", detail: "Which repository owns this?",
+    options: [{ label: "re-run", detail: "re-run triage" }, { label: "drop", detail: "drop it" }], recommendation: "re-run" } });
+  const filed = await withLiveWritesAllowed(() => escalateAsync(grill, { issues: ghIssueGatewayAsync(CODE.owner, CODE.repo,
+    { exec, destination: toOps }), ledgerPath, threadStorePath, runId: "RUN-TRIAGE" }));
+  const routed = gh.issues.find((issue) => issue.url === filed)!;
+  assert.deepEqual([routed.repo, escalationCodeRepository(routed.body), prReferentRepositoryFromIssueText(routed.body)],
+    [OPS, CORE_REPO, "craigoley/console"], "precondition: a core grill in the pool whose first PR link is console's");
+  gh.issues.push({ repo: CORE_REPO, number: 9, url: `https://github.com/${CORE_REPO}/issues/9`, title: "[GRILL] TRIAGE-fb-legacy: legacy",
+    body: ["**Class:** GRILL", "**Task:** TRIAGE-fb-legacy", "**Host:** legacy-host", "", `Feedback: ${CONSOLE_PR} broke it.`, "",
+      "## Options", "- **re-run** — re-run triage", "- **drop** — drop it", "", "## Recommendation", "re-run", ""].join("\n"),
+    labels: routed.labels, state: "open" });
+  // The daemon's reader: the pool first, then the code repository's legacy issues.
+  const repositories = escalationIssueRepositories(CODE.owner, CODE.repo, toOps);
+  const [poolOwner, poolRepo] = repositories[0]!.split("/") as [string, string];
+  const gateway = ghEscalationAnswerGateway(poolOwner, poolRepo, exec, undefined, undefined, CORE_REPO, repositories.slice(1));
+  const acknowledged: string[] = [];
+  gateway.reactPlusOne = (id, url) => void acknowledged.push(`${url}#${id}`);
+  gateway.reactPlusOneOnIssue = (n, url) => void acknowledged.push(`${url}#${n}`);
+  const result = await readEscalationAnswers(root, "RUN-ANSWERS", gateway, { ledgerPath });
+  const stored = readFileSync(join(root, "plan", "questions.ndjson"), "utf8").trim().split("\n")
+    .map((line) => JSON.parse(line) as { task: string; origin: string }).map((row) => [row.task, row.origin]);
+  const n = routed.number;
+  assert.deepEqual(stored, [[grill.taskId, `issue#${n}:comment:${n * 100}`], [grill.taskId, `issue#${n}:reaction:${n * 100 + 1}`],
+    ["TRIAGE-fb-legacy", "issue#9:comment:900"], ["TRIAGE-fb-legacy", "issue#9:reaction:901"]]);
+  assert.deepEqual([result.accepted, acknowledged], [4, [`${filed}#${n * 100}`, `${filed}#${n}`,
+    `https://github.com/${CORE_REPO}/issues/9#900`, `https://github.com/${CORE_REPO}/issues/9#9`]]);
+  // The Console route serves the routed grill as replyable from its own ledger and thread records.
+  const readIssue = async (url: string) => {
+    const issue = gh.issues.find((entry) => entry.url === url)!;
+    return { html_url: issue.url, title: issue.title, body: issue.body, state: "open", updated_at: "2026-11-27T08:00:00Z" };
+  };
+  const conversation = await createEscalationConversationReader({ repository: CORE_REPO, issueRepositories: repositories,
+    threadStorePath, ledgerPath, readIssue })(filed, true);
+  assert.equal(conversation.state === "served" && conversation.conversation.canReply, true, JSON.stringify(conversation));
 });
 
 test("W1-T14998: routed answers include legacy code-repository issues and scope refusal alarms to their owner", async (t) => {

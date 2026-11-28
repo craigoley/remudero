@@ -261,7 +261,7 @@ export function ghEscalationAnswerGateway(
     };
   }
   const repoArg = `${owner}/${repo}`;
-  // A pool other code repositories file in too: an issue recording, or naming the PR of, another repository is theirs.
+  // A pool other code repositories file in too: an issue recording another, or none and naming another's PR, is theirs.
   // In its own repository, only an issue recording another code repository (filed there for it) is skipped.
   const own = codeRepository.toLowerCase() === repoArg.toLowerCase()
     ? (issue: ListedIssue) => (escalationCodeRepository(issue.body) ?? codeRepository).toLowerCase() === codeRepository.toLowerCase()
