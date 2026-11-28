@@ -775,15 +775,19 @@ export const SPAWN_FAILURE_MESSAGE_MAX_CHARS = 240;
 export const FAILED_ATTEMPT_STDERR_TAIL_BYTES = 600;
 
 const STDERR_SECRET_NAME = String.raw`[A-Za-z0-9_.-]*(?:token|secret|password|passwd|api[_-]?key|credential|authorization|cookie)[A-Za-z0-9_.-]*`;
-/** Provider CLI stderr shapes the shared redactor misses, applied BEFORE it: base64url keys (`_` included), an
- *  auth header's WHOLE value whatever its scheme, and a secret-named pair whose name or value is (escaped-)quoted. */
+const STDERR_AUTH_SCHEME = String.raw`(?:bearer|basic|token|api-?key|digest|jwt|oauth|negotiate|ntlm)`;
+/** Provider CLI stderr shapes the shared redactor misses, applied BEFORE it: base64url keys (`_` included), a
+ *  scheme word WITH its credential (so no later rule eats the scheme and strands the credential), an auth
+ *  header's WHOLE value, and a secret-named pair whose name or value is (escaped-)quoted or scheme-prefixed. */
 const STDERR_REDACTIONS: readonly { pattern: RegExp; replace: (...groups: string[]) => string }[] = [
   { pattern: /(?<![A-Za-z0-9])(?:sk|pk|rk|xai)[-_][A-Za-z0-9_-]{16,}|(?<![A-Za-z0-9])AIza[A-Za-z0-9_-]{30,}/g,
     replace: () => "<redacted>" },
+  { pattern: new RegExp(String.raw`\b(${STDERR_AUTH_SCHEME})\s+[A-Za-z0-9._~+/=-]{8,}`, "gi"),
+    replace: (_m, scheme) => `${scheme} <redacted>` },
   { pattern: /(\\*["'])?\b((?:proxy-)?authorization|(?:set-)?cookie)\1(\s*[:=]\s*)(?![\\"'])[^\r\n]+/gi,
     replace: (_m, q, name, sep) => `${q}${name}${q}${sep}<redacted>` },
   { pattern: new RegExp(String.raw`(\\*["'])?\b(${STDERR_SECRET_NAME})\1(\s*[:=]\s*)` +
-      String.raw`(?:(\\*["'])(?:[^\r\n]*?\4|[^\r\n]*)|[^\s"',;{}\[\]\\]+)`, "gi"),
+      String.raw`(?:(\\*["'])(?:[^\r\n]*?\4|[^\r\n]*)|(?:${STDERR_AUTH_SCHEME}\s+)?[^\s"',;{}\[\]\\]+)`, "gi"),
     replace: (_m, q, name, sep, vq) => `${q}${name}${q}${sep}${vq ? `${vq}<redacted>${vq}` : "<redacted>"}` },
 ];
 

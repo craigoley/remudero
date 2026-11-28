@@ -50,6 +50,11 @@ test("W1-T15168 criterion 1: a failed attempt's worker.attempt row keeps the las
   const echoed = await attemptRow(worker({ subtype: "error_exit_1", isError: true,
     stderr: `Error: invalid x-api-key ${oauth}\nfatal: exit 1\n` }));
   assert.equal(echoed.stderr_tail, "Error: invalid x-api-key <redacted>\nfatal: exit 1\n");
+
+  // A bearer token after a secret-named label: the scheme and its credential are redacted together.
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1In0.c2lnbmF0dXJlX3ZhbHVl";
+  const labelled = await attemptRow(worker({ subtype: "error_exit_1", isError: true, stderr: `Invalid token: Bearer ${jwt}\n` }));
+  assert.equal(labelled.stderr_tail, "Invalid token: <redacted>\n");
 });
 
 test("W1-T15168 criterion 2: invariant:no-secret-reaches-the-ledger — secrets in stderr are replaced, and a successful attempt keeps no tail", async () => {
@@ -85,6 +90,18 @@ test("W1-T15168 criterion 2: invariant:no-secret-reaches-the-ledger — secrets 
   assert.equal(shapedTail, [...keys.map(() => "key <redacted>"), "Authorization: <redacted>", "Authorization: <redacted>",
     "Proxy-Authorization: <redacted>", "Cookie: <redacted>", `{"api-key":"<redacted>"}`, `{\\"x-api-key\\":\\"<redacted>\\"}`,
     `'token': '<redacted>'`, `"password": "<redacted>"`, "exit 1"].join("\n"), "each value is replaced and its name kept, so the cause stays legible");
+
+  // Class: a scheme-prefixed credential after a secret-named label — no rule may eat the scheme and strand the credential.
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1In0.c2lnbmF0dXJlX3ZhbHVl";
+  const labelled = [`Invalid token: Bearer ${jwt}`, `x-auth-token: Bearer ${jwt}`, `api-key: Bearer ${jwt}`, `access_token=Bearer ${jwt}`,
+    `token: Basic dXNlcjpwYXNzd29yZA==`, "secret: Bearer Zq9x"];
+  const scheme = await attemptRow(worker({ subtype: "error_exit_1", isError: true, stderr: [...labelled, "exit 1"].join("\n") }));
+  const schemeTail = scheme.stderr_tail as string;
+  for (const secret of [jwt, "dXNlcjpwYXNzd29yZA==", "Zq9x"]) {
+    assert.ok(!JSON.stringify(scheme).includes(secret), `the ledger row never carries ${secret.slice(0, 8)}…`);
+  }
+  assert.equal(schemeTail, ["Invalid token: <redacted>", "x-auth-token: <redacted>", "api-key: <redacted>", "access_token=<redacted>",
+    "token: <redacted>", "secret: <redacted>", "exit 1"].join("\n"), "the label stays and its whole scheme-prefixed value goes");
 
   const ok = await attemptRow(worker({ subtype: "success", stderr: "warning: slow network\n" }));
   assert.equal(Object.hasOwn(ok, "stderr_tail"), false, "a successful attempt's row carries no stderr_tail");
