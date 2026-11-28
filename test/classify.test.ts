@@ -8,7 +8,12 @@ import { fixedClock } from "../src/lib/clock.js";
 import { openWeightAllowancePath, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
 import { finishTransientRetry, implementAttemptOutcome } from "./helpers/run-task-test.js";
 import { gitRepo } from "./helpers/git-repo.js";
-import { buildFixProgressInput, type FixProgressInput, type FixProgressJudge } from "../src/lib/fix-progress-judge.js";
+import { buildFixProgressInput, type FixProgressInput, type FixProgressJudge } from "#src/lib/fix-progress-judge.js";
+import { mountsPath } from "#src/lib/mounts.js";
+import { productionFixProgressJudge } from "#src/lib/sweep.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   judgeCappedRepair,
   DIAGNOSE_AT_STRIKES,
@@ -26,6 +31,38 @@ import {
   type AttemptOutcome,
   type FailureSignal,
 } from "../src/lib/classify.js";
+
+test("W1-T15163 criterion 3: the fix.progress_judged row of a re-asked judgment names the failed provider, model and subtype", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}fix-progress-reask-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, ".remudero"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  const judgeRow = "fix_progress_judge: { model: haiku, effort: low, max_turns: 400, context_budget: 60000 }\n";
+  const realMounts = readFileSync(mountsPath(REPO_ROOT), "utf8").replace(/^fix_progress_judge:.*\n(?:[ \t]+.*\n)*/gm, "");
+  writeFileSync(mountsPath(root), `${realMounts}\n${judgeRow}`);
+  const result = (text: string, extra: Partial<WorkerResult> = {}): WorkerResult => ({ sessionId: "s", costUsd: 0.0001,
+    numTurns: 1, text, subtype: "success", provider: "claude", model: "claude-haiku-5-5", ...extra } as unknown as WorkerResult);
+  const failure = () => result("", { subtype: "error_exit_1", provider: "codex", model: "gpt-6-luna", isError: true });
+  const makeJudge = (answer: (args: SpawnWorkerArgs) => Promise<WorkerResult>) => productionFixProgressJudge({ cwd: root,
+    settingsFile: join(root, "settings", "worker.json"), spawn: answer });
+  const input = buildFixProgressInput({ taskId: "W1-T1", prNumber: 9, headSha: "def5678", currentRed: ["ci"], ledger: [],
+    strikesSpent: 2, parkedReason: "capped-body: 2 prior repairs" });
+  const verdictText = 'FIX_PROGRESS: {"verdict":"continue","reason":"the red shrank"}';
+  const judge = makeJudge(async args => args.excludeProviders?.includes("codex") ? result(verdictText) : failure());
+  const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  const out = await judgeCappedRepair({ bodyStrikes: 2, planRepairStrikes: 0 }, 2, { planRepairCapable: false, input, judge,
+    log: (step, fields) => void rows.push({ step, fields }) });
+  assert.equal(out.kind, "repair_body");
+  const judged = rows.find(row => row.step === "fix.progress_judged");
+  assert.ok(judged, "a fix.progress_judged row is written");
+  assert.equal(judged.fields.verdict, "continue");
+  assert.deepEqual(judged.fields.reasked_from, { provider: "codex", model: "gpt-6-luna", subtype: "error_exit_1" });
+  const first = makeJudge(async () => result(verdictText));
+  const plain: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  await judgeCappedRepair({ bodyStrikes: 2, planRepairStrikes: 0 }, 2, { planRepairCapable: false, input, judge: first,
+    log: (step, fields) => void plain.push({ step, fields }) });
+  assert.equal(plain.find(row => row.step === "fix.progress_judged")?.fields.reasked_from, undefined);
+});
 
 // ── acceptance #1: "network/5xx/CI-flake retries consume NO strike;
 // deterministic failures do" — classifier unit tests over RECORDED fixtures.
