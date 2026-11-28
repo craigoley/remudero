@@ -38,7 +38,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { hostname } from "node:os";
 import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
-import { reviewAdmissionChargeMib } from "./host-memory-admission.js";
+import { readReviewTreeResidents, reviewAdmissionCharge } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
@@ -4063,10 +4063,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const hosted = mode.kind === "full-review"
           ? await installedWorkHost?.spawnReview({ pr, reviewKey, reviewAttemptId }) : undefined;
         if (hosted !== undefined) {
-          // The production run-child host returns its pid at runtime; older host interfaces may omit it.
-          const hostedPid = (hosted as typeof hosted & { pid?: number }).pid;
+          // W1-T15116: the launched child's pid (run-child.ts spawnReview), so memory.high admission reads its own live RSS.
           void adoptChildWork({
-            runId: hosted.runId, taskId: pr.taskId ?? `PR-${pr.prNumber}`, pid: hostedPid,
+            runId: hosted.runId, taskId: pr.taskId ?? `PR-${pr.prNumber}`, pid: hosted.pid,
             work: { kind: "review", prNumber: pr.prNumber, headSha: pr.headSha, reviewKey, planLane: reviewsInPlanLane(pr) },
             settled: hosted.settled, readPhase: hosted.readPhase,
             ...(hosted.acknowledge === undefined ? {} : { acknowledge: hosted.acknowledge }),
@@ -22812,33 +22811,19 @@ export function productionFixAdmissionReaders(deps: Pick<SweepDeps, "readFixPres
 export interface ReviewMemoryHighReaders {
   read: () => DaemonCgroupMemoryReading;
   estimateMib: () => number;
-  /** Live review RSS keyed by its reservation root pid; unrelated review-class trees cannot offset a review. */
-  residents: () => readonly { pid: number; mib: number }[] | undefined;
+  /** Live tree RSS of each admitted review child, read from the pid its launch returned (spawnReview); a pid absent
+   *  from the result is not visible yet, so its review keeps its learned peak charged. */
+  residents: (pids: readonly number[]) => readonly { pid: number; mib: number }[] | undefined;
 }
 
 /** W1-T15116: the production readers, in a live process only (the fix admission readers' rule). A test or CLI caller
- *  that injects nothing reads no host cgroup. A review tree's RSS is not subtracted unless it can be attributed to that
- *  admitted review; the shared memory ledger has no such identity, so the learned peak remains charged. */
+ *  that injects nothing reads no host cgroup. Each review child's RSS is read from its own launched pid, so it is
+ *  attributed to that admitted review alone. */
 export function productionReviewMemoryHighReaders(deps: Pick<SweepDeps, "fixProgressJudge" | "ledgerPath">,
   live = deps.fixProgressJudge !== undefined): ReviewMemoryHighReaders | undefined {
   if (!live) return undefined;
-  return {
-    read: () => readDaemonCgroupMemory(),
-    estimateMib: () => classEstimate("review").estimateMib,
-    residents: () => {
-      const reading = readMemoryLedger({ root: dirname(dirname(deps.ledgerPath)) });
-      if (reading === undefined || reading.state !== "present") return undefined;
-      const entries = reading.entries.filter((entry) => entry.status === "owned" && !entry.occupancyReleased &&
-        entry.workerClass === "review" && (entry.rootPids?.length ?? 0) > 0);
-      const trees = residentsOf((path) => readFileSync(path, "utf8"), entries.map((entry) => entry.path));
-      if (trees === undefined) return undefined;
-      return entries.flatMap((entry, index) => {
-        const tree = trees[index];
-        if (tree === undefined || "unread" in tree) return [];
-        return (entry.rootPids ?? []).map((pid) => ({ pid, mib: tree.mib }));
-      });
-    },
-  };
+  return { read: () => readDaemonCgroupMemory(), estimateMib: () => classEstimate("review").estimateMib,
+    residents: (pids) => readReviewTreeResidents(pids) };
 }
 
 function sweepActiveWorkerCount(deps: Pick<SweepDeps, "ledgerPath" | "readActiveWorkerCount" | "fixProgressJudge">,
@@ -30438,19 +30423,17 @@ async function runSweepPinned(
   // W1-T15116 — A RUNNING CHARGE, NOT ONE READING. Every full review still running here (this pass's, and any earlier
   // pass's or light refill's) is charged its learned peak until its tree is visible, then only the peak's unrealized
   // part: memory.current already includes its RSS. Re-read memory.high and live residents for each admission.
-  // startReview registers synchronously, so the review admitted just before the next one is charged.
+  // startReview registers synchronously (no pid yet: its learned peak is charged); once spawnReview returns, the
+  // child joins that same PR@head entry with its launched pid, and that pid's own tree RSS is what is read.
   const memoryHigh = deps.reviewMemoryHigh ?? productionReviewMemoryHighReaders(deps);
   const reviewMemoryHighHold = (): string | undefined => {
     if (memoryHigh === undefined) return undefined;
     const estimateMib = memoryHigh.estimateMib();
     const admittedPids = inFlightFullReviewPids();
-    const admitted = admittedPids.length;
-    const admittedChargeMib = reviewAdmissionChargeMib(admittedPids, estimateMib, memoryHigh.residents());
-    const verdict = reviewMemoryHighVerdict(memoryHigh.read(), {
-      admitted,
-      admittedChargeMib,
-      candidateMib: estimateMib,
-    });
+    const known = admittedPids.filter((pid): pid is number => pid !== undefined);
+    const charge = reviewAdmissionCharge(admittedPids, estimateMib, known.length === 0 ? [] : memoryHigh.residents(known));
+    const verdict = reviewMemoryHighVerdict(memoryHigh.read(), { admitted: admittedPids.length,
+      admittedChargeMib: charge.chargeMib, measured: charge.measured, measuredMib: charge.measuredMib, candidateMib: estimateMib });
     return verdict.admit ? undefined : verdict.reason;
   };
 

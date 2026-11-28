@@ -44,13 +44,14 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { fixedClock } from "./clock.js";
 
-import { daemonOwnedProcess, openLearnedReservation, readValidationClassEstimate, type LearnedReservation, type ValidationClassEstimate } from "./host-memory-learning.js";
-import { MEMORY_ADMISSION_LOCK_BUSY, ownedMemoryRunBinding, withMemoryAdmissionLock, type HostMemoryReading, type WorkerClass } from "./host-memory-ledger.js";
+import { daemonOwnedProcess, openLearnedReservation, readValidationClassEstimate, treeMembers, type LearnedReservation, type ValidationClassEstimate } from "./host-memory-learning.js";
+import { DEFAULT_WALK_LIMITS, defaultListProcesses, MEMORY_ADMISSION_LOCK_BUSY, ownedMemoryRunBinding, withMemoryAdmissionLock, type HostMemoryReading, type ProcessListing, type WorkerClass } from "./host-memory-ledger.js";
 import { rankDemand, type HostMemoryPriorityPolicy } from "./host-memory-priority.js";
 import {
   defaultShadowMemoryPorts,
@@ -87,19 +88,65 @@ export const MEMORY_ADMISSION_HELD_FILE = "memory-admission-held.json";
 
 /** W1-T15116: charge each live review only for the part of its learned peak not already present in memory.current.
  * Residents are keyed by the review process pid, so unrelated review-class trees cannot reduce this charge. A review
- * without its own readable tree keeps its full learned peak charged. */
-export function reviewAdmissionChargeMib(
+ * without its own readable tree keeps its full learned peak charged. `measured` counts the reviews whose own RSS was
+ * read, and `measuredMib` is that RSS: already inside memory.current, so it is never charged a second time. */
+export function reviewAdmissionCharge(
   reviewPids: readonly (number | undefined)[],
   estimateMib: number,
   residents: readonly { pid: number; mib: number }[] | undefined,
-): number {
+): { chargeMib: number; measured: number; measuredMib: number } {
   const byPid = new Map((residents ?? []).map((resident) => [resident.pid, resident.mib]));
-  let charge = 0;
+  const out = { chargeMib: 0, measured: 0, measuredMib: 0 };
   for (const pid of reviewPids) {
     const resident = pid === undefined ? undefined : byPid.get(pid);
-    charge += Math.max(0, estimateMib - (resident ?? 0));
+    if (resident !== undefined) {
+      out.measured += 1;
+      out.measuredMib += resident;
+    }
+    out.chargeMib += Math.max(0, estimateMib - (resident ?? 0));
   }
-  return charge;
+  return out;
+}
+
+export interface ReviewTreeResidentPorts {
+  listProcesses: () => ProcessListing;
+  readFile: (path: string) => string;
+}
+
+/**
+ * W1-T15116: each launched review child's live tree RSS, read from the pid its launch returned (run-child.ts
+ * spawnReview): the child and every descendant in the /proc listing, VmRSS summed. A pid not yet in the listing is
+ * absent from the result, so its review keeps its learned peak charged. A member that cannot be read adds nothing,
+ * which can only understate RSS and so overstate the charge. `undefined` only when /proc could not be listed at all.
+ */
+export function readReviewTreeResidents(pids: readonly number[], overrides: Partial<ReviewTreeResidentPorts> = {}):
+  { pid: number; mib: number }[] | undefined {
+  if (pids.length === 0) return [];
+  const listProcesses = overrides.listProcesses ?? (() => defaultListProcesses(DEFAULT_WALK_LIMITS));
+  const readFile = overrides.readFile ?? ((path: string) => readFileSync(path, "utf8"));
+  let listing: ProcessListing;
+  try {
+    listing = listProcesses();
+  } catch (error) {
+    void error; // No listing: no review's RSS is visible, so every review keeps its learned peak charged.
+    return undefined;
+  }
+  const rows = new Map(listing.rows.map((row) => [row.pid, row]));
+  const out: { pid: number; mib: number }[] = [];
+  for (const pid of new Set(pids)) {
+    const root = rows.get(pid);
+    if (root === undefined) continue;
+    let kb = 0;
+    for (const member of treeMembers([{ pid, start: root.start }], listing)) {
+      try {
+        kb += Number(/^VmRSS:\s+(\d+)/m.exec(readFile(`/proc/${member}/status`))?.[1] ?? 0);
+      } catch (error) {
+        void error; // Exited between the listing and this read, or unreadable: counting nothing only raises the charge.
+      }
+    }
+    out.push({ pid, mib: kb / 1024 });
+  }
+  return out;
 }
 
 /**

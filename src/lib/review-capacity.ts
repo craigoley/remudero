@@ -1200,8 +1200,11 @@ export function readDaemonCgroupMemory(io: DaemonCgroupMemoryIo = {}): DaemonCgr
 export interface ReviewMemoryHighCharge {
   /** Admitted full reviews still running in this process. */
   admitted: number;
-  /** Those reviews' charge, MiB: the sum of max(0, estimate - resident) (sweep.ts fixAdmissionChargeMib). */
+  /** Those reviews' charge, MiB: the sum of max(0, estimate - resident) (host-memory-admission.ts reviewAdmissionCharge). */
   admittedChargeMib: number;
+  /** How many of them had their own child's RSS read, and that RSS: inside the working set already, never charged. */
+  measured?: number;
+  measuredMib?: number;
   /** The candidate's learned peak, MiB. */
   candidateMib: number;
 }
@@ -1225,6 +1228,7 @@ export function reviewMemoryHighVerdict(reading: DaemonCgroupMemoryReading, char
     reason: `held for a later pass: daemon cgroup memory.high headroom (W1-T15116) — working set ${mib(reading.workingSetMib)}` +
       ` (memory.current ${mib(reading.currentMib)}${reading.inactiveFileMib === undefined ? "" : `, inactive_file ${mib(reading.inactiveFileMib)}`})` +
       ` + ${charge.admitted} admitted review(s) still running charged ${mib(charge.admittedChargeMib)}` +
+      (charge.measured ? ` (${charge.measured} measured, their ${mib(charge.measuredMib ?? 0)} RSS already in the working set)` : "") +
       ` + this review's learned peak ${mib(charge.candidateMib)} = ${mib(projected)} > memory.high ${mib(reading.highMib)}`,
   };
 }
