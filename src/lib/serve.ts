@@ -584,6 +584,8 @@ export interface ServeDeps {
   /** Shadow history uses the gateway's instance state roots; writes target the fleet registry. */
   onboardingGoLive?: GoLiveWiring;
   instances?: InstanceGatewayOptions;
+  /** W1-T15282: `config.operatorGithubLogins`, the logins the fleet liveness DOWN alarm assigns; absent assigns nobody. */
+  operatorGithubLogins?: readonly string[];
   /**
    * W1-T2269: console-owned `startInstallationTokenRefresh` (github-app.ts), as used by
    * serveCommand in run-task.ts. Exchange directly with GitHub; never couple the console's
@@ -4172,8 +4174,8 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
   server.once("listening", liveAnalyticsCache.start);
   server.on("close", liveAnalyticsCache.stop);
   const startLedgerWriters = (): (() => void) => {
-    const stopLiveness = watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances,
-      selectedRegistryObserver: routeAssembly.selectedRegistryObserver });
+    const stopLiveness = watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log,
+      operatorGithubLogins: deps.operatorGithubLogins, ...deps.instances, selectedRegistryObserver: routeAssembly.selectedRegistryObserver });
     const stopInvariants = startIncidentInvariantsMonitor(deps.ledgerPath, { ...deps.incidentInvariants, log: deps.log });
     // W1-T5175: serve samples its memory from its own loop, beside the invariants it ledgers.
     // W1-T8711: the shared producer observation rides the sample cadence above (no timer of its own), once at start and

@@ -704,9 +704,9 @@ test("W1-T10269: the route's default issue gateway assigns, and its default lane
     execFileSync("rm", ["-rf", shim.dir]);
   });
   const logs: string[] = [];
-  const gateway = assigningIssueGateway("acme", "remudero", (step) => logs.push(step));
+  const gateway = assigningIssueGateway("acme", "remudero", (step) => logs.push(step), ["acme-operator"]);
   assert.equal(await gateway.create("t", "b", []), "https://github.com/acme/remudero/issues/41");
-  const failing = assigningIssueGateway("acme", "remudero", (step) => logs.push(step),
+  const failing = assigningIssueGateway("acme", "remudero", (step) => logs.push(step), ["acme-operator"],
     { create: async () => "https://github.com/acme/remudero/issues/42" });
   assert.equal(await failing.create("t", "b", []), "https://github.com/acme/remudero/issues/42", "an unassigned issue still stands");
   assert.deepEqual(logs, ["reviewer.regression_assign_failed"]);
@@ -715,13 +715,57 @@ test("W1-T10269: the route's default issue gateway assigns, and its default lane
   assert.deepEqual(await lane.readPr!(`${REPO_URL}/901`), { state: "merged" });
   await lane.closePr!(`${REPO_URL}/900`, "a fix made this revert unnecessary");
   const calls = shim.calls().join("\n");
-  assert.match(calls, /issue edit https:\/\/github.com\/acme\/remudero\/issues\/41 --repo acme\/remudero --add-assignee acme/, "assigned");
+  assert.match(calls, /issue edit https:\/\/github.com\/acme\/remudero\/issues\/41 --repo acme\/remudero --add-assignee acme-operator$/m,
+    "assigned to the configured operator, never the owner (W1-T15282)");
   assert.match(calls, /--method POST repos\/acme\/remudero\/issues\/900\/comments/);
   assert.match(calls, /--method PATCH repos\/acme\/remudero\/pulls\/900/);
   // Built with no gateway or lane, the route takes those two defaults for this repo.
   const f = tenTwenty(t);
   assert.equal(typeof buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, join(f.root, "ledger.ndjson"), () => {},
     freshTree(f, async () => 0)), "function");
+});
+
+// W1-T15282: `craigoley` is an organization; assigning the repo owner failed "'craigoley' not found" on every
+// reviewer-regression escalation (reviewer.regression_assign_failed, 2026-11-16, #18909).
+function assignShim(t: TestContext) {
+  const shim = ghShim([{ when: "issue edit", stdout: "" }], { kind: "w1-tassign-reviewer" });
+  const saved = { PATH: process.env.PATH, allow: process.env.RMD_ALLOW_LIVE_WRITES };
+  process.env.PATH = `${shim.dir}:${saved.PATH}`;
+  process.env.RMD_ALLOW_LIVE_WRITES = "1"; // only the shim answers: no request leaves this machine
+  t.after(() => {
+    process.env.PATH = saved.PATH;
+    if (saved.allow === undefined) delete process.env.RMD_ALLOW_LIVE_WRITES; else process.env.RMD_ALLOW_LIVE_WRITES = saved.allow;
+    execFileSync("rm", ["-rf", shim.dir]);
+  });
+  return shim;
+}
+const ASSIGN_ISSUE = "https://github.com/craigoley/remudero/issues/18909";
+function recordingCreate(created: unknown[][]): AsyncIssueGateway {
+  return { create: async (title, body, labels) => { created.push([title, body, labels]); return ASSIGN_ISSUE; } };
+}
+
+test("W1-T15282 criterion 1: the reviewer-regression escalation assigns exactly the configured operator logins, never the repository owner", async (t) => {
+  const shim = assignShim(t);
+  const logs: string[] = [];
+  const created: unknown[][] = [];
+  const gateway = assigningIssueGateway("craigoley", "remudero", (step) => logs.push(step), ["cao825", "relief-operator", "CAO825"], recordingCreate(created));
+  assert.equal(await gateway.create("Reviewer regression", "body", ["needs-human"]), ASSIGN_ISSUE);
+  assert.deepEqual(shim.calls(), [`issue edit ${ASSIGN_ISSUE} --repo craigoley/remudero --add-assignee cao825,relief-operator`],
+    "one edit assigns every configured login once, and never the organization");
+  assert.deepEqual(logs, [], "a successful assignment logs no failure");
+});
+
+test("W1-T15282 criterion 2: with no operator list the reviewer-regression escalation assigns nobody and files the same issue", async (t) => {
+  const shim = assignShim(t);
+  const logs: string[] = [];
+  const created: unknown[][] = [];
+  const inner = recordingCreate(created);
+  const gateway = assigningIssueGateway("craigoley", "remudero", (step) => logs.push(step), undefined, inner);
+  assert.equal(gateway, inner, "the issue gateway is the unwrapped one: title, body and labels reach it untouched");
+  assert.equal(await gateway.create("Reviewer regression", "body", ["needs-human"]), ASSIGN_ISSUE);
+  assert.deepEqual(created, [["Reviewer regression", "body", ["needs-human"]]]);
+  assert.deepEqual(shim.calls(), [], "no assignment is attempted");
+  assert.deepEqual(logs, [], "and no reviewer.regression_assign_failed row is logged");
 });
 
 test("W1-T10269: the healed tree builder refuses rather than falls back", async (t) => {

@@ -612,8 +612,9 @@ async function raiseRefusalAlarms(
       summary: `answers from ${group.login} keep being ignored`,
       detail: `${group.login} was refused on ${comments.length} distinct comments (${group.reason}).\n` +
         `Issues commented on: ${[...new Set(comments.map(([, entry]) => entry.issue))].join(", ")}.\n` +
-        "To admit this human, set operatorGithubLogins in config.json. Without a configured list, " +
-        "the repository-owner rule accepts only a non-bot OWNER comment. Verify the login before configuring it.",
+        "To admit this human as the operator, set operatorGithubLogins in config.json. Without a configured list, " +
+        "the repository-owner rule accepts only a non-bot OWNER comment or a repository admin's comment, " +
+        "and an organization's admin comments as MEMBER. Verify the login before configuring it.",
       options: [{ label: recommendation, detail: "Verify the login and add it to operatorGithubLogins in config.json." },
         { label: "keep refusing this login", detail: "Leave the authority configuration unchanged and close this alarm." }],
       recommendation,

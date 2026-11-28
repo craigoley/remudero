@@ -2320,6 +2320,19 @@ export async function triageExistingEscalation(
   });
 }
 
+/** W1-T15282 — who an escalation assigns and mentions: `config.operatorGithubLogins`, each login once
+ *  (case-insensitively), and nobody when no list is configured. Never the repository owner's login: on an
+ *  organization repo that is the organization, which GitHub can neither assign nor notify. */
+export function operatorNotifyLogins(logins: readonly string[] | undefined): string[] {
+  const seen = new Set<string>();
+  return (logins ?? []).filter((login) => {
+    const key = login.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 /** Real owner/repo-scoped gh issue gateway: outside sandbox for Seatbelt TLS (§4A), within
  * bypass/deny-hook floor, scoped PAT only. ensureLabel uses `gh label create … --force`:
  * existing labels succeed, hard failures return false. opts.exec injects raw gh (like status.ts's

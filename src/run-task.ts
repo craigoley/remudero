@@ -748,7 +748,7 @@ import {
   type AsyncIssueGateway,
   type IssueGateway,
   type OpenIssue,
-  type PresenceMode, prReferentFromIssueText, loadEscalationLinkSecret,} from "./lib/escalate.js";
+  type PresenceMode, prReferentFromIssueText, loadEscalationLinkSecret, operatorNotifyLogins,} from "./lib/escalate.js";
 import {
   boardPrsRestArgs,
   checkRunsRestArgs,
@@ -2454,15 +2454,18 @@ export function buildReviewerCodeFreshnessGate(
   return reviewerCodeStartGate(readFreshness, log, next, (deps) => [...reviewOptionFlags(deps), JUDGE_AT_OWN_START_FLAG], reviewFromFreshTree);
 }
 
-/** W1-T10269 — the escalation's issue gateway, assigning each issue it files to the repo owner
- *  (escalation by assignment: Remudero Issues are the alert channel). */
+/** W1-T10269 — the escalation's issue gateway, assigning each issue it files to the configured operator
+ *  logins (escalation by assignment: Remudero Issues are the alert channel). W1-T15282: never the repo
+ *  owner, an organization here; with no list nobody is assigned. */
 export function assigningIssueGateway(owner: string, repo: string, log: (step: string, extra?: Record<string, unknown>) => void,
-  gateway: AsyncIssueGateway = ghIssueGatewayAsync(owner, repo)): AsyncIssueGateway {
+  operatorLogins: readonly string[] | undefined, gateway: AsyncIssueGateway = ghIssueGatewayAsync(owner, repo)): AsyncIssueGateway {
+  const assignees = operatorNotifyLogins(operatorLogins);
+  if (assignees.length === 0) return gateway;
   return {
     ...gateway,
     create: async (title, body, labels) => {
       const url = await gateway.create(title, body, labels);
-      await ghTextAsync(["issue", "edit", url, "--repo", `${owner}/${repo}`, "--add-assignee", owner]).catch((error: unknown) =>
+      await ghTextAsync(["issue", "edit", url, "--repo", `${owner}/${repo}`, "--add-assignee", assignees.join(",")]).catch((error: unknown) =>
         log("reviewer.regression_assign_failed", { issue_url: url, error: String((error as Error)?.message ?? error) }));
       return url;
     },
@@ -2508,7 +2511,7 @@ export function buildReviewerHealthRoute(
   const git = gitIn(repoDir);
   const runId = `reviewer-health-${systemClock.now()}`;
   const self = (): { owner: string; repo: string } => resolveOwnerRepo();
-  const escalation = { issues: issues ?? assigningIssueGateway(self().owner, self().repo, log), ledgerPath, runId };
+  const escalation = { issues: issues ?? assigningIssueGateway(self().owner, self().repo, log, config.operatorGithubLogins), ledgerPath, runId };
   const repairLane = lane ?? reviewerRevertLane(self().owner, self().repo, config, ledgerPath, runId);
   const statePath = reviewerHealthStatePath(dirname(ledgerPath));
   const readRows = (cursor: Parameters<typeof readReviewerHealthRows>[1]) => readReviewerHealthRows(dirname(ledgerPath), cursor);
@@ -29610,7 +29613,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const spec = flowGardenSpec(d, {
         owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         admission: { owner, repo, settings: config.contributorAdmission },
-        escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
+        escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log, operatorLogins: config.operatorGithubLogins }),
       });
       const pass = gardenPass(spec, d);
       return lowYieldGardenPass(stateDir, "flow-remedy", pass, {
@@ -29623,7 +29626,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const d = deps("fix-lane", raiseDuplicate);
       return gardenPass(fixLaneGardenSpec(d, {
         owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
-        escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
+        escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log, operatorLogins: config.operatorGithubLogins }),
       }), d);
     }
     // W1-T4439: aggregate complete coverage-shard shadow records before W1-T4406
@@ -31346,6 +31349,7 @@ export async function serveCommand(
     board: boardDeps,
     boardSnapshotSource: boardProjection,
     modelApprovals: config.modelApprovals,
+    operatorGithubLogins: config.operatorGithubLogins,
     // panel-graph.ts reloads plan/tasks.yaml fresh on every GET /v1/trace (its own header) --
     // planPath alone is enough, no snapshot needed here the way board.ts's does.
     // `statusGithub` backs GET /v1/drain/preview's (W1-T140) merged-set derivation --

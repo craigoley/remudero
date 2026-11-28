@@ -29,7 +29,7 @@ import { conflictedFilePaths } from "../../lib/hot-file-gardener.js";
 import { billingMode } from "../../lib/env.js";
 import { FIX_MODE_RULES, bodyCoverageSelfHealCriteria, deriveFixMode, fixScopeRegime, outOfDeclaredScopeFiles, renderFixPrompt, renderPrerequisitePrPrompt, sameHeadReviewUnmet, type FixEvidence, type FixReviewFinding } from "../../lib/prompt-render.js";
 import { bakedClosureCatalogDetails } from "../../lib/baked-closure-catalog.js";
-import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHeadSha, openEscalationStandDownReason, fixEscalationDedupKey, findDuplicateEscalations, taskContractRevision, taskSemanticRevision, type Escalation, type EscalationDedupKey, type IssueGateway, type OpenIssue } from "../../lib/escalate.js";
+import { escalateWithJudge, escalationCause, operatorNotifyLogins, realEscalationJudge, escalationHeadSha, openEscalationStandDownReason, fixEscalationDedupKey, findDuplicateEscalations, taskContractRevision, taskSemanticRevision, type Escalation, type EscalationDedupKey, type IssueGateway, type OpenIssue } from "../../lib/escalate.js";
 import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, CODEQL_CHECK_NAME, createPlanFilingFileCache, hydratePlanFilingFilesSteps, type GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { remedyFilesForFailingChecks, type RemedyFileForGate } from "../../lib/ci-parity.js";
 import { isInPlanScope } from "../../lib/plan-architect.js";
@@ -5818,6 +5818,9 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         const repairNote = repairedHead === undefined ? undefined : `The in-scope repairs were pushed in commit ${repairedHead}.`;
         const neededPaths = `needs a scope decision for these exact paths:\n${paths.map((path) => `- ${path}`).join("\n")}`;
         const heldNote = heldPaths.length === 0 ? "" : `\n\nAdditional edits held in the worktree:\n${heldPaths.map((path) => `- ${path}`).join("\n")}`;
+        // W1-T15282: mention the configured operators; the repo owner is an organization, and an org mention notifies nobody.
+        const mentioned = operatorNotifyLogins(opts.config.operatorGithubLogins);
+        const operatorMention = mentioned.length === 0 ? "" : `${mentioned.map((login) => `@${login}`).join(" ")}: `;
         if (!issueUrl) try {
           issueUrl = await escalateForTask({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
             headSha: scopeHead, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), contractRevision: identityKey,
@@ -5827,7 +5830,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
               : scopeKind === "instrument" ? `PR #${prNumber} needs an instrument edit only the operator can grant — ${opts.prUrl}`
               : scopeKind === "unfiled" ? `unfiled PR #${prNumber} needs scope outside its own diff — ${opts.prUrl}`
               : `PR #${prNumber} still needs a scope decision after its partial repair — ${opts.prUrl}`,
-            detail: `@${opts.reviewBase.owner}: ${opts.prUrl} ` + (scopeKind === "workflow"
+            detail: `${operatorMention}${opts.prUrl} ` + (scopeKind === "workflow"
               ? `needs workflow edits that the fix lane cannot amend or commit: ${workflowPaths.join(", ")}.`
               : scopeKind === "instrument" ? `needs instrument edits a scope amendment always refuses (instrument-path): ${instrumentPaths.join(", ")}.`
               : scopeKind === "unfiled" ? "has no plan record to amend." : `scope amendment was refused (${refusal}).`) +
@@ -5837,7 +5840,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
               (scopeKind === "workflow" ? `\n\nBaked-closure catalog:\n${bakedClosureCatalogDetails((priorCiFailures ?? []).map((failure) => failure.logTail ?? "").join("\n"))}` : ""),
             options: [{ label: "route-repair", detail: "route the named paths to their owner or a filed repair task" },
               { label: "revise-pr", detail: headIndependent
-                ? "grant exactly these paths to this PR's fix lane: the repository owner replies revise-pr on this issue"
+                ? "grant exactly these paths to this PR's fix lane: the operator replies revise-pr on this issue"
                 : "revise this PR's scope explicitly, then resume its fix lane" }],
             recommendation: "route-repair", consequence: "this fix lane stays down at this head until its scope is resolved" },
           { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },

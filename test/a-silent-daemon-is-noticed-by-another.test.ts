@@ -124,6 +124,7 @@ function watch(f: Fleet, gh: (args: string[]) => string, nowMs: () => number, lo
     ledgerPath: f.ledgerPath,
     gh,
     log,
+    operatorGithubLogins: ["cao825"],
     clock: { now: nowMs, date: () => new Date(nowMs()), iso: () => new Date(nowMs()).toISOString() },
     every: (fn, ms) => {
       run = fn;
@@ -161,8 +162,8 @@ test("a registered instance with a stale sweep and repeated boots is escalated o
   assert.equal(args[args.indexOf("--label") + 1], "needs-human");
   assert.deepEqual(
     calls.find((a) => a[1] === "edit"),
-    ["issue", "edit", ISSUE, "--repo", "craigoley/remudero-console", "--add-assignee", "craigoley"],
-    "the issue is assigned to the operator",
+    ["issue", "edit", ISSUE, "--repo", "craigoley/remudero-console", "--add-assignee", "cao825"],
+    "the issue is assigned to the configured operator (W1-T15282: never the owner organization)",
   );
   const repos = new Set(calls.map((a) => (a[0] === "api" ? a[1].replace(/^repos\/(.*?)\/issues.*$/, "$1") : a[a.indexOf("--repo") + 1])));
   assert.deepEqual([...repos], ["craigoley/remudero-console"], "the core instance's own crash loop is never watched");
