@@ -222,7 +222,7 @@ import {
   type IdleLaneCause,
   type IdleLaneHold,
 } from "./idle-lane-accounting.js";
-import { reviewPrecedenceHold } from "./review-precedence.js";
+import { recordBuildDemandSince, reviewPrecedenceHold } from "./review-precedence.js";
 
 /** W1-T3978: the implement producer's exact refusal, carried as runtime metadata without widening
  * the shared RunResult union used by every other dispatch lane. */
@@ -5081,6 +5081,12 @@ export async function runDaemon(
   let idleLaneTickCause: IdleLaneCause | undefined;
   let idleLaneTickHold: IdleLaneHold | undefined;
   let idleLaneDispatchable = 0;
+  // W1-T15291: when dispatchable build demand began waiting for a lane; review precedence ranks it by that wait.
+  let buildDemandSinceMs: number | undefined;
+  const noteBuildDemandSince = (sinceMs: number | undefined): void => {
+    buildDemandSinceMs = sinceMs;
+    recordBuildDemandSince(sinceMs);
+  };
   // W1-T8235: the lanes this daemon fills — the figure the refill path sizes its pool by.
   const idleLaneCapacity = Math.max(1, opts.laneCount ?? 1);
   let livenessPulse: ReturnType<typeof startLivenessPulse> | undefined;
@@ -5170,6 +5176,8 @@ export async function runDaemon(
   const sampleIdleLane = (busyLanes: number, selectionRan: boolean, dispatchable?: number, closeWindow = true): void => {
     if (dispatchable !== undefined) idleLaneDispatchable = dispatchable;
     const atMs = idleLaneClock.now();
+    if (idleLaneDispatchable === 0) noteBuildDemandSince(undefined);
+    else if (buildDemandSinceMs === undefined && busyLanes < idleLaneCapacity) noteBuildDemandSince(atMs);
     const before = idleLaneAccount.state;
     idleLaneAccount = accountIdleLaneMinutes(idleLaneAccount, {
       atMs,
@@ -7129,6 +7137,7 @@ export async function runDaemon(
   };
   // W1-T14608: every task start ends the episode; a paged episode is cleared without holding the start up.
   const noteTaskStart = (taskId: string): void => {
+    noteBuildDemandSince(undefined);
     if (noStart === undefined) return;
     const nowMs = daemonClock.now();
     const sinceLastStartMs = Math.max(0, nowMs - (noStart.lastStartMs ?? nowMs));
@@ -7360,7 +7369,7 @@ export async function runDaemon(
   const holdWorkerAdmission = (surface: string): (WorkerAdmissionHold & { reason: string }) | undefined => {
     const sample = recordNearLimitHeapSample(deps, `admission:${surface}`);
     const hold = deps.workerAdmissionHold?.();
-    if (!hold) return heapWorkerAdmissionHold(deps, surface, sample, log) ?? reviewPrecedenceHold(surface, () => daemonClock.now(), pollIntervalMs, log);
+    if (!hold) return heapWorkerAdmissionHold(deps, surface, sample, log) ?? reviewPrecedenceHold(surface, () => daemonClock.now(), pollIntervalMs, log, buildDemandSinceMs);
     const reason = `fleet ${hold.control} hold: ${hold.detail}`;
     log("daemon.admission_held", { surface, control: hold.control, detail: hold.detail, reason });
     return { ...hold, reason };
