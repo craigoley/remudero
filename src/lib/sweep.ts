@@ -2559,6 +2559,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "fixDispatchFleetHold", // W1-T11168
   "fixDispatchCauseProbe", // W1-T13750
   "readLiveState",
+  "readCommitParents", // W1-T15162
   "terminalFixStandDown",
   "readRedBaseRefreshFacts",
   "depReview",
@@ -2931,6 +2932,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "fixDispatchCauseProbe"
   | "strikeLadder"
   | "readLiveState"
+  | "readCommitParents"
   | "terminalFixStandDown"
   | "readRedBaseRefreshFacts"
   | "depReview"
@@ -6084,6 +6086,15 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         await maintainPrimaryShadowAlert(() => primaryShadowAlerts.resolved(pr)).catch(primaryShadowAlertFailed);
       }
       return observed;
+    },
+
+    // W1-T15162 — GitHub's own parent list of one commit; a read without one is unreadable, never "no parents".
+    readCommitParents: async (_pr, sha) => {
+      const body = await paceGhEntry(pacer, isGhRateLimitError, () => readJsonImpl(["api", `repos/${owner}/${repo}/git/commits/${sha}`])) as
+        { parents?: Array<{ sha?: unknown }> } | undefined;
+      const parents = body?.parents;
+      if (!Array.isArray(parents)) return undefined;
+      return parents.flatMap((p) => (typeof p?.sha === "string" ? [p.sha] : []));
     },
 
     // W1-T2752 — the outer, synchronous admission seam `runSweep` consults before EITHER
@@ -18465,6 +18476,11 @@ export interface SweepDeps {
    *  merged mid-sweep, dispatched anyway). Omitted, or a failed read, behaves exactly as before —
    *  standing down fires ONLY on a positive, freshly observed terminal reading. */
   readLiveState?: (pr: OpenPrView) => LiveStateResult | Promise<LiveStateResult>;
+  /** W1-T15162 — a commit's parent shas in order, from GitHub's own commit record (`git/commits/{sha}`), never
+   *  guessed from the head sha. `undefined` is unreadable. Omitted, no update-branch head is ever confirmed. */
+  readCommitParents?: (pr: OpenPrView, sha: string) => readonly string[] | undefined | Promise<readonly string[] | undefined>;
+  /** W1-T15162 — the wait between post-update head reads; omitted, a real timer. */
+  waitForUpdatedHead?: (ms: number) => Promise<void>;
   /** Full act-time guard read, shared with fix arms; stale-red release still reads again. */
   readLiveStateAtAct?: SweepDeps["readLiveState"];
   /** W1-T11153: the open-PR reader the light pass started from, re-read when a freed lane refills so a PR that
@@ -30474,6 +30490,7 @@ async function runSweepPinned(
                   recordForcedRefresh(deps, pr, "stale-base"); // W1-T7735: W1-T2789
                   try {
                     const outcome = await deps.updateBranch!(pr);
+                    const updatedHead = outcome === "updated" ? await confirmedUpdateHead(deps, pr, pr.headSha) : {};
                     appendLine(deps.ledgerPath, {
                       run_id: deps.runId,
                       task_id: pr.taskId ?? "SWEEP",
@@ -30482,6 +30499,7 @@ async function runSweepPinned(
                       pr_number: pr.prNumber,
                       pr_url: pr.prUrl,
                       head_sha: pr.headSha,
+                      ...updatedHead,
                       main_tip_sha: staleBaseReleaseTarget.mainTipSha,
                       behind_by: decision.behindBy,
                       matching_base_files: decision.matchingBaseFiles,
@@ -31331,6 +31349,7 @@ async function runSweepPinned(
       });
       try {
         const outcome = await deps.updateBranch(target);
+        const updatedHead = outcome === "updated" ? await confirmedUpdateHead(deps, viewOf(target), target.headSha) : {};
         appendLine(deps.ledgerPath, {
           run_id: deps.runId,
           task_id: target.taskId ?? "SWEEP",
@@ -31338,6 +31357,7 @@ async function runSweepPinned(
           pr_number: target.prNumber,
           pr_url: target.prUrl,
           head_sha: target.headSha,
+          ...updatedHead,
           ...staleWorkflowFields,
           ...behindFields,
           ...updateReasonFields,
@@ -31741,6 +31761,9 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
       ...(c.matchingBaseFiles === undefined ? {} : { matching_base_files: c.matchingBaseFiles }),
       source: "light_pass",
     });
+    const readLive = (selected: ArmedStalledPr) => Promise.resolve()
+      .then(() => deps.readLiveState?.(byNumber.get(selected.prNumber)!))
+      .catch((): LiveStateResult => ({ ok: false }));
     // W1-T14315: the snapshot predates the base facts, so a PR that merged since reads its own files as main
     // moving under it. Each selected PR is read live before its write; a merged, closed or moved one stands
     // down and the slot passes to the next eligible candidate. An unreadable read refreshes as before.
@@ -31751,9 +31774,7 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
       target = pool.find((c) => c.prNumber === winner?.prNumber);
       if (!target) return undefined;
       const selected = target;
-      const readLive = () => Promise.resolve().then(() => deps.readLiveState?.(byNumber.get(selected.prNumber)!))
-        .catch((): LiveStateResult => ({ ok: false }));
-      const live = await (timing ? timing.measure("ready_update", readLive) : readLive());
+      const live = await (timing ? timing.measure("ready_update", () => readLive(selected)) : readLive(selected));
       const notOpen = live?.ok !== true ? undefined : terminalStateReason(live.state) ??
         (live.headSha !== undefined && live.headSha !== selected.headSha
           ? `head moved from ${selected.headSha} to ${live.headSha}` : undefined);
@@ -31805,7 +31826,8 @@ export function armedRatchetRejudgeTargets(openPrs: readonly OpenPrView[], ledge
 export async function runArmedRatchetRejudge(
   openPrs: readonly OpenPrView[],
   deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "readLedger" | "appendLine" | "dryRun" | "now" |
-    "readMainTip" | "readMergedRatchets" | "readActionsStatusSummary" | "readMainChangedPaths">,
+    "readMainTip" | "readMergedRatchets" | "readActionsStatusSummary" | "readMainChangedPaths" | "readLiveState" |
+    "readCommitParents" | "waitForUpdatedHead">,
 ): Promise<number[]> {
   const read = deps.readMergedRatchets;
   if (deps.dryRun || !read || !deps.readMainTip) return [];
@@ -31857,7 +31879,9 @@ export async function runArmedRatchetRejudge(
       update_reason: "ratchet-collision", reason: "ratchet_collision", source: "armed_ratchet_rejudge" };
     appendLine(deps.ledgerPath, { ...update, step: "sweep.update_branch.attempted" });
     try {
-      appendLine(deps.ledgerPath, { ...update, step: `sweep.update_branch.${await deps.updateBranch(target)}` });
+      const outcome = await deps.updateBranch(target);
+      const updatedHead = outcome === "updated" ? await confirmedUpdateHead(deps, pr, pr.headSha) : {};
+      appendLine(deps.ledgerPath, { ...update, step: `sweep.update_branch.${outcome}`, ...updatedHead });
     } catch (e) {
       appendLine(deps.ledgerPath, { ...update, step: "sweep.update_branch.error", error: String((e as Error)?.message ?? e) });
     }
@@ -33483,41 +33507,138 @@ export function lightPassEarlyReviewBatch(
   return earlyCandidates.filter((pr) => inQueueOrder([pr, oldestDelayed])[0] === pr);
 }
 
+/** W1-T15162 — the bounded backoff between post-update head reads while GitHub applies the update (7.75s in all). */
+export const UPDATE_HEAD_POLL_WAITS_MS: readonly number[] = [250, 500, 1000, 2000, 4000];
+
+/** W1-T15162 — the head a successful update-branch produced. GitHub applies the update asynchronously, so the live
+ *  head is polled under {@link UPDATE_HEAD_POLL_WAITS_MS} until it leaves `oldHead`, and the first other head read is
+ *  credited to the update only when GitHub's parent list for it names a two-parent merge whose first parent is
+ *  `oldHead`. A head that never moves, a failed or thrown read, an unreadable parent list, or any other commit (an
+ *  author or fix-round push, on `oldHead` or on the update's merge) confirms nothing: the row then names why in
+ *  `update_head_unconfirmed` and carries no `new_head_sha`. Without both readers no head is read or recorded. */
+async function confirmedUpdateHead(
+  deps: Pick<SweepDeps, "readLiveState" | "readCommitParents" | "waitForUpdatedHead">, pr: OpenPrView, oldHead: string,
+): Promise<{ new_head_sha?: string; update_head_unconfirmed?: string }> {
+  const { readLiveState: read, readCommitParents: parentsOf } = deps;
+  if (read === undefined || parentsOf === undefined) return {};
+  const wait = deps.waitForUpdatedHead ?? (async (ms: number) => { await delay(ms); });
+  for (let reads = 1; ; reads++) {
+    let head: string | undefined;
+    try {
+      const live = await read(pr);
+      head = live.ok === true && typeof live.headSha === "string" && live.headSha !== "" ? live.headSha : undefined;
+    } catch (error) {
+      return { update_head_unconfirmed: `live head read failed: ${String((error as Error)?.message ?? error)}` };
+    }
+    if (head === undefined) return { update_head_unconfirmed: "live head unreadable" };
+    if (head !== oldHead) {
+      let parents: readonly string[] | undefined;
+      try {
+        parents = await parentsOf(pr, head);
+      } catch (error) {
+        return { update_head_unconfirmed: `parents of ${head} unreadable: ${String((error as Error)?.message ?? error)}` };
+      }
+      if (parents === undefined) return { update_head_unconfirmed: `parents of ${head} unreadable` };
+      if (parents.length === 2 && parents[0] === oldHead) return { new_head_sha: head };
+      return { update_head_unconfirmed: `head ${head} is not a merge onto ${oldHead} (parents ${parents.join(",") || "none"})` };
+    }
+    const waitMs = UPDATE_HEAD_POLL_WAITS_MS[reads - 1];
+    if (waitMs === undefined) return { update_head_unconfirmed: `head still ${oldHead} after ${reads} reads` };
+    await wait(waitMs);
+  }
+}
+
 /** W1-T14073 — A RE-ENTERED REVIEW INPUT QUEUES FROM WHEN IT BECAME ELIGIBLE, NOT FROM ITS PR'S AGE. Generalizes
  *  W1-T12534's absent-repush map, folded from the ledger view the pass already holds (no second scan). A head
  *  absent-repush minted keeps W1-T12534's key (its first eligible ts, else its mint ts). A PR that was eligible at an
  *  earlier head is keyed by the first `sweep.review_eligible` ts of its current review key (the key carries the head
  *  sha, so a fix head is a new key), else `now`: this pass writes that key's first row. A PR's first head keeps its
- *  createdAt (W1-T12534 criteria 2 and 3), which is never later than its first eligibility. */
+ *  createdAt (W1-T12534 criteria 2 and 3), which is never later than its first eligibility.
+ *  W1-T15162 — A HEAD THE SWEEP'S OWN BRANCH UPDATE MADE KEEPS THE QUEUE PLACE OF THE HEAD IT REPLACED. A branch update
+ *  adds no new work to review, so the head a `sweep.update_branch.updated` row of an unreviewed earlier head confirms
+ *  ({@link confirmedUpdateHead}) inherits that head's key. INVARIANT a-new-head-of-new-work-requeues: a head with no such update before
+ *  it, a head after a fix dispatch or another new head, and a head whose earlier head has a verdict keep the key above. */
 function reviewInputQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>, now: number): ReviewQueuedAt {
   const byKey = new Map<string, string>();
   const minted = new Map<string, string>();
   const eligible = new Map<string, string>();
   const eligibleHeads = new Map<string, Set<string>>();
+  const sweepUpdates = new Map<string, Array<{ from: string; to?: string; at: number; rowIndex: number }>>();
+  const eligibleEvents = new Map<string, Array<{ head: string; rowIndex: number }>>();
+  const judgedHeads = new Set<string>();
   const isTime = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
   const first = (values: Map<string, string>, key: string, ts: string): void => {
     if (!values.has(key)) values.set(key, ts);
   };
-  for (const row of ledgerLines) {
+  for (const [rowIndex, row] of ledgerLines.entries()) {
     if (!isTime(row.ts)) continue;
+    const prKey = String(row.pr_number);
+    if (row.step === "sweep.update_branch.updated" && typeof row.head_sha === "string" && row.pr_number !== undefined) {
+      sweepUpdates.set(prKey, [...(sweepUpdates.get(prKey) ?? []), {
+        from: row.head_sha, ...(typeof row.new_head_sha === "string" ? { to: row.new_head_sha } : {}),
+        at: Date.parse(row.ts), rowIndex,
+      }]);
+      continue;
+    }
+    if (row.step === "review.posted" && (row.state === "success" || row.state === "failure") &&
+      typeof row.head_sha === "string") {
+      judgedHeads.add(row.head_sha);
+      continue;
+    }
     if (row.step === "sweep.review_eligible" && typeof row.review_key === "string") first(byKey, row.review_key, row.ts);
     const head = row.step === "sweep.absent_repush" ? row.new_head
       : row.step === "sweep.review_eligible" ? row.head_sha : undefined;
     if (typeof head !== "string") continue;
-    const key = `${String(row.pr_number)}@${head}`;
+    const key = `${prKey}@${head}`;
     if (row.step === "sweep.absent_repush") {
       first(minted, key, row.ts);
       continue;
     }
     first(eligible, key, row.ts);
-    const heads = eligibleHeads.get(String(row.pr_number)) ?? new Set<string>();
-    eligibleHeads.set(String(row.pr_number), heads.add(head));
+    eligibleEvents.set(prKey, [...(eligibleEvents.get(prKey) ?? []), { head, rowIndex }]);
+    const heads = eligibleHeads.get(prKey) ?? new Set<string>();
+    eligibleHeads.set(prKey, heads.add(head));
+  }
+  // The update's head is the next eligible head after its row, credited only when the row's merge-confirmed
+  // `new_head_sha` names it: a row without one, or a later push, fix head or stale read, credits nothing.
+  for (const [prKey, updates] of sweepUpdates) {
+    const events = eligibleEvents.get(prKey) ?? [];
+    for (const update of updates) {
+      const next = events.find((event) => event.rowIndex > update.rowIndex && event.head !== update.from)?.head;
+      if (update.to !== undefined && next !== undefined && next !== update.to) update.to = undefined;
+    }
   }
   const nowIso = clockFromMillisFn(() => now).iso();
+  /** W1-T15162: the unreviewed head a sweep branch update replaced with `head`, or undefined when `head` is new work. */
+  const sweepMadeFrom = (prKey: string, head: string): string | undefined => {
+    const seen = eligible.get(`${prKey}@${head}`);
+    const headAt = seen === undefined ? now : Date.parse(seen);
+    const update = (sweepUpdates.get(prKey) ?? []).filter((u) => u.to === head && u.from !== head && u.at <= headAt)
+      .reduce<{ from: string; at: number } | undefined>((latest, u) => latest === undefined || u.at > latest.at ? u : latest, undefined);
+    if (update === undefined || judgedHeads.has(update.from)) return undefined;
+    const fromSeen = eligible.get(`${prKey}@${update.from}`);
+    if (fromSeen === undefined || Date.parse(fromSeen) > update.at) return undefined;
+    return update.from;
+  };
+  /** The key a head of a PR queues at; `null` keeps its PR's createdAt (its first head). */
+  const keyOfHead = (prKey: string, head: string, depth: number, inherited = false): string | null => {
+    const mint = minted.get(`${prKey}@${head}`);
+    if (mint !== undefined) return eligible.get(`${prKey}@${head}`) ?? mint;
+    const from = depth < 32 ? sweepMadeFrom(prKey, head) : undefined;
+    if (from !== undefined) return keyOfHead(prKey, from, depth + 1, true);
+    const own = eligible.get(`${prKey}@${head}`);
+    const earlier = [...(eligibleHeads.get(prKey) ?? [])].some((h) => h !== head &&
+      (own === undefined || Date.parse(eligible.get(`${prKey}@${h}`)!) < Date.parse(own)));
+    // An update-produced head inherits the replaced head's first eligibility even when that
+    // predecessor was the PR's first head. Its createdAt is not the review queue key.
+    return earlier || inherited ? own ?? nowIso : null;
+  };
   return (pr) => {
     const head = `${pr.prNumber}@${pr.headSha}`;
     const mint = minted.get(head);
     if (mint !== undefined) return eligible.get(head) ?? mint;
+    const from = sweepMadeFrom(String(pr.prNumber), pr.headSha);
+    if (from !== undefined) return keyOfHead(String(pr.prNumber), from, 1, true) ?? undefined;
     const heads = eligibleHeads.get(String(pr.prNumber));
     const reentered = heads !== undefined && [...heads].some((h) => h !== pr.headSha);
     return reentered ? byKey.get(reviewOutcomeKeyForPr(pr)) ?? nowIso : undefined;
