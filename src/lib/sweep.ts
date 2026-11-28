@@ -219,6 +219,7 @@ import {
   saveCreditStore,
   taskIdFromRunBranch,
   isGhRateLimitError,
+  prOwningTaskIds,
   TASK_ID_TRAILER_RE,
 } from "./status.js";
 import type { CreditBackfillReceipt, CreditStore } from "./status.js";
@@ -24150,10 +24151,20 @@ export interface ResequenceCloseLifecycle {
   truncated?: boolean;
 }
 
+/** W1-T15185 — one open pull request as the reversal reads it. */
+export interface ResequenceOpenPullRequest {
+  number: number;
+  headRef: string;
+  body: string;
+}
+
 /** W1-T12891 — the GitHub reads and the one write a reversal takes. A read that throws is unreadable. */
 export interface ResequenceCloseReversalPort {
   readLifecycle: (kept: KeptResequenceClose) => Promise<ResequenceCloseLifecycle>;
   headExists: (kept: KeptResequenceClose) => Promise<boolean>;
+  /** W1-T15185 — the repository's open pull requests: number, head branch and body (the body's `Remudero-Task:`
+   *  trailer owns a PR as much as its head does). Throws when the list is incomplete. */
+  openPullRequests: (kept: KeptResequenceClose) => Promise<ReadonlyArray<ResequenceOpenPullRequest>>;
   reopen: (kept: KeptResequenceClose, comment: string) => void | Promise<void>;
 }
 
@@ -24267,6 +24278,16 @@ export function createResequenceCloseReversalPort(io: {
       if (!Array.isArray(refs)) throw new Error("the matching-refs answer was not a list");
       return refs.some((ref: { ref?: unknown }) => ref?.ref === `refs/heads/${kept.headRef}`);
     },
+    openPullRequests: async (kept) => {
+      const slug = resequenceCloseSlug(kept.prUrl);
+      if (slug === undefined) throw new Error(`the pull request url ${kept.prUrl} names no repository`);
+      const open = await fetchBoardPrsRestAsync(slug.owner, slug.repo, (args) => io.readJson(args, { fresh: true }), undefined, "open");
+      if (open.truncated) throw new Error("the open pull request list is incomplete");
+      return open.rows.map((row) => {
+        if (typeof row.headRefName !== "string" || row.headRefName === "") throw new Error(`open PR #${row.number} has an unreadable head ref`);
+        return { number: row.number, headRef: row.headRefName, body: row.body };
+      });
+    },
     reopen: (kept, comment) => io.ghRun("gh", ["pr", "reopen", kept.prUrl, "--comment", comment]),
   };
 }
@@ -24287,7 +24308,9 @@ export interface ResequenceReversalOutcome {
  * Acts only on a close this sweep kept (only the unmet-dependency resequence close is kept). It holds, writing
  * nothing, while any named dependency is unmerged, indeterminate or unreadable. It drops the close without acting
  * when the task itself merged, the PR is open or merged, or a closed/reopened event follows the sweep's close (a
- * person acted after it). Otherwise the kept file is removed first, so a reopen is attempted once per close: a gone
+ * person acted after it). It holds while the open-PR list is unreadable, and drops the close with a
+ * `sweep.resequence_close_dropped` row when the task has another open PR on another head (W1-T15185).
+ * Otherwise the kept file is removed first, so a reopen is attempted once per close: a gone
  * head or a refused reopen writes `sweep.resequence_close_reverse_failed`, a reopen `sweep.resequence_close_reversed`.
  */
 export async function reverseResequenceCloses(input: {
@@ -24346,6 +24369,27 @@ export async function reverseResequenceCloses(input: {
       : !ownClose ? "no closed event matches the sweep's close" : undefined;
     if (dropReason !== undefined) {
       drop(close, dropReason);
+      continue;
+    }
+    // W1-T15185: no reopen for a task that already has a newer open pull request.
+    let open: ReadonlyArray<ResequenceOpenPullRequest>;
+    try {
+      open = await input.port.openPullRequests(close);
+    } catch (error) {
+      const reason = `the open pull request list was unreadable: ${String(error)}`;
+      held(reason);
+      continue;
+    }
+    // Ownership as the plan's open index reads it: a run head or a body trailer (prOwningTaskIds).
+    const newer = open.find((pr) => pr.number !== close.prNumber && pr.headRef !== close.headRef &&
+      prOwningTaskIds({ headRefName: pr.headRef, body: pr.body }).includes(close.taskId));
+    if (newer !== undefined) {
+      if (!claim(close)) continue;
+      input.appendLine(input.ledgerPath, { run_id: input.runId, task_id: close.taskId, pr_number: close.prNumber,
+        head_ref: close.headRef, closed_at: close.closedAt, step: "sweep.resequence_close_dropped",
+        open_pr_number: newer.number, open_head_ref: newer.headRef });
+      outcomes.push({ prNumber: close.prNumber, outcome: "dropped",
+        reason: `task ${close.taskId} has open pull request #${newer.number}` });
       continue;
     }
     try {
