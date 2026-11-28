@@ -7,6 +7,8 @@ FINDINGS-local*
 # build output
 dist/
 *.tsbuildinfo
+# W1-T15169: the per-worktree typecheck lock beside a worktree-root buildinfo, held only while tsc runs.
+.rmd-typecheck.tsbuildinfo.lock
 
 # generated coverage reports (W1-T25 coverage-ratchet gate consumes coverage/lcov.info,
 # regenerated fresh every run — never committed). Anchored at the root: an unanchored

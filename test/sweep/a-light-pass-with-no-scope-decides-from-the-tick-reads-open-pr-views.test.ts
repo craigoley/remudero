@@ -42,10 +42,12 @@ function view(prNumber: number, headSha: string, ready = false): OpenPrView {
     reviewInputDigest: reviewInputDigest(headSha, `Remudero-Task: W1-T${prNumber}`) };
 }
 
+/** The PR's dates are derived from the clock the pass reads (W1-T14786). */
 function pullRow(prNumber: number, headSha: string, repo: string): Record<string, unknown> {
+  const touched = new Date(Date.now() - 86_400_000).toISOString();
   return { number: prNumber, html_url: `https://github.com/o/${repo}/pull/${prNumber}`, state: "open", draft: false,
-    title: `feat: ${prNumber}`, body: `Remudero-Task: W1-T${prNumber}`, updated_at: "2026-11-19T00:00:00Z",
-    created_at: "2026-11-19T00:00:00Z", head: { ref: `run-W1-T${prNumber}-1`, sha: headSha } };
+    title: `feat: ${prNumber}`, body: `Remudero-Task: W1-T${prNumber}`, updated_at: touched,
+    created_at: touched, head: { ref: `run-W1-T${prNumber}-1`, sha: headSha } };
 }
 
 function generation(publishedAtMs: number, views: OpenPrView[], openPrError?: string): ReadGeneration<TickReadFacts> {
