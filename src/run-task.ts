@@ -31405,6 +31405,7 @@ export async function serveCommand(
       dedupCapacity: githubEventWakePolicy?.values.githubEventWake.dedupCapacity,
       semanticCheckMode: githubEventWakePolicy?.values.githubEventWake.semanticCheckMode,
       aggregateCheckNames: githubEventWakePolicy?.values.githubEventWake.aggregateCheckNames,
+      operatorGithubLogins: config.operatorGithubLogins,
     },
   });
 

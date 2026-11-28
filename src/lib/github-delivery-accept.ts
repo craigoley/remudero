@@ -37,6 +37,8 @@ export interface GithubHookConfig {
   dedupCapacity: number;
   semanticCheckMode: "shadow" | "enforce";
   aggregateCheckNames: string[];
+  /** config.json's operatorGithubLogins; absent, only an `OWNER` escalation reply wakes (an older generation pushes none). */
+  operatorGithubLogins?: string[];
 }
 
 /** A pushed config is used only when every field has its shape; anything else is ignored, and the last good one stays. */
@@ -48,6 +50,8 @@ export function isGithubHookConfig(value: unknown): value is GithubHookConfig {
     && typeof c.dedupCapacity === "number" && Number.isSafeInteger(c.dedupCapacity) && c.dedupCapacity > 0
     && (c.semanticCheckMode === "shadow" || c.semanticCheckMode === "enforce")
     && Array.isArray(c.aggregateCheckNames) && c.aggregateCheckNames.every((name) => typeof name === "string")
+    && (c.operatorGithubLogins === undefined
+      || (Array.isArray(c.operatorGithubLogins) && c.operatorGithubLogins.every((login) => typeof login === "string")))
     && !!paths && typeof paths === "object" && !Array.isArray(paths) && Object.values(paths).every((path) => typeof path === "string");
 }
 
@@ -65,7 +69,7 @@ export interface GithubDeliveryChecks {
   verifySignature(rawBody: string, signatureHeader: string, secret: string): boolean;
   repositoryOf(body: unknown): string | undefined;
   actionOf(body: unknown): string | undefined;
-  /** The allowlist, or the owner's reply on a needs-human issue. */
+  /** The allowlist, or the operator's reply on a needs-human issue. */
   wakes(event: string, action: string | undefined, body: unknown): boolean;
   /** Counts the delivery's class into the semantic summary and says whether it is actionable. */
   classify(event: string, action: string | undefined, body: unknown): boolean;
