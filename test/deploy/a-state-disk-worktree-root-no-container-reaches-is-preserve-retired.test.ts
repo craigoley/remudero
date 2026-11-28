@@ -6,7 +6,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { age, fixture, git, run, type Fixture } from "#test/helpers/host-cleanup-fixture.js";
@@ -113,6 +114,66 @@ test("W1-T14891 a mounted worktree root is left alone", () => {
   assert.equal(existsSync(wt), true, out);
   assert.doesNotMatch(out, new RegExp(`REMOVE ${wt}[: ]`));
   assert.deepEqual(copies(r, wt), []);
+});
+
+test("W1-T14891 a mounted worktree root is left alone when the mount source is a bind alias", () => {
+  const r = rig();
+  const { wt } = shadowedTree(r, "run-W1-T9007-1");
+  const alias = join(r.fx.root, "mount-alias");
+  mkdirSync(alias);
+  const st = statSync(r.root);
+  const identity = `${st.dev}:${st.ino}`;
+  const statStub = join(r.fx.root, "stat");
+  writeFileSync(statStub, `#!/usr/bin/env bash
+for arg; do path="$arg"; done
+if [ "$path" = "${alias}" ] || [ "$path" = "${r.root}" ]; then printf '%s\\n' '${identity}'; exit 0; fi
+exec /usr/bin/stat "$@"
+`, { mode: 0o755 });
+  const out = pass(r, {
+    PATH: `${r.fx.root}:${process.env.PATH}`,
+    RMD_CLEANUP_DOCKER: container(r, [[alias, "/home/node/Remudero/worktrees"]]),
+  });
+  assert.match(out, new RegExp(`KEEP ${r.root}: a running container reaches this worktree root`));
+  assert.equal(existsSync(wt), true, out);
+  assert.deepEqual(copies(r, wt), []);
+});
+
+test("W1-T14891 a container-form gitdir is translated before preserving and retiring", () => {
+  const r = rig();
+  const hostState2 = join(r.state, "state2");
+  const clone = join(hostState2, "remudero");
+  mkdirSync(hostState2, { recursive: true });
+  git(r.fx.root, "clone", "-q", join(r.fx.root, "origin.git"), clone);
+  const wt = join(r.root, "run-W1-T9008-1");
+  git(clone, "worktree", "add", "-q", "-b", "run/container-form", wt, "main");
+  writeFileSync(join(wt, "feature.txt"), "unpublished\n");
+  git(wt, "add", "feature.txt");
+  git(wt, "commit", "-q", "-m", "unpublished container-form commit");
+  writeFileSync(join(wt, "README"), "edited, not committed\n");
+  writeFileSync(join(wt, "loose.txt"), "untracked payload\n");
+  age(wt, 10 * DAY_HOURS);
+
+  const gitfile = join(wt, ".git");
+  const hostGitdir = readFileSync(gitfile, "utf8").trim().slice("gitdir: ".length);
+  const backfile = join(hostGitdir, "gitdir");
+  const hostBackpointer = readFileSync(backfile, "utf8").trim();
+  writeFileSync(gitfile, "gitdir: /home/node/Remudero/remudero/.git/worktrees/run-W1-T9008-1\n");
+  writeFileSync(backfile, "/home/node/Remudero/worktrees/run-W1-T9008-1/.git\n");
+
+  const scratchWorktrees = join(r.fx.root, "container-scratch-worktrees");
+  mkdirSync(scratchWorktrees, { recursive: true });
+  const docker = container(r, [[hostState2, "/home/node/Remudero"], [scratchWorktrees, "/home/node/Remudero/worktrees"]]);
+  const out = pass(r, { RMD_CLEANUP_DOCKER: docker });
+  assert.match(out, new RegExp(`REMOVE ${wt}: under shadowed worktree root ${r.root}; idle 7 days, preserved then retired`));
+  assert.equal(existsSync(wt), false, out);
+  const [copy] = copies(r, wt);
+  assert.ok(copy, out);
+  assert.match(readFileSync(join(copy, "MANIFEST.txt"), "utf8"), new RegExp(`path:   ${wt}`));
+  assert.equal(existsSync(join(copy, "uncommitted.patch")), true);
+  const savedTar = join(copy, "untracked.tar.gz");
+  assert.equal(existsSync(savedTar), true);
+  assert.match(execFileSync("tar", ["-tzf", savedTar], { encoding: "utf8" }), /loose\.txt/);
+  assert.equal(hostBackpointer, `${wt}/.git`);
 });
 
 test("W1-T14891 a shadowed state-disk worktree is preserve-retired: the state folder is mounted and a deeper mount covers its worktrees", () => {
