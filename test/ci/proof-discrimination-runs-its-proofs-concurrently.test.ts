@@ -8,7 +8,15 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type Criterion = { claim?: string; proof?: string; kind?: string; satisfied_by?: string };
 type ProofResult = { status: number | null; signal?: string | null; error?: string; stdout: string; stderr?: string };
-type Evaluation = Record<string, unknown>;
+type Evaluation = {
+  stale: Array<{ proof: string; head: string; base: string; output: string }>;
+  unreadable: Array<{ proof: string; detail: string }>;
+  executed: number;
+  credited: number;
+  guarded: number;
+  countDiscriminated: Array<{ proof: string; head: string; base: string }>;
+  judged: Array<{ proof: string; status: number | null; error?: string | null; stdout: string }>;
+};
 type Deps = Record<string, unknown>;
 
 const gate = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "proof-discrimination-gate.mjs")).href)) as {
