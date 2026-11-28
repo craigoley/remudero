@@ -23,6 +23,8 @@ import {
 import { LIVENESS_CHECK_MS, livenessInstances, watchInstanceLiveness } from "../src/lib/instance-gateway.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for craigoley/remudero-console.
+process.env.RMD_ESCALATION_REPOSITORY ??= "craigoley/remudero-console";
 
 const HOST = "57f3f3b98b48";
 const LAST_SWEEP = "2026-09-23T21:14:42.000Z";

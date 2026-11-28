@@ -27,6 +27,8 @@ import { JUDGE_SHADOW_TRIAL_ID } from "#src/lib/worker.js";
 const notJudgeShadow = (args: SpawnWorkerArgs): boolean => args.routingTrial?.id !== JUDGE_SHADOW_TRIAL_ID;
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for acme/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "acme/remudero";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 

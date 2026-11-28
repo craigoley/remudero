@@ -9,6 +9,8 @@ import { renderIssueBody, type AsyncIssueGateway, type OpenIssue } from "../src/
 import { appendLedger } from "../src/lib/ledger.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { ghShim } from "./helpers/gh-shim.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for o/r.
+process.env.RMD_ESCALATION_REPOSITORY ??= "o/r";
 
 const secret = "REFUSED PRIVATE TEXT: do not put this in a prompt";
 const comment = (id: number, over: Partial<EscalationIssueComment> = {}): EscalationIssueComment => ({

@@ -10,6 +10,8 @@ import { appendLedger } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { buildEscalationReconcileCandidatesAsync } from "#src/lib/tick-read-worker.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for o/r.
+process.env.RMD_ESCALATION_REPOSITORY ??= "o/r";
 
 const symptom = "sweep.escalation_reconcile.list_failed";
 const issue = { number: 17, url: "https://github.com/o/r/issues/17", body: "**Task:** PR-42\n" };

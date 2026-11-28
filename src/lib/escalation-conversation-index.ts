@@ -73,6 +73,9 @@ export type EscalationIndexReader = (query: { limit?: string | null; cursor?: st
 
 export interface EscalationIndexOptions {
   repository?: string;
+  /** W1-T14998: every repository this repository's escalation issues live in (the private route's, then its own,
+   *  legacy). Absent, only `repository`. */
+  issueRepositories?: readonly string[];
   threadStorePath?: string;
   readBoard: () => EscalationIndexBoard;
   clock?: Clock;
@@ -150,6 +153,7 @@ export function buildEscalationIndexSnapshot(deps: EscalationIndexOptions): Snap
   catch { board = { state: "unavailable", reason: "board read failed" }; }
   if (board.state !== "ready") reasons.push("The current board flags are unavailable.");
   if (!repository) reasons.push("No serving repository is configured.");
+  const issueRepositories = new Set((deps.issueRepositories ?? (repository ? [repository] : [])).map(r => r.toLowerCase()));
 
   let conflicts = 0, incompleteHistory = 0, unboundThreads = 0, truncated = false;
   type Saved = { threadId: string; identity: NonNullable<ReturnType<typeof parseThreadId>>; messages: ThreadMessage[]; urls: Set<string> };
@@ -165,7 +169,7 @@ export function buildEscalationIndexSnapshot(deps: EscalationIndexOptions): Snap
         for (const url of [m.extra?.escalation?.issueUrl, m.extra?.sourceImport?.issueUrl]) {
           if (typeof url !== "string") continue;
           const location = escalationIssueLocation(url);
-          if (!location || location.repository.toLowerCase() !== repository) foreign = true; else urls.add(url);
+          if (!location || !issueRepositories.has(location.repository.toLowerCase())) foreign = true; else urls.add(url);
         }
       }
       if (foreign) { conflicts++; continue; }
@@ -180,7 +184,7 @@ export function buildEscalationIndexSnapshot(deps: EscalationIndexOptions): Snap
   if (board.state === "ready" && repository) {
     for (const flag of board.flags) {
       const location = typeof flag?.issueUrl === "string" ? escalationIssueLocation(flag.issueUrl) : undefined;
-      if (!location || location.repository.toLowerCase() !== repository || typeof flag.taskId !== "string" || !flag.taskId) { conflicts++; continue; }
+      if (!location || !issueRepositories.has(location.repository.toLowerCase()) || typeof flag.taskId !== "string" || !flag.taskId) { conflicts++; continue; }
       const prior = flagsByUrl.get(flag.issueUrl);
       if (prior && prior.taskId !== flag.taskId) { rejectedUrls.add(flag.issueUrl); continue; }
       if (!prior) flagsByUrl.set(flag.issueUrl, flag);
