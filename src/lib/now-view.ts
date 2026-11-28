@@ -674,6 +674,16 @@ function snapshotFileIdentity(path: string): string {
   }
 }
 
+function planDirectoryIdentity(path: string): string {
+  try {
+    const stat = statSync(path, { bigint: true });
+    return stat.isDirectory() ? `${stat.dev}:${stat.ino}` : "not-directory";
+  } catch (error) {
+    // The plan read reports the failure. Keep its retry key stable until availability changes.
+    return `unavailable:${(error as NodeJS.ErrnoException).code ?? "unknown"}`;
+  }
+}
+
 function snapshotFileGeneration(root: string, owner: string, repo: string, main: string | undefined): string {
   return [boardSnapshotPath(root, owner, repo), boardOpenSnapshotPath(root, owner, repo), changedFilesCachePath(root, owner, repo)].map(snapshotFileIdentity).concat(main ?? "-").join(":");
 }
@@ -1204,7 +1214,7 @@ export function createNowView(opts: NowViewOptions): {
     const pin = path ? threadPlanPin(path) : "";
     // A cached empty plan expires when either directory goes away, even if both plan paths stay absent.
     const availability = !opts.readPlan && path && !pin && stamp === "-:-" && targetPlanAbsent(path, lstatSync)
-      ? `:absent:${snapshotFileIdentity(nowCheckout(instance)!)}:${snapshotFileIdentity(instance.ledgerDir)}` : "";
+      ? `:absent:${planDirectoryIdentity(nowCheckout(instance)!)}:${planDirectoryIdentity(instance.ledgerDir)}` : "";
     const publicKey = stamp + pin + availability;
     const revision = opts.catalogs?.revision(instance.ledgerDir);
     return revision && revision !== "off" ? `${publicKey}:ops:${revision}` : publicKey;
@@ -1634,7 +1644,9 @@ export function createNowView(opts: NowViewOptions): {
       const feedback = feedbackKey(instance);
       const keys = { plan: planKey(instance), github: githubKey(instance), feedback, decisions: decisionsKey(instance, feedback) };
       const h = held.get(instance.name);
-      const due = !h || h.db !== entry.db || h.generation !== entry.state.generation || h.planKey !== keys.plan || h.githubKey !== keys.github
+      // A remount can restore the identity of the last successful build. Publish its recovery anyway.
+      const due = !h || failed.has(instance.name) || h.db !== entry.db || h.generation !== entry.state.generation
+        || h.planKey !== keys.plan || h.githubKey !== keys.github
         || h.decisionsKey !== keys.decisions || now - h.at >= NOW_REFRESH_MS || resumed === true;
       if (!due) return true;
       b = { db: entry.db, ...(entry.lease ? { lease: entry.lease } : {}), state: entry.state, now, stage: 0, keys };

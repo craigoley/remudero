@@ -97,29 +97,38 @@ test("W1-T9519: unavailable instance plans fail visibly and a mounted checkout w
     instances: [{ state: { instance: "site", generation: 0, lease: "held", failures: 0, newestTs: null }, db }],
   });
   const failures = () => logged.filter((row) => row.step === "read_model.now_view_failed");
+  const recoveries = () => logged.filter((row) => row.step === "read_model.now_view_recovered");
 
+  utimesSync(ledger.dir, 0, 0);
   assert.equal(build(0).length, 0, "a missing managed clone must not publish an empty body");
   assert.equal(failures()[0]?.class, "plan-unreadable");
   assert.match(String(failures()[0]?.error), /ENOENT/);
 
+  writeFileSync(join(ledger.dir, "daemon-footprint.json"), "{}");
+  assert.equal(build(1).length, 0);
   mkdirSync(checkout, { recursive: true });
-  const [empty] = build(1);
+  const [empty] = build(2);
   assert.ok(empty, "the restored checkout can publish immediately even before it has a plan");
   assert.deepEqual(empty.data.board.tasks, []);
   assert.equal(failures().length, 1);
+  assert.equal(recoveries()[0]?.failures, 1, "a state directory write must not retry a missing clone");
 
+  utimesSync(checkout, 0, 0);
   const unmounted = join(root, "offline-state");
   renameSync(ledger.dir, unmounted);
-  assert.equal(build(2).length, 0, "losing the state directory invalidates the cached empty plan");
+  assert.equal(build(3).length, 0, "losing the state directory invalidates the cached empty plan");
   assert.equal(failures()[1]?.class, "unmounted");
   assert.equal(failures()[1]?.action, SERVE_MOUNT_ACTION);
 
+  writeFileSync(join(checkout, "README.md"), "site fixture");
+  assert.equal(build(4).length, 0);
   renameSync(unmounted, ledger.dir);
-  assert.ok(build(3)[0], "remounting state clears the failure");
+  assert.ok(build(5)[0], "remounting state clears the failure");
+  assert.equal(recoveries()[1]?.failures, 1, "a checkout directory write must not retry missing state");
   const planPath = join(checkout, "plan", "tasks.yaml");
   mkdirSync(join(checkout, "plan"));
   symlinkSync("missing.yaml", planPath);
-  assert.equal(build(4).length, 0, "a dangling plan link is an unreadable plan");
+  assert.equal(build(6).length, 0, "a dangling plan link is an unreadable plan");
   assert.deepEqual(failures().map((row) => row.class), ["plan-unreadable", "unmounted", "plan-unreadable"]);
   assert.match(String(failures()[2]?.error), /cannot read plan file/);
 
@@ -128,10 +137,10 @@ test("W1-T9519: unavailable instance plans fail visibly and a mounted checkout w
     `- id: ${id}\n  title: ${id} title\n  repo: ${repo}\n  type: implement\n  depends_on: [${deps}]\n  status: queued\n`;
   const foreign = task("EXT-T1", "another/repo", "EXT-T404");
   writeFileSync(planPath, foreign + task("SITE-T1", "site", ""));
-  const [populated] = build(5);
+  const [populated] = build(7);
   assert.deepEqual(populated?.data.board.groups.queued.slice().sort(), ["EXT-T1", "SITE-T1"]);
   writeFileSync(planPath, foreign + task("SITE-T1", "site", "SITE-T404"));
   utimesSync(planPath, clock.date(), clock.date());
-  assert.equal(build(6).length, 0, "an unresolved dependency on the instance's own task still fails the read");
+  assert.equal(build(8).length, 0, "an unresolved dependency on the instance's own task still fails the read");
   assert.match(String(failures()[3]?.error), /SITE-T1: depends_on unknown task 'SITE-T404'/);
 });
