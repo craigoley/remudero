@@ -18,7 +18,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve as resolvePath } from "node:path";
 import {
   computeBoardSnapshot,
@@ -858,11 +858,17 @@ export interface NowViewContext {
 export function nowInstancePlan(path: string, repo: string | undefined): Plan {
   return loadTargetPlanQuarantiningDuplicates(path, repo ?? "").plan;
 }
+function nowCheckout(instance: NowInstance): string | undefined {
+  if (instance.planPath) return instance.feedbackRoot ?? dirname(dirname(instance.planPath));
+  const name = instance.repo?.split("/")[1];
+  return name ? join(dirname(instance.ledgerDir), "repos", name) : undefined;
+}
+
 /** The instance checkout's plan: core's is serve's own; another's is its managed clone under `<root>/repos/<name>`. */
 export function nowPlanPath(instance: NowInstance): string | undefined {
   if (instance.planPath) return instance.planPath;
-  const name = instance.repo?.split("/")[1];
-  return name ? resolveRepoLayout(join(dirname(instance.ledgerDir), "repos", name)).planMonolith : undefined;
+  const checkout = nowCheckout(instance);
+  return checkout ? resolveRepoLayout(checkout).planMonolith : undefined;
 }
 
 type OpsLedgerRead =
@@ -1172,9 +1178,16 @@ export function createNowView(opts: NowViewOptions): {
   const readPlan = opts.readPlan ?? ((instance: NowInstance): Plan => {
     const path = nowPlanPath(instance);
     if (!path) throw new NowViewError(`instance ${instance.name} names no repository, so it has no plan`);
-    // An absent target plan is a healthy empty input (the daemon boots and idles in this case).
-    // Do not let that expected state become a recurring failed Now build. A pinned plan answers from its commit.
-    if (threadPlanPin(path) === "" && targetPlanAbsent(path)) return { tasks: [], byId: new Map() };
+    if (threadPlanPin(path) === "") {
+      // Only a mounted checkout can intentionally have no plan. lstat keeps dangling links out of this case.
+      if (targetPlanAbsent(path, lstatSync)) {
+        for (const dir of [instance.ledgerDir, nowCheckout(instance)!]) {
+          if (!statSync(dir).isDirectory()) throw new NowViewError(`${dir} is not a directory`);
+        }
+        return { tasks: [], byId: new Map() };
+      }
+      if (instance.name !== core) return nowInstancePlan(path, instance.repo);
+    }
     try {
       // The thread's one shared parse (and its pin): the task and workstreams views read this same object.
       return threadPlan(path);
@@ -1182,12 +1195,17 @@ export function createNowView(opts: NowViewOptions): {
       // deliberate: the shared parse is strict, so a foreign catalog task's unseen dependency id throws there and
       // recurred as read_model.now_view_failed. Re-read as the instance's daemon does; a real fault throws again.
       void error;
-      return loadTargetPlanQuarantiningDuplicates(path, instance.repo ?? "").plan;
+      return nowInstancePlan(path, instance.repo);
     }
   });
   const planKey = (instance: NowInstance): string => {
     const path = nowPlanPath(instance);
-    const publicKey = path ? planStamp(path) + threadPlanPin(path) : "none";
+    const stamp = path ? planStamp(path) : "none";
+    const pin = path ? threadPlanPin(path) : "";
+    // A cached empty plan expires when either directory goes away, even if both plan paths stay absent.
+    const availability = !opts.readPlan && path && !pin && stamp === "-:-" && targetPlanAbsent(path, lstatSync)
+      ? `:absent:${snapshotFileIdentity(nowCheckout(instance)!)}:${snapshotFileIdentity(instance.ledgerDir)}` : "";
+    const publicKey = stamp + pin + availability;
     const revision = opts.catalogs?.revision(instance.ledgerDir);
     return revision && revision !== "off" ? `${publicKey}:ops:${revision}` : publicKey;
   };
