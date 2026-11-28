@@ -2546,7 +2546,7 @@ export function readLiveStaticWork(opts: Pick<TestSlotOptions, "dir" | "hostname
     return { unread: `static records unreadable: ${String((error as Error)?.message ?? error)}` };
   }
   const now = (opts.clock ?? systemClock).now(), records: LiveStaticWork[] = [];
-  const foreign: { name: string; st: Stats; text: string; held: TestSlotHolder & { admittedAt?: string } }[] = [];
+  const foreign: { name: string; st: Stats; text: string; held: TestSlotHolder & { admittedAt?: string }; memoryBytes: number }[] = [];
   for (const name of names.sort()) {
     if (!STATIC_RECORD.test(name)) continue;
     let held: (TestSlotHolder & { admittedAt?: string }) | null, st: Stats, text: string | null;
@@ -2563,7 +2563,7 @@ export function readLiveStaticWork(opts: Pick<TestSlotOptions, "dir" | "hostname
     if (testSlotHolderStale(held, now, { hostname: host, bootId, isPidAlive, pidNamespace })) continue;
     if (process.platform === "linux" && !holderPidProbeable(held, { hostname: host, pidNamespace }) && held.bootId !== undefined &&
       held.bootId === bootId() && /^proc:[0-9]+$/.test(held.processStart ?? "")) {
-      foreign.push({ name, st, text: text!, held });
+      foreign.push({ name, st, text: text!, held, memoryBytes: held.memoryBytes });
       continue;
     }
     records.push({ name, label: held.label, pid: held.pid, memoryBytes: held.memoryBytes, admitted: held.admittedAt !== undefined,
@@ -2574,7 +2574,7 @@ export function readLiveStaticWork(opts: Pick<TestSlotOptions, "dir" | "hostname
     try { scan = (opts.processStartScan ?? scanProcessStarts)(); }
     catch (error) { scan = { complete: false, reason: `process start scan threw: ${String(error)}` }; }
     let removalUnread: string | undefined;
-    for (const { name, st: judgedStat, text: judgedText, held } of foreign) {
+    for (const { name, st: judgedStat, text: judgedText, held, memoryBytes } of foreign) {
       if (scan.complete && !scan.starts.has(held.processStart!)) {
         // Match the admission scan: remove a foreign record only after a complete initial-namespace scan proves its
         // kernel start ended. The exact inode and bytes are rechecked so a replacement record is never removed.
@@ -2594,7 +2594,7 @@ export function readLiveStaticWork(opts: Pick<TestSlotOptions, "dir" | "hostname
         }
         if (removed) continue;
       }
-      records.push({ name, label: held.label, pid: held.pid, memoryBytes: held.memoryBytes, admitted: held.admittedAt !== undefined,
+      records.push({ name, label: held.label, pid: held.pid, memoryBytes, admitted: held.admittedAt !== undefined,
         ...(held.processStart ? { processStart: held.processStart } : {}) });
     }
     if (removalUnread) return { unread: `foreign static record removal unread: ${removalUnread}` };

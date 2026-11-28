@@ -2086,13 +2086,10 @@ export function serveScenarioOf(rows: readonly TailRow[], now: number, coverageM
   return { scenario: "serve-stopped", basis: `serve silent ${Math.round(age / 1000)}s` };
 }
 
-/** One bounded snapshot for one start. `admitted`: its start runs whatever the verdict (a shadow-mode class). */
 /**
- * W1-T15179: what each admitted static stage still claims. INVARIANT never-counted-twice: its tree's rss+swap is already
- * out of MemAvailable, so only max(0, named peak - that) is charged; a process inside a reservation's recorded tree,
- * and the daemon's own main process, are left out of the tree (a reservation's resident and the daemon's growth count
- * them). A stage still waiting for admission holds nothing yet and is not charged. INVARIANT no-typecheck-no-change:
- * with no record the inputs carry nothing.
+ * W1-T15179: what each admitted static stage still claims. INVARIANT never-counted-twice: its tree's rss+swap is
+ * already out of MemAvailable, so only max(0, named peak - that) is charged; the daemon's own process is left out.
+ * A stage not yet admitted is not charged. INVARIANT no-typecheck-no-change: no record, no input.
  */
 function staticWorkOf(ports: ShadowMemoryPorts): Pick<ShadowInputs, "staticWork"> {
   if (ports.readStaticWork === undefined) return {};
@@ -2126,8 +2123,7 @@ function staticWorkOf(ports: ShadowMemoryPorts): Pick<ShadowInputs, "staticWork"
   const counted = new Set<string>();
   const records = admitted.map((r): StaticWorkCharge => {
     const peakMib = r.memoryBytes / 1024 ** 2;
-    // A record pid is in its writer's pid namespace. Kernel start time is boot-unique, so resolve it against
-    // the daemon's initial /proc before giving up on a worker inside a sandbox namespace.
+    // A sandboxed writer's pid is its own namespace's: find its boot-unique kernel start in the daemon's /proc.
     const resolvedPid = procs && r.processStart?.startsWith("proc:")
       ? [...procs].find(([, p]) => p.start === r.processStart)?.[0] ?? r.pid : r.pid;
     const root = procs?.get(resolvedPid);
@@ -2147,8 +2143,7 @@ function staticWorkOf(ports: ShadowMemoryPorts): Pick<ShadowInputs, "staticWork"
       if (pid !== daemonPid) descendants.push(pid);
       for (const [child, c] of procs) if (c.parent === pid) queue.push(child);
     }
-    // A daemon can own several concurrent typechecks. Attribute each record to its own tsc subtree when identifiable;
-    // only fall back to the full holder tree for non-daemon writers or when /proc/cmdline is unavailable.
+    // A daemon record owns its own tsc subtree; another writer, or an unread cmdline, keeps the holder tree.
     let selected = descendants;
     let cmdlineUnread: string | undefined;
     if (resolvedPid === daemonPid) {
@@ -2183,6 +2178,7 @@ function staticWorkOf(ports: ShadowMemoryPorts): Pick<ShadowInputs, "staticWork"
   return { staticWork: { records } };
 }
 
+/** One bounded snapshot for one start. `admitted`: its start runs whatever the verdict (a shadow-mode class). */
 export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts, policy: HostMemoryBudgetPolicy,
   options: { admitted?: boolean; strictEvidence?: boolean } = {}): ShadowInputs {
   const now = ports.clock.now();
