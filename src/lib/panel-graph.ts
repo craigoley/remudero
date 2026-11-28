@@ -6,7 +6,7 @@ import { readInboxGardenerStore, inboxGardenerPath, inboxRetirementFor, inboxOpe
  * re-prioritization has no schema support. History: docs/forensics/panel-graph.md. */
 
 import { readPage, readPageRequest, readSnapshotCursor, snapshotCursor, type ReadPageRequest } from "./read-page.js";
-import { adoptionFindingGone, adoptionLatestPath, readAdoptionLatest } from "./measurement-cadence.js";
+import { adoptionFindingGone, adoptionLatestPath, planTaskLanded, readAdoptionLatest } from "./measurement-cadence.js";
 import { createHash, randomUUID } from "node:crypto";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { inboxBoardReferents } from "./inbox-board-referents.js";
@@ -43,6 +43,7 @@ import {
   dispatchesWithoutNewOwnedPr,
   DEFAULT_MAX_TASK_DISPATCHES,
   readLedgerUnionMemoized,
+  isMergeCreditLine,
   type GhFailureReason,
   type GitHub,
   type LedgerLines,
@@ -1996,6 +1997,8 @@ export interface ClassifiedInbox {
   classifications: InboxClassification[];
   ledgerLines: LedgerLines;
   projection: Map<string, StatusProjection>;
+  /** W1-T15105: the ops tasks' dependency flags this pass judged declines on, which a decline records. */
+  opsDepsMerged?: OpsDepsMerged;
   attentionEvidence?: InboxAttentionEvidence;
   /** Every decline and restore receipt this pass read, when its archive read was complete: what the slow lane stores. */
   verdictReceipts?: readonly VerdictReceipt[];
@@ -2118,6 +2121,7 @@ function prepareInboxPass(
   boardReferents: ReturnType<typeof inboxBoardReferents>,
   archiveReleases: ReadonlyMap<string, string> = new Map(),
   verdictReceipts: readonly VerdictReceipt[] = readVerdictReceipts(join(deps.inboxRoot, "state")),
+  opsDepsMerged: OpsDepsMerged = new Map(),
 ): InboxPass {
   const { registryPath, draftsPath, inflightPath, adoptionPath } = inboxInputPaths(deps);
   const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
@@ -2162,7 +2166,10 @@ function prepareInboxPass(
     const task = declinedTask ? plan.byId.get(declinedTask) : undefined;
     if (!receipt || receipt.step !== "panel.proposal_declined" || !task) return classified;
     const deps = task.depends_on ?? [];
-    const depsAllMerged = deps.every((d) => { const t = plan.byId.get(d); return t !== undefined && isMerged(t); });
+    // W1-T15105: an ops task's flag is the one its decline recorded (proposalVerdictResponse); unreadable never lapses.
+    const depsAllMerged = opsDepsMerged.has(task.id) ? opsDepsMerged.get(task.id)
+      : deps.every((d) => { const t = plan.byId.get(d); return t !== undefined && isMerged(t); });
+    if (depsAllMerged === undefined) return classified;
     const lapse = declineLapse(receipt, currentDeclineState(receipt.observed_state, depsAllMerged), deps);
     // Classified as it would have been before the decline, with the reason it came back.
     return lapse ? { ...classifyWith(proposal, () => undefined), reopenedBecause: lapse.because } as InboxClassification : classified;
@@ -2217,13 +2224,18 @@ export function projectInboxPlan(deps: Pick<PanelGraphDeps, "ledgerPath" | "stat
   const referentPlan = deps.inboxReferentPlan && ((p: Plan) => combined === null ? (combined = deps.inboxReferentPlan!(p)) : combined);
   const referentDeps = { inboxReferentPlan: referentPlan };
   const boardReferents = withOpsOwnTaskReferents(referentDeps, plan, projection, openPrs, mergedPrs ?? [], statusDeps, readProposals);
-  return { projection, boardReferents, ...opsAskTasks(referentDeps, plan, projection, statusDeps, readProposals) };
+  const credited = () => mergeCreditedIds(ledgerLines ?? readLedgerLines(deps.ledgerPath));
+  return { projection, boardReferents, ...opsAskTasks(referentDeps, plan, projection, statusDeps, credited, readProposals) };
 }
+
+/** W1-T15105: per named ops task, whether every dependency landed; undefined when one is in no plan. */
+export type OpsDepsMerged = ReadonlyMap<string, boolean | undefined>;
 
 /** W1-T15105: asks are judged on the ops tasks they name; the public plan and projection are kept. */
 function opsAskTasks(deps: Pick<PanelGraphDeps, "inboxReferentPlan">, plan: Plan, projection: Map<string, StatusProjection>,
-  statusDeps: Parameters<typeof projectPlan>[1], readProposals?: () => readonly Proposal[]): { askPlan: Plan; askProjection: Map<string, StatusProjection> } {
-  const unchanged = { askPlan: plan, askProjection: projection };
+  statusDeps: Parameters<typeof projectPlan>[1], credited: () => ReadonlySet<string>, readProposals?: () => readonly Proposal[]):
+  { askPlan: Plan; askProjection: Map<string, StatusProjection>; opsDepsMerged: OpsDepsMerged } {
+  const unchanged = { askPlan: plan, askProjection: projection, opsDepsMerged: new Map() };
   const referentPlan = deps.inboxReferentPlan;
   if (!referentPlan || !readProposals) return unchanged;
   const askPlan = askTaskPlan(plan, readProposals(), () => referentPlan(plan));
@@ -2232,7 +2244,33 @@ function opsAskTasks(deps: Pick<PanelGraphDeps, "inboxReferentPlan">, plan: Plan
   const rows = projectPlan({ tasks, byId: new Map(tasks.map(task => [task.id, task])) }, {
     ...statusDeps, skipTasklessEscalations: true, skipUncreditedBuildWarning: true,
   });
-  return { askPlan, askProjection: new Map([...projection, ...rows]) };
+  const askProjection = new Map([...projection, ...rows]);
+  const full = referentPlan(plan);
+  return { askPlan, askProjection, opsDepsMerged: opsTaskDepsMerged(tasks, (id) => full?.byId.get(id) ?? askPlan.byId.get(id), askProjection, credited) };
+}
+
+/** W1-T15105: an ops task's dependencies are read on the full ops plan the verify-human judge reads
+ *  (parkedVerifyHumanCandidates in run-task.ts), never on the asks' plan, which lacks a dependency no ask names. */
+function opsTaskDepsMerged(tasks: readonly Task[], taskOf: (id: string) => Task | undefined, projection: Map<string, StatusProjection>,
+  credited: () => ReadonlySet<string>): OpsDepsMerged {
+  const out = new Map<string, boolean | undefined>();
+  let ids: ReadonlySet<string> | undefined;
+  for (const task of tasks) {
+    let merged: boolean | undefined = true;
+    for (const id of task.depends_on ?? []) {
+      const dep = taskOf(id);
+      if (dep === undefined) { merged = undefined; break; }
+      if (!planTaskLanded(dep, ids ??= credited()) && projection.get(id)?.merged !== true) merged = false;
+    }
+    out.set(task.id, merged);
+  }
+  return out;
+}
+
+function mergeCreditedIds(lines: readonly Record<string, unknown>[]): Set<string> {
+  const ids = new Set<string>();
+  for (const line of lines) if (isMergeCreditLine(line) && typeof line.task_id === "string") ids.add(line.task_id);
+  return ids;
 }
 
 function missingAskTasks(plan: Plan, proposals: readonly Proposal[]): Set<string> {
@@ -2361,12 +2399,13 @@ function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: strin
   const plan = loadPlanFn(deps.planPath);
   const readProposals = inboxProposalReader(deps);
   const ledgerLines = readLedgerLines(deps.ledgerPath);
-  const { projection, boardReferents, askPlan, askProjection } = projectInboxPlan(deps, plan, ledgerLines, readProposals);
+  const { projection, boardReferents, askPlan, askProjection, opsDepsMerged } = projectInboxPlan(deps, plan, ledgerLines, readProposals);
   const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
-  const pass = prepareInboxPass(deps, readProposals(), askPlan, askProjection, ledgerLines, anchorGrepFor(deps, sha), boardReferents);
+  const pass = prepareInboxPass(deps, readProposals(), askPlan, askProjection, ledgerLines, anchorGrepFor(deps, sha), boardReferents,
+    undefined, undefined, opsDepsMerged);
   // W1-T13188: a write classifies only the proposal it acts on; `proposals` stays whole for existence checks.
   const classified = only === undefined ? pass.proposals : pass.proposals.filter((p) => p.id === only);
-  return { plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: classified.map(p => pass.classifyOne(p, lapseDeclines)), ledgerLines, projection };
+  return { plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: classified.map(p => pass.classifyOne(p, lapseDeclines)), ledgerLines, projection, opsDepsMerged };
 }
 
 /** The plan's change stamp when it is read off disk: tasks.yaml plus every entry of its shard directory. */
@@ -2389,9 +2428,9 @@ function projectionDigest(projection: Map<string, StatusProjection>, boardRefere
 
 
 /** W1-T15105: the named ops tasks by content, so an ops-repo edit re-judges their asks; none keeps the public key. */
-function askTasksKey(plan: Plan, askPlan: Plan): string[] {
+function askTasksKey(plan: Plan, askPlan: Plan, opsDepsMerged: OpsDepsMerged): string[] {
   if (askPlan === plan) return [];
-  return [createHash("sha256").update(JSON.stringify(askPlan.tasks.slice(plan.tasks.length))).digest("hex")];
+  return [createHash("sha256").update(JSON.stringify([askPlan.tasks.slice(plan.tasks.length), [...opsDepsMerged].map(([id, merged]) => [id, merged ?? null])])).digest("hex")];
 }
 
 /** Every release is already a `ratify.approved` row, so this existing digest also invalidates
@@ -2413,6 +2452,7 @@ interface InboxFingerprint {
   projection: Map<string, StatusProjection>;
   askPlan: Plan;
   askProjection: Map<string, StatusProjection>;
+  opsDepsMerged: OpsDepsMerged;
   boardReferents: ReturnType<typeof inboxBoardReferents>;
   ledgerLines: LedgerLines;
   archiveReleases?: ReadonlyMap<string, string>;
@@ -2460,11 +2500,12 @@ function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readP
     plan = last?.planKey !== undefined && last.planKey === planKey ? last.plan : inboxPlan(deps);
   }
   const readProposals = inboxProposalReader(deps);
-  const { projection, boardReferents, askPlan, askProjection } = projectInboxPlan(deps, plan, ledgerLines, readProposals);
+  const { projection, boardReferents, askPlan, askProjection, opsDepsMerged } = projectInboxPlan(deps, plan, ledgerLines, readProposals);
   const archiveKey = archiveReleases?.size ? [...archiveReleases].sort(([a], [b]) => a.localeCompare(b)) : null;
   const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(askProjection, boardReferents), archiveKey,
-    ...askTasksKey(plan, askPlan)]);
-  return { key, writeKey: inboxWriteKey(inputs), sha, plan, planKey, readPlanSnapshot, readProposals, projection, askPlan, askProjection, boardReferents, ledgerLines, archiveReleases, verdictReceipts };
+    ...askTasksKey(plan, askPlan, opsDepsMerged)]);
+  return { key, writeKey: inboxWriteKey(inputs), sha, plan, planKey, readPlanSnapshot, readProposals, projection, askPlan, askProjection, opsDepsMerged,
+    boardReferents, ledgerLines, archiveReleases, verdictReceipts };
 }
 
 /**
@@ -2504,8 +2545,8 @@ export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?
   const reused = reusableResult(state, fp);
   if (reused !== undefined) return reused;
   const generation = state.generation = {};
-  const pass = prepareInboxPass(deps, fp.readProposals(), fp.askPlan, fp.askProjection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
-  const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(p => pass.classifyOne(p)), ledgerLines: fp.ledgerLines, projection: fp.projection };
+  const pass = prepareInboxPass(deps, fp.readProposals(), fp.askPlan, fp.askProjection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts, fp.opsDepsMerged);
+  const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(p => pass.classifyOne(p)), ledgerLines: fp.ledgerLines, projection: fp.projection, opsDepsMerged: fp.opsDepsMerged };
   holdInboxResult(state, generation, fp, result);
   return result;
 }
@@ -2585,7 +2626,7 @@ export async function classifyAllProposalsSliced(
   const generation = state.generation = {};
   const warmFailures = new Map<string, unknown>();
   const answers = new Map<string, boolean>();
-  const pass = prepareInboxPass(deps, fp.readProposals(), fp.askPlan, fp.askProjection, fp.ledgerLines, anchorGrepFor(deps, fp.sha, warmFailures, answers), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
+  const pass = prepareInboxPass(deps, fp.readProposals(), fp.askPlan, fp.askProjection, fp.ledgerLines, anchorGrepFor(deps, fp.sha, warmFailures, answers), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts, fp.opsDepsMerged);
   const run = async (): Promise<ClassifiedInbox> => {
     await warmInboxAnchors(deps, fp.sha, pass.proposals, warmFailures, answers);
     const classifications: InboxClassification[] = [];
@@ -2593,7 +2634,7 @@ export async function classifyAllProposalsSliced(
       if (i > 0) await yieldNow();
       for (const proposal of pass.proposals.slice(i, i + INBOX_CLASSIFY_SLICE)) classifications.push(pass.classifyOne(proposal));
     }
-    const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines, projection: fp.projection, attentionEvidence, ...receipts };
+    const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines, projection: fp.projection, opsDepsMerged: fp.opsDepsMerged, attentionEvidence, ...receipts };
     holdInboxResult(state, generation, fp, result);
     return result;
   };
@@ -4287,6 +4328,22 @@ function withDecisionKey(
   });
 }
 
+/** W1-T15105: an ops task's decline records the dependency flag the lift check re-reads (prepareInboxPass), not the
+ *  judge's, so the two never disagree; any other decline records the state its summary was judged on. */
+function declineObservedState(judged: string | undefined, proposalId: string, opsDepsMerged: OpsDepsMerged | undefined): string | undefined {
+  const taskId = /^verify-human:([A-Za-z0-9-]+)$/.exec(proposalId)?.[1];
+  const merged = taskId === undefined ? undefined : opsDepsMerged?.get(taskId);
+  return merged === undefined ? judged : currentDeclineState(judged, merged) ?? judged;
+}
+
+/** W1-T15105: a verify-human decline reads the catalog when its ask names a task the public plan lacks, as approve does. */
+function declineCatalogDeps(deps: PanelGraphDeps, kind: ProposalVerdictKind, proposalId: string): Promise<PanelGraphDeps> | undefined {
+  if (kind !== "decline" || deps.inboxReferentPlan || !proposalId.startsWith("verify-human:")) return undefined;
+  const proposal = inboxProposalReader(deps)().find(p => p.id === proposalId);
+  const plan = proposal && (deps.readPlanSnapshot ?? loadPlan)(deps.planPath);
+  return proposal && plan && missingAskTasks(plan, [proposal]).size > 0 ? askCatalogDeps(deps, plan, proposal) : undefined;
+}
+
 /** Both inbox verdict routes classify the proposal, then let {@link applyProposalVerdict} decide and record. */
 function proposalVerdictResponse(
   kind: ProposalVerdictKind,
@@ -4295,7 +4352,7 @@ function proposalVerdictResponse(
   actor: ProposalVerdictActor,
   respond: InboxVerbRespond,
 ): void {
-  const { proposals, classifications } = classifyInboxDecision(deps, input.proposalId, !actor.terminalVerdict);
+  const { proposals, classifications, opsDepsMerged } = classifyInboxDecision(deps, input.proposalId, !actor.terminalVerdict);
   if (refuseInformationalProposal(proposals, classifications, input.proposalId, respond)) return;
   const found = {
     exists: proposals.some((p) => p.id === input.proposalId),
@@ -4304,7 +4361,8 @@ function proposalVerdictResponse(
   const origin = actor.origin;
   const outcome = applyProposalVerdict(kind, input, found, (step, id, reason) => {
     // W1-T10077: a decline of a verify-human proposal records the state it was given on, so a material change can re-open it.
-    const observedState = step === "panel.proposal_declined" ? observedStateOfProposalSummary(proposals.find((p) => p.id === id)?.summary ?? "") : undefined;
+    const observedState = step === "panel.proposal_declined"
+      ? declineObservedState(observedStateOfProposalSummary(proposals.find((p) => p.id === id)?.summary ?? ""), id, opsDepsMerged) : undefined;
     const row = appendPanelLedger(deps.ledgerPath, step, id, origin, { reason, ...(observedState ? { observed_state: observedState } : {}) });
     // W1-T9252: the operator's action also lands on the item's thread; a store fault never fails the verb.
     recordRowThreadEvents({ ...row, task_id: id, origin, reason }, [{ id }], { threadStorePath: inboxThreadStorePath(deps.inboxRoot) }, deps.logProjection);
@@ -4470,10 +4528,13 @@ async function askCatalogDeps(deps: PanelGraphDeps, publicPlan: Plan, proposal: 
 
 export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxCausalScope): InboxVerbActions {
   const verdict = (kind: ProposalVerdictKind) =>
-    validatedInboxAction(validateDeclineProposal, (input, actor, respond) =>
-      withSkillDraftVerdictLock(dirname(deps.ledgerPath), input.proposalId, () =>
+    validatedInboxAction(validateDeclineProposal, (input, actor, respond) => {
+      const decide = (judged: PanelGraphDeps) => withSkillDraftVerdictLock(dirname(deps.ledgerPath), input.proposalId, () =>
         withDecisionKey(deps, input.idempotencyKey, { proposalId: input.proposalId, decision: kind, text: input.reason }, respond,
-          (answer) => proposalVerdictResponse(kind, deps, input, actor, answer))));
+          (answer) => proposalVerdictResponse(kind, judged, input, actor, answer)));
+      const catalog = declineCatalogDeps(deps, kind, input.proposalId);
+      return catalog ? catalog.then(decide) : decide(deps);
+    });
   const improvementReviewRequired = (proposalId: string, respond: InboxVerbRespond): boolean => {
     if (!proposalId.startsWith("improvement:")) return false;
     respond(409, { error: "improvement_review_required", detail: "Use this improvement's saved conversation to change its goal, request a draft, or review and file its exact draft." });

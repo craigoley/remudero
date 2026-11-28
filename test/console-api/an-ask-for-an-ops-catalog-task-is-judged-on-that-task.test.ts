@@ -3,7 +3,7 @@
 // asks on the public plan alone, so neither the release retirement nor the draft-free release could see the task.
 // 70 of the 141 task ids in the Waiting folder were ops-only.
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { updateProposalRegistry, type Proposal } from "#src/lib/inbox.js";
@@ -49,7 +49,7 @@ function fixture(t: TestContext, proposals: Proposal[], catalog: Plan | undefine
     ...(wired ? { inboxReferentPlan: () => { reads.referent++; return catalog; } } : {}),
     readInboxCatalog: async () => { reads.catalog++; return context(catalog); },
   };
-  return { deps, reads, approved };
+  return { deps, reads, approved, ledgerPath };
 }
 
 const states = (deps: PanelGraphDeps) =>
@@ -180,4 +180,63 @@ test("W1-T15105 criterion 3: invariant:public-plan-otherwise — an ask naming a
   const publicOnly = fixture(t, [ask(PUBLIC_ASK)], wideCatalog);
   assert.equal(projectInboxPlan(publicOnly.deps, corePlan, undefined, () => [ask(PUBLIC_ASK)]).askPlan, corePlan);
   assert.equal(publicOnly.reads.referent, 0, "the Inbox pass read no catalog");
+});
+
+// The review's probe of round 3: the judge reads W1-T9's dependency on the full ops plan, where W1-T5 has merged,
+// and records deps=1. No ask names W1-T5, so the asks' plan lacks it; a lift check read there saw deps=0 and
+// reopened the decline as "deps=1 is now deps=0".
+const OPS_DEP = "W1-T5";
+const judgedAsk = (deps: 0 | 1): Proposal => ({ id: PARKED_ASK, evidenceAnchors: [],
+  summary: `${OPS_PARKED} was filed \`verify: human\`.\nJudge provenance: decision=needs_operator; observed_state=${OPS_PARKED}:deps=${deps}:cited=0.\n\nA parked ask.` });
+const dependsOn = (dep: string, status: Task["status"]): Plan => plan(...corePlan.tasks,
+  { ...task(OPS_PARKED, "human"), depends_on: [dep] }, { ...task(OPS_DEP, "auto"), status });
+const declineRow = (deps: 0 | 1) => `${JSON.stringify({ ts: "2026-11-20T09:00:00.000Z", run_id: "PANEL-9", task_id: PARKED_ASK,
+  step: "panel.proposal_declined", origin: "fixture", reason: "not now", observed_state: `${OPS_PARKED}:deps=${deps}:cited=0` })}\n`;
+const declinedStates = async (deps: PanelGraphDeps) => [states(deps).get(PARKED_ASK), (await classifyAllProposalsSliced(deps, () => corePlan))
+  .classifications.find(c => c.proposalId === PARKED_ASK)].map(c => ({ state: c?.state, reopenedBecause: (c as { reopenedBecause?: string } | undefined)?.reopenedBecause }));
+const recordedState = (ledgerPath: string) => readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean)
+  .map(line => JSON.parse(line) as Record<string, unknown>).find(row => row.step === "panel.proposal_declined")?.observed_state;
+
+test("W1-T15105 criterion 1: a merged ops dependency no ask names still gives deps=1, so a declined ask stays declined", async (t) => {
+  const held = [{ state: "declined", reopenedBecause: undefined }, { state: "declined", reopenedBecause: undefined }];
+  const world = fixture(t, [judgedAsk(1)], dependsOn(OPS_DEP, "merged"));
+  appendFileSync(world.ledgerPath, declineRow(1));
+  assert.ok(!projectInboxPlan(world.deps, corePlan, undefined, () => [judgedAsk(1)]).askPlan.byId.has(OPS_DEP), "no ask names W1-T5");
+  assert.deepEqual(await declinedStates(world.deps), held, "the judge's deps=1 is the Inbox's deps=1: the decline holds");
+
+  // The decline itself records the flag the lift check reads, wired or not (serve's main thread reads the catalog).
+  for (const wired of [true, false]) {
+    const declining = fixture(t, [judgedAsk(1)], dependsOn(OPS_DEP, "merged"), wired);
+    let status = 0;
+    await buildInboxVerbActions(declining.deps).decline({ proposalId: PARKED_ASK, reason: "not now" }, { origin: "fixture" }, code => { status = code; });
+    assert.equal(status, 200);
+    assert.equal(recordedState(declining.ledgerPath), `${OPS_PARKED}:deps=1:cited=0`, `wired=${wired}: the decline records deps=1`);
+    assert.deepEqual(await declinedStates({ ...declining.deps, inboxReferentPlan: () => dependsOn(OPS_DEP, "merged") }), held);
+  }
+  // Judge and Inbox can read a dependency differently (a credit only a rotated ledger holds): the decline records the
+  // Inbox's own flag, so the next pass compares like with like and never claims a merge happened after the decline.
+  const drifted = fixture(t, [judgedAsk(0)], dependsOn(OPS_DEP, "merged"));
+  await buildInboxVerbActions(drifted.deps).decline({ proposalId: PARKED_ASK, reason: "not now" }, { origin: "fixture" }, () => undefined);
+  assert.equal(recordedState(drifted.ledgerPath), `${OPS_PARKED}:deps=1:cited=0`);
+  assert.deepEqual(await declinedStates(drifted.deps), held);
+});
+
+test("W1-T15105 criterion 1: an ops decline lapses when its dependency merges, and never on a dependency no plan holds", async (t) => {
+  let catalog = dependsOn(OPS_DEP, "queued");
+  const base = fixture(t, [judgedAsk(0)], catalog);
+  appendFileSync(base.ledgerPath, declineRow(0));
+  const live = { ...base.deps, inboxReferentPlan: () => catalog };
+  assert.deepEqual((await declinedStates(live)).map(c => c.state), ["declined", "declined"], "W1-T5 unmerged: deps=0 still");
+  catalog = dependsOn(OPS_DEP, "merged");
+  for (const c of await declinedStates(live)) {
+    assert.notEqual(c.state, "declined", "an ops-repo merge of W1-T5 re-opens the decline");
+    assert.equal(c.reopenedBecause, `${OPS_DEP} have merged since you declined this on 2026-11-20`);
+  }
+
+  // W1-T404 is in neither plan: the state the decline was given on cannot be re-read, so it holds, whatever it recorded.
+  for (const recorded of [0, 1] as const) {
+    const absent = fixture(t, [judgedAsk(recorded)], dependsOn("W1-T404", "queued"));
+    appendFileSync(absent.ledgerPath, declineRow(recorded));
+    assert.deepEqual((await declinedStates(absent.deps)).map(c => c.state), ["declined", "declined"], `recorded deps=${recorded}`);
+  }
 });
