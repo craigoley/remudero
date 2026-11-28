@@ -18,6 +18,8 @@
     - src/run-task.ts
     - src/lib/non-worker-verdict.ts
     - src/lib/analytics-timeseries.ts
+    - src/lib/dispatch-claim.ts
+    - src/lib/analytics-route.ts
     - test/dispatch/an-implement-run-that-ends-before-a-worker-is-assigned-records-why.test.ts
   status: queued
   attempts: 0
@@ -46,4 +48,7 @@
   falsifier: |
     Write the field for a run that assigned a worker and criterion 4 must fail. Count a run with no worker as completed and criterion 3 must fail. Restore and require all to pass.
   note: |
+    SCOPE 2026-11-27 (operator, fix-round NEEDS_SCOPE at 20972a2): files gain src/lib/dispatch-claim.ts (the boot sweep
+    writes orphan verdicts there without the assignment and last-stage fields, criterion 2) and src/lib/analytics-route.ts
+    (checkpoint-resumed analytics can count an unassigned run as completed, criterion 3).
     Once the reason is on the row, one query shows what ended the 525 runs.
