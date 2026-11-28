@@ -9,7 +9,7 @@ import { gardenStatePath, readGardenState, runGardenAsync, type GardenerDeps, ty
 import { productionPlanGardenOps, type PlanGardenOps, type PlanOpsRead } from "#src/lib/plan-gardener.js";
 import { parseTasksFromYaml } from "#src/lib/plan.js";
 import { PR_OPEN_SATISFIED_BY_MAIN_STEP } from "#src/lib/pr-open.js";
-import { buildRedesignSources, REDESIGN_JUDGED_STEP, redesignCandidates, redesignGardenSpec, type RedesignSources } from "#src/lib/redesign-gardener.js";
+import { buildRedesignSources, REDESIGN_JUDGED_STEP, redesignCandidates, redesignGardenSpec, redesignInventory, type RedesignSources } from "#src/lib/redesign-gardener.js";
 import { commentOnlyGrepProofRefusal, parseAcceptanceBlock, parseWhitelistedProof } from "#src/lib/review.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
@@ -123,6 +123,39 @@ test("W1-T14882 criterion 2: an ops amendment goes through the sealed ops landin
   const pending = readGardenState(gardenStatePath(w.deps.stateDir, "redesign"), ["amend", "retire"]).pending;
   assert.ok(pending?.targets?.length);
   assert.ok(!pending.targets.some((target) => target.target === signature), "the public PR cannot settle the ops signature");
+  const opsDecision = w.rows.find((row) => row.step === "redesign.ops_landing_submitted");
+  assert.deepEqual(opsDecision?.signatures, [signature]);
+  assert.equal((opsDecision?.evidence_keys as string[]).length, 1);
+  assert.ok(!pending.targets.some((target) => (opsDecision?.evidence_keys as string[]).includes(target.target)),
+    "the public PR cannot settle the ops evidence keys");
+});
+
+test("W1-T14882 criterion 2: submitted ops signatures stop filling later passes ahead of public work", async (t) => {
+  const w = fixture(t);
+  const opsIds = ["W1-T10", "W1-T20"];
+  const opsSources = new Map(opsIds.map((id, i) => [`plan/tasks.d/ops-${i}.yaml`, record(id)]));
+  const snapshot: Extract<PlanOpsRead, { outcome: "ok" }> = {
+    outcome: "ok", pin: PIN,
+    tasks: [...opsSources].flatMap(([rel, text]) => parseTasksFromYaml(text, rel)),
+    shards: new Map(opsIds.map((id, i) => [id, `plan/tasks.d/ops-${i}.yaml`])),
+    sources: opsSources,
+  };
+  writeFileSync(join(w.root, PUBLIC_SHARD), record("W1-T300"));
+  const sources = buildRedesignSources(w.deps, w.overrides, snapshot);
+  const first = await redesignInventory(sources, w.deps);
+  assert.deepEqual(first.actions.map((action) => action.target), opsIds);
+  const opsActions = first.actions;
+  assert.equal(opsActions.length, 2);
+  w.rows.push({ step: "redesign.ops_landing_submitted", ts: clock.iso(), signatures: opsActions.map((action) => action.signature),
+    evidence_keys: opsActions.flatMap((action) => action.keys) });
+
+  const nextSources = buildRedesignSources(w.deps, w.overrides, snapshot);
+  assert.deepEqual(redesignCandidates(nextSources).map((candidate) => candidate.id), ["W1-T300"]);
+  const second = await redesignInventory(nextSources, w.deps);
+  assert.deepEqual(second.actions.map((action) => action.target), ["W1-T300"]);
+  const publicSpec = redesignGardenSpec(w.deps, w.overrides, { read: async () => snapshot, land: () => {} });
+  const card = publicSpec.scorecard(second, { actions: second.actions, acting: ["amend"] });
+  assert.equal((card.signatures as string[]).length, 1, "the public scorecard only carries its own signature");
 });
 
 test("W1-T14882 criterion 2: an ops-only retirement uses its pinned record even when the public path coincides", async (t) => {
