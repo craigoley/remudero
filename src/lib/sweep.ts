@@ -23215,7 +23215,11 @@ export function createSweepFixAdmissionController(input: {
       };
       return { admitted: true, release: standIn ? undefined : () => {
         if (state === "gone") return;
+        // W1-T15115: a hand-off its child's entry already carries has nothing left here to give back, so its settlement
+        // reads and emits nothing; one never matched (a child that ended unseen) gives its charge back now.
+        const carried = state === "handed" && !held.includes(mine);
         state = "gone";
+        if (carried) return;
         drop();
         refresh();
         emit();
@@ -26007,7 +26011,13 @@ async function runSweepPinned(
         // W1-T15115: no child launched, so no entry will carry a handed-off charge: it goes back now.
         if (!launched && heldAdmission.handOffCharge !== undefined) heldAdmission.releaseCharge?.();
         if (!launched) releaseFixAdmissionLineage(path, owner);
-        else if (hosted !== undefined && !("abandoned" in hosted)) void hosted.settled.finally(() => releaseFixAdmissionLineage(path, owner)).catch((error: unknown) => {
+        // W1-T15115: a launched child that ends before its entry is ever seen (a recheck, hold or admission refusal in the
+        // child) leaves no entry to carry its handed-off charge, so the charge goes back at its settlement, with the lock.
+        // One its entry already carried releases nothing (the controller's release is a no-op then).
+        else if (hosted !== undefined && !("abandoned" in hosted)) void hosted.settled.finally(() => {
+          try { releaseFixAdmissionLineage(path, owner); }
+          finally { if (heldAdmission.handOffCharge !== undefined) heldAdmission.releaseCharge?.(); }
+        }).catch((error: unknown) => {
           // A failed release leaves the lock for the stale-holder check; record it so the leak is visible.
           log("sweep.fix.admission_release_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
         });

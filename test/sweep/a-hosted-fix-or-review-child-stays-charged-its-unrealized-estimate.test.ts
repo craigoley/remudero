@@ -17,8 +17,9 @@ import type { HostMemoryReading, ReadingEntry } from "#src/lib/host-memory-ledge
 import { RUN_CHILD_SCHEMA } from "#src/lib/run-child-contract.js";
 import { withRunChildReservation } from "#src/lib/run-child-reservation.js";
 import {
-  createSweepFixAdmissionController, liveHostedChildChargeMib, productionFixAdmissionResidents,
-  type FixAdmissionResidents, type OpenPrView,
+  DEFAULT_SWEEP_POLICY, createSweepFixAdmissionController, installDetachedWorkHost, liveHostedChildChargeMib,
+  productionFixAdmissionResidents, resetChildWork, runSweep,
+  type FixAdmissionResidents, type FixChildLaunch, type OpenPrView, type SweepDeps,
 } from "#src/lib/sweep.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
@@ -520,3 +521,108 @@ const BASE_ADMITTED = {
   "fits": 4, "fits, not-live trees": 4, "typical": 1, "nothing-live": 1, "refused": 0, "two reviews reserved": 3,
   "unreadable residency": 4, "stand-in worker budget": 3, "release and re-claim": 3,
 };
+
+/** A promise the test settles: a hosted child's end, or the host's return from its spawn. */
+function gate() {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => { open = resolve; });
+  return { open, opened };
+}
+
+/** One red PR the sweep dispatches a fix round for. */
+function redPr(): OpenPrView {
+  return { prNumber: 21154, prUrl: "https://github.com/acme/remudero/pull/21154", taskId: "W1-T15115", headSha: "46d78d6d",
+    headRefName: "run-W1-T15115-1795812282702", checksState: "red", reviewState: "pending", unmetCriteria: [], priorStrikes: 0,
+    autoMergeArmed: false, lastActivityAt: new Date().toISOString(), redRequiredChecks: ["coverage-shard (1/12)"],
+    ciFailures: [{ name: "coverage-shard (1/12)", logTail: "Error: a line no test executes" }] } as OpenPrView;
+}
+
+/**
+ * The production hand-off: runSweep's hostFixDispatch hands this controller's charge to the installed work host at the
+ * spawn, over the PR's fix admission lock. The controller reads this container's live entries; `spawn` is the host.
+ */
+async function handOffThroughTheSweep(t: { after: (fn: () => void) => void }, root: string,
+  spawn: (box: ReturnType<typeof container>) => Promise<FixChildLaunch | undefined>) {
+  const box = container();
+  const rows: Row[] = [];
+  const c = controller({ rows, headroomMib: FIX_MIB + 50, residents: () => box.residents() });
+  const sweepRows: Row[] = [];
+  const inProcess: number[] = []; // A round the host did not take runs in this process (and ends at once here).
+  const nowMs = Date.now();
+  t.after(() => { installDetachedWorkHost(undefined); resetChildWork(); });
+  installDetachedWorkHost({
+    hosts: new Set(["review", "fix-dispatch"]), mode: () => "on", spawnReview: async () => undefined,
+    spawnFix: () => spawn(box),
+  });
+  await runSweep([redPr()], {
+    ledgerPath: join(root, "ledger.ndjson"), runId: "SWEEP-W1T15115", now: () => nowMs, detachFixWait: true,
+    fixAdmissionLockDir: join(root, "fix-admission"),
+    readLedger: () => sweepRows, appendLine: (_path, row) => { sweepRows.push({ ...row }); },
+    log: (step, extra) => { sweepRows.push({ step, ...(extra ?? {}) }); },
+    claimFixAdmission: (view) => c.claim(view),
+    dispatchFix: (view) => { inProcess.push(view.prNumber); return false; },
+    arm: () => assert.fail("a red PR must not arm"), close: () => assert.fail("no close is due"),
+    escalate: () => assert.fail("nothing is escalated"),
+  } as SweepDeps, DEFAULT_SWEEP_POLICY);
+  return { box, rows, c, sweepRows, inProcess };
+}
+
+const settle = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise<void>((resolve) => setImmediate(resolve)); };
+
+test("W1-T15115 criterion 5: a handed-off child that ends before its entry is ever seen gives its charge back at its settlement", async (t) => {
+  const { dir: root } = ownedFixtureDir(t, "w1-t15115-unseen-child");
+  // The reviewer's shape: room for one fix (2,076 + 50 MiB), no live entry. The fix is admitted and handed to the host,
+  // which launches its child; the child ends (a recheck, hold or admission refusal) before this controller ever reads
+  // its entry. Nothing is live, so admission must read as origin/main again once the child has settled.
+  const ends = gate();
+  const launched = gate();
+  const run = await handOffThroughTheSweep(t, root, async () => {
+    launched.open();
+    return { runId: "work-fix-dispatch-unseen", settled: ends.opened };
+  });
+  await launched.opened;
+  assert.deepEqual(run.inProcess, [], "the host took the round");
+  assert.equal(run.rows.filter((row) => row.pending_reservations === 1).length > 0, true, "the sweep's claim was charged");
+  assert.equal(run.c.claim(pr).admitted, false, "launched, entry not yet visible: still charged");
+  assert.equal(run.rows.at(-1)!.pending_reservations, 1);
+  assert.equal(run.rows.at(-1)!.live_child_count, 0);
+
+  ends.open(); // The child ends; its entry never became visible to this controller.
+  await settle();
+  const freed = run.rows.at(-1)!;
+  assert.equal(freed.pending_reservations, 0, "its settlement gave the charge back");
+  assert.equal(freed.fix_admissions_available, 1);
+  assert.equal(freed.admission_rung, "fits");
+  assert.equal(run.c.claim(pr).admitted, true, "a later admission is granted");
+
+  // A child whose entry the controller saw has handed its charge over already: its settlement emits and frees nothing.
+  const { dir: seenRoot } = ownedFixtureDir(t, "w1-t15115-seen-child");
+  const seenEnds = gate();
+  const seen = await handOffThroughTheSweep(t, seenRoot, async (box) => {
+    box.live.push({ id: "seen-fix", workerClass: "fix", pid: 5_000_101, mib: 100 });
+    return { runId: "work-fix-dispatch-seen", settled: seenEnds.opened };
+  });
+  assert.equal(seen.c.claim(pr).admitted, false, "its entry carries the charge");
+  assert.equal(seen.rows.at(-1)!.pending_reservations, 0);
+  const before = seen.rows.length;
+  seenEnds.open();
+  await settle();
+  assert.equal(seen.rows.length, before, "a carried hand-off's settlement reads and emits nothing");
+  seen.box.live.pop(); // The run child's onEnd releases its entry.
+  assert.equal(seen.c.claim(pr).admitted, true, "nothing live: admitted as on origin/main");
+});
+
+test("W1-T15115 criterion 5: every hand-off that launches no child gives its charge back at once", async (t) => {
+  const outcomes: Array<[string, () => Promise<FixChildLaunch | undefined>]> = [
+    ["the host declines (stays in process)", async () => undefined],
+    ["the host's admission is abandoned", async () => ({ abandoned: true, reason: "admission-abandoned", runId: "r", waitedMs: 1 })],
+    ["the spawn throws", async () => { throw new Error("spawn failed"); }],
+  ];
+  for (const [name, spawn] of outcomes) {
+    const { dir: root } = ownedFixtureDir(t, `w1-t15115-${name.replace(/[^a-z]+/g, "-")}`);
+    const run = await handOffThroughTheSweep(t, root, spawn);
+    await settle();
+    assert.equal(run.rows.at(-1)!.pending_reservations, 0, name);
+    assert.equal(run.c.claim(pr).admitted, true, `${name}: a later admission is granted`);
+  }
+});
