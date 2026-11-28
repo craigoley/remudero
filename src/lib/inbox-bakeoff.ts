@@ -83,6 +83,10 @@ export interface InboxBakeoffPorts {
   runId?: string;
   /** Endpoint-resolved learned limit; omission leaves an unlearned deployment eligible. */
   learnedLimit?: (model: string) => number | undefined;
+  /** The production rung's kill switches, so a replay drafts as production does: `state/DRAFT_AUTOFIX_OFF` and
+   *  `state/DRAFT_RETRY_FULL_INDEX`. */
+  draftAutofix?: boolean;
+  retryFullIndex?: boolean;
 }
 
 /** The production `learnedLimit` port: each deployment's per-minute limit as its own endpoint last reported it
@@ -182,7 +186,9 @@ export async function runInboxBakeoff(deps: InboxBakeoffPorts): Promise<BakeoffR
         }
       }, log: (step, extra = {}) => void captured.push({
         step: step === "inbox.draft_error" && truncated.has(String(extra.proposal_id)) ? "inbox.draft_truncated" : step, extra,
-      }) },
+      }),
+      ...(deps.draftAutofix === undefined ? {} : { draftAutofix: deps.draftAutofix }),
+      ...(deps.retryFullIndex === undefined ? {} : { retryFullIndex: deps.retryFullIndex }) },
       runId,
     );
     const row = scoreCandidate(candidate, deps.proposals.length, captured, now() - started);

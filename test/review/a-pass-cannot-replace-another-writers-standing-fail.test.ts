@@ -8,6 +8,8 @@ import { appendLedger } from "#src/lib/ledger.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for acme/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "acme/remudero";
 
 const PR = "https://github.com/acme/remudero/pull/1";
 const FLEET_RUN = "review-PR1-fleet-semantic";

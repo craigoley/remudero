@@ -26,7 +26,7 @@ import { ledgerPathFor } from "./ledger-path.js";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
-import { escalationTaskId, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText, escalationHeadSha } from "./escalate.js";
+import { escalationListingIsRouted, escalationTaskId, issueGatewayRepository, issueUrlRepository, pooledIssueIsCodeRepositorys, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText, escalationHeadSha } from "./escalate.js";
 import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, classifyChangesRequested, pullReviewsRestArgs, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation, combinedStatusRestArgs, openPrsRestArgs, MERGE_STATE_HYDRATION_CAP, SCANNER_BLOCKER_HYDRATION_CAP, REVIEW_QUEUE_HOLD_READ_CAP, CODEQL_HEAD_ALERT_HYDRATION_CAP, WORKFLOW_RUN_HYDRATION_CAP, type MergeStateObservation, createHeadReadGate, recordHeadReadCounts, type HeadReadGate } from "./open-prs-rest.js";
 import { peekChangedHeads, pruneAcknowledgedChangedHeads } from "./github-event-wake.js";
 import { readDrainLock } from "./drain-lock.js";
@@ -339,6 +339,10 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   });
   return async (request: { plan: Plan; previousProjection?: Array<[string, StatusProjection]> }) => {
     const { plan } = request;
+    // W1-T14883: contiguous laps on one clock, so the stages sum to the read's own elapsed time.
+    const readStageMs: Record<string, number> = {};
+    let lapAt = systemClock.now();
+    const lap = (stage: string) => { const at = systemClock.now(); readStageMs[stage] = at - lapAt; lapAt = at; };
     reads = new Map();
     openFiles = createChangedFilesCache(config.root, owner, repo, fileOptions);
     generationClock++;
@@ -352,6 +356,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       log("read_plane.open_failed", { reason: openPrError });
     }
     recordHeadReadCounts(dirname(ledgerPath), headReadGate.counts());
+    lap("open_pr_reads");
     let prior = request.previousProjection;
     if (!prior) {
       const stored = readFileIfExists(join(config.root, "state", "status.json"));
@@ -371,6 +376,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       // W1-T14302: the target checkout's own plan holds the override rows; config.root/plan does not exist on the fleet.
       creditOverridePath: planCreditOverridePath(checkoutRoot),
     };
+    lap("prior_reads");
     let openBranches: PrRef[] | undefined;
     // W1-T14644: the settled derivation's phases, the last one written, ride the facts to the selection timing row.
     let projectionPhases: ProjectPlanPhases | undefined;
@@ -381,11 +387,14 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       observePhases: (phases) => { projectionPhases = phases; },
     });
     let projection = derive();
+    lap("projection_warm");
     await files.settle();
     await openFiles.settle();
+    lap("projection_file_settle");
     // Warm-up credit precedes its file evidence; only the settled derivation may publish it.
     credits = creditBefore;
     projection = derive();
+    lap("projection_settled");
     const openPrViews = openPrRows ? await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
       ciGateSource, log, ...io.viewsDeps, fetchAsync, pacer, planFilingFileCache: filingFiles, openPrRows, stageReuse,
       readMainPlan: () => plan, isMerged: (task) => projection.get(task.id)?.merged ?? false,
@@ -395,26 +404,33 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       const saved = filingFiles.save();
       if (!saved.ok) log("plan_filing_files.store_save_failed", { reason: saved.reason });
     }
+    lap("open_pr_views");
     const evidenceRootFor = io.evidenceRootFor ?? (() => checkoutRoot);
     const credit = () => buildCreditCandidates(owner, repo, plan, ledgerPath, log, github, evidenceRootFor, readLedgerLines, creditIo);
     const beforeCreditRead = credits;
     let creditCandidates = credit();
+    lap("credit_warm");
     await files.settle();
     await openFiles.settle();
+    lap("credit_file_settle");
     credits = beforeCreditRead;
     creditCandidates = credit();
+    lap("credit_settled");
     let escalationIntake: EscalationIntake | undefined;
     const escalationCandidates = await attachEscalationConditions(owner, repo, await buildEscalationReconcileCandidatesAsync(owner, repo, plan, ledgerPath, log, {
       github, issues: io.issues, evidenceRootFor, creditIo,
       onIntake: (intake) => { escalationIntake = intake; },
     }), openPrRows, fetchAsync);
+    lap("escalation_reads");
     const boardItems = openPrRows ? defaultBoardReviewItems(config, {
       resolveOwnerRepo: () => ({ owner, repo }), fetchOpenPrs: () => openPrRows,
       loadPlan: () => plan, projectPlan: () => projection,
     }) : [];
     const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, openPrViews);
+    lap("board_and_gate_views");
     const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
     const behindMainByPr = await buildBehindMainByPrAsync(owner, repo, openPrViews, fetchAsync, nextDistanceProbe(), baseChangedFilesByPr);
+    lap("behind_main_probes");
     const mergedFixPrNumbers = [...new Set(DEFAULT_FIX_CLASSES.map((entry) => entry.fixPrNumber))]
       .filter((number) => github.prByRef(number)?.state === "MERGED");
     const rawByNumber = new Map(openPrRows?.map((pr) => [pr.number, pr]));
@@ -427,13 +443,16 @@ export function createTickReadProducer(options: TickReadOptions, io: {
           : await (io.viewsDeps?.fetchCiFailureEvidenceAsync ?? fetchCiFailuresAsync)(owner, repo, raw.statusCheckRollup))
         : pr.ciFailures);
     }
+    lap("ci_failure_reads");
     const creditUpdates = Object.entries(credits)
       .filter(([id, value]) => JSON.stringify(value) !== JSON.stringify(creditBefore[id]))
       .map(([id, after]) => ({ id, before: creditBefore[id], after }));
     const closedPrs: ClosedPrFact[] = closedPrFacts(closedRows, closedAt, new Set(openPrRows?.map((pr) => pr.number)));
+    lap("assembly");
     return { plan, projection: [...projection], openBranches, openPrRows, openPrViews, openPrError, creditUpdates,
       creditCandidates, escalationCandidates, escalationIntake, boardItems,
-      staleGateWorkflowsByPr, behindMainByPr, baseChangedFilesByPr, mergedFixPrNumbers, postFixCiFailuresByPr, closedPrs, projectionPhases };
+      staleGateWorkflowsByPr, behindMainByPr, baseChangedFilesByPr, mergedFixPrNumbers, postFixCiFailuresByPr, closedPrs, projectionPhases,
+      readStageMs };
   };
 }
 
@@ -3617,8 +3636,9 @@ export async function buildEscalationReconcileCandidatesAsync(
   } = {},
 ): Promise<EscalationReconcileCandidate[]> {
   let open: OpenIssue[];
+  const source = injected.issues ?? ghIssueGatewayAsync(owner, repo);
   try {
-    open = await listRetirableEscalationIssuesAsync(injected.issues ?? ghIssueGatewayAsync(owner, repo))
+    open = await listRetirableEscalationIssuesAsync(source)
       .catch((error: unknown) => {
         if (injected.issues || !(error instanceof GhPaceFloorStandDownError) || error.resource !== "core") throw error;
         // GraphQL has a separate budget. Re-read both labels so a partial REST list cannot reach the closer.
@@ -3629,7 +3649,8 @@ export async function buildEscalationReconcileCandidatesAsync(
     return [];
   }
   return buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
-    ...injected, issues: { listOpen: () => open },
+    ...injected, issues: { listOpen: () => open }, routed: injected.routed ?? escalationListingIsRouted(owner, repo, source),
+    listedFrom: injected.listedFrom ?? issueGatewayRepository(source),
   });
 }
 
@@ -3651,6 +3672,10 @@ export function buildEscalationReconcileCandidates(
     // parameter. Omitted ⇒ {@link creditEvidenceRootFor}'s live git/config resolution.
     evidenceRootFor?: (owner: string, repo: string) => string | undefined;
     creditIo?: Pick<DeriveDeps, "readCreditStore" | "writeCreditStore">;
+    /** W1-T14998 — the listing is a routed pool other code repositories file in too. Omitted: read off the gateway. */
+    routed?: boolean;
+    /** W1-T14998 — the repository a routed listing was read from. Omitted: read off the gateway, else each issue URL's. */
+    listedFrom?: string;
   } = {},
 ): EscalationReconcileCandidate[] {
   const issues = injected.issues ?? ghIssueGateway(owner, repo);
@@ -3684,7 +3709,15 @@ export function buildEscalationReconcileCandidates(
     mergedPathsByPr: readMergedPathsByPr(evidenceRoot, MERGED_PATHS_SCAN_LIMIT, mergeLog),
   };
   const candidates: EscalationReconcileCandidate[] = [];
+  const codeRepository = `${owner}/${repo}`;
+  const routed = injected.routed ?? escalationListingIsRouted(owner, repo, issues);
+  const listedFrom = injected.listedFrom ?? issueGatewayRepository(issues);
   for (const issue of open) {
+    // W1-T14998: from a routed listing (an escalation repository other code repositories file in too, this one's own
+    // included), an issue recording another code repository, or recording none outside this code repository, is not
+    // this reconciler's: its task id and PR number are resolved HERE, so another repository's PR-<n> would otherwise be
+    // closed by this one's PR #<n>. An unrouted listing is this repository's own issues, never filtered by body.
+    if (routed && !pooledIssueIsCodeRepositorys(issue, codeRepository, listedFrom)) continue; // another repository's: its own reconciler's
     const taskId = escalationTaskId(issue.body);
     if (!taskId) {
       intake.droppedNoTaskTrailer++;
@@ -3844,7 +3877,9 @@ export async function attachEscalationConditions(
     };
     if (condition.currentHead !== condition.escalatedHead && condition.checksGreen && reads < MAX_ESCALATION_CLOSES_PER_CYCLE) {
       reads++;
-      condition.personReplied = await personCommented(owner, repo, c.issueNumber, read);
+      // W1-T14998: the issue's thread lives where it was filed, named by its own URL (the escalation repository).
+      const [issueOwner, issueRepo] = (issueUrlRepository(c.issueUrl) ?? `${owner}/${repo}`).split("/") as [string, string];
+      condition.personReplied = await personCommented(issueOwner, issueRepo, c.issueNumber, read);
     }
     out.push({ ...c, condition });
   }

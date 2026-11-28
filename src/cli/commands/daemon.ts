@@ -74,7 +74,7 @@ import { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS } from "../../lib/dep-review.js";
 import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
 import { instanceRegistryRuntimePresent, ledgerSelectedRegistryReadTimeouts, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
-import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
+import { escalate, escalateWithJudge, escalationIssueRepositories, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
 import { boardPrsRestArgs, createGhCallPacer, prStateFromRest, singlePrRestArgs } from "../../lib/open-prs-rest.js";
 import { buildMainHealthRung } from "../../lib/main-health-rung.js";
 import { ghEscalationAnswerGateway } from "../../lib/escalation-answers.js";
@@ -2684,6 +2684,8 @@ export async function daemonCommand(
     if (standby?.ports && standbyPromotion) logPromoted(standby.ports, standbyPromotion);
     // W1-T14644: the latest refresh's projection phases, held until the selection timing row takes them.
     let pendingRefreshMergedPhases: ProjectPlanPhases | undefined;
+    // W1-T14883: the same read's stage timings, held and taken the same way.
+    let pendingTickReadStages: Readonly<Record<string, number>> | undefined;
     // W1-T14893: the last published tick read, which `invalidate` does not clear, and the refill reader that may reuse it.
     let lastPublishedRead: { atMs: number; merged: ReadonlySet<string> } | undefined;
     const wakeMarkerPath = sweepWakeMarkerPath(config.root);
@@ -2693,6 +2695,7 @@ export async function daemonCommand(
       invalidate: () => { tickReadGeneration = undefined; tickReadStartedAtMs = tickReadClock.now(); },
       publish: (snapshot: ReadGeneration<TickReadFacts>) => {
         tickReadGeneration = snapshot;
+        pendingTickReadStages = snapshot.facts.readStageMs;
         lastRepairSnapshotGeneration = snapshot;
         lastProj = new Map(snapshot.facts.projection);
         boardOpenPrCount.reset();
@@ -2730,6 +2733,7 @@ export async function daemonCommand(
         // W1-T14893: the refill reuses the published tick read unless it is stale or a merge or push wake came since.
         refreshMergedForRefill: refillReader ? (plan) => refillReader.refill(plan) : undefined,
         takeRefreshMergedPhases: () => { const taken = pendingRefreshMergedPhases; pendingRefreshMergedPhases = undefined; return taken; },
+        takeTickReadStages: () => { const taken = pendingTickReadStages; pendingTickReadStages = undefined; return taken; },
         readLoopTelemetry: loopTelemetry.sample,
         readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId, footprint: daemonFootprint }),
         memoryGovernor: daemonMemoryGovernor,
@@ -3309,8 +3313,14 @@ export async function daemonCommand(
           targetCheckoutRoot,
           () => activePlanRef.current,
           // W1-T4471: the one real wiring of the owner-reply reader.
-          ghEscalationAnswerGateway(target.owner, target.repo, undefined, config.operatorGithubLogins,
-            config.contributorAdmission === undefined ? undefined : { settings: config.contributorAdmission }),
+          // W1-T14998: replies are read where escalations are filed; with none named, the code repository's legacy issues.
+          (function () {
+            const repositories = escalationIssueRepositories(target.owner, target.repo);
+            const [answerOwner, answerRepo] = repositories[0]!.split("/");
+            return ghEscalationAnswerGateway(answerOwner!, answerRepo!, undefined, config.operatorGithubLogins,
+              config.contributorAdmission === undefined ? undefined : { settings: config.contributorAdmission },
+              `${target.owner}/${target.repo}`, repositories.slice(1));
+          })(),
           gitCredentialSocket?.socketPath,
           keepLastServe(onePassPerGeneration(() => tickReadGeneration, readTick,
             () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),
