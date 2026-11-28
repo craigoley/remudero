@@ -886,9 +886,8 @@ export function failureRecordingPoster(): { post: (o: Parameters<typeof postRevi
   return {
     post: async (o) => {
       try {
-        // The guarded publisher owns the one renewal and retry. A nested App-token retry here can
-        // publish after the guarded path has already decided that its retry was refused.
-        await postReviewStatus(o, { reauth: async () => false });
+        // W1-T15030: the guarded publisher's postRenewingOnce owns the one renewal and retry; no re-mint runs in here.
+        await postReviewStatus(o);
         published = true;
         // W1-T15030: a retry that published clears the failure an earlier attempt recorded.
         threw = false;

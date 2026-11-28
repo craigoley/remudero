@@ -14062,10 +14062,9 @@ async function publishCappedHold(opts: PostReviewStatusGuardedOpts, verdict: Rev
   return { ...result, effectiveState: "pending", effectiveVerdict: held, cappedHold: refusal, reason: result.reason ?? refusal };
 }
 
-async function publishReviewStatusLockedImpl(opts: PostReviewStatusGuardedOpts, heldRetry?: HeldLintRetry): Promise<PostReviewStatusGuardedResult> {
-  // The guarded publisher owns the single 401 renewal below. Keep the raw poster's standalone reauth disabled here,
-  // or its retry loop can mint and retry independently before this wrapper gets control back.
-  const post = opts.post ?? ((status) => postReviewStatus(status, { reauth: async () => false }));
+async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts, heldRetry?: HeldLintRetry): Promise<PostReviewStatusGuardedResult> {
+  // W1-T15030: postRenewingOnce below owns the single 401 renewal; inside it this raw poster makes no re-mint of its own.
+  const post = opts.post ?? postReviewStatus;
   const freshnessRefusal = reviewerCodePublicationRefusal(opts.state, opts.reviewerCodeFreshness);
   if (freshnessRefusal !== undefined) {
     const freshness = opts.reviewerCodeFreshness!;
@@ -14359,8 +14358,6 @@ export interface ReviewOutboxEntry {
 export function reviewOutboxDir(ledgerPath: string): string {
   return join(dirname(ledgerPath), "review-outbox");
 }
-
-const publishReviewStatusLocked = publishReviewStatusLockedImpl;
 
 function reviewOutboxHash(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 24);
