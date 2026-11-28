@@ -95,7 +95,7 @@ import { parse as parseYaml } from "yaml";
 import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { buildBatchedGithub, buildLedgerIndex, ledgerGenerationOf, projectPlan, readLedgerLines, resolveEscalation, type BatchedPr, type BoardDeps, type GitHub, type LedgerIndex, type StatusProjection } from "./status.js";
-import { loadTargetPlanQuarantiningDuplicates } from "./drain.js";
+import { loadTargetPlanQuarantiningDuplicates, targetPlanAbsent } from "./drain.js";
 import { deriveOperatorItems } from "./status-board.js";
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
 import { threadPlan, threadPlanPin, threadPlanPinnedRef } from "./thread-plan.js";
@@ -1172,7 +1172,12 @@ export function createNowView(opts: NowViewOptions): {
   const readPlan = opts.readPlan ?? ((instance: NowInstance): Plan => {
     const path = nowPlanPath(instance);
     if (!path) throw new NowViewError(`instance ${instance.name} names no repository, so it has no plan`);
-    return instance.name === core ? threadPlan(path) : nowInstancePlan(path, instance.repo);
+    // An absent target plan is a healthy empty input (the daemon boots and idles in this case).
+    // Do not let that expected state become a recurring failed Now build.
+    if (targetPlanAbsent(path)) return { tasks: [], byId: new Map() };
+    // Read with the target-aware dependency policy: foreign catalog tasks may carry dependency ids
+    // that this checkout cannot hold. Core's thread pin is strict and turns those into view failures.
+    return loadTargetPlanQuarantiningDuplicates(path, instance.repo ?? "").plan;
   });
   const planKey = (instance: NowInstance): string => {
     const path = nowPlanPath(instance);
@@ -1362,8 +1367,9 @@ export function createNowView(opts: NowViewOptions): {
         // participate in question/answer projection; malformed values must not crash the view.
         const validLines = store.lines.filter((line): line is QuestionStoreLine =>
           typeof line === "object" && line !== null && !Array.isArray(line) &&
-          typeof line.task === "string" && typeof line.ts === "string" &&
-          (typeof line.question === "string" || typeof line.answer === "string"));
+          typeof line.task === "string" &&
+          ((typeof line.answer === "string" && line.answer.trim() !== "") ||
+            (typeof line.ts === "string" && typeof line.question === "string")));
         storeLines = validLines;
         const skipped = (store.skipped ?? 0) + store.lines.length - validLines.length;
         if (skipped) storeSkipped = `the question store has ${skipped} malformed line(s)`;
