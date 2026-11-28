@@ -30083,11 +30083,7 @@ async function runSweepPinned(
                     if (outcome === "updated" && deps.readLiveState) {
                       try {
                         refreshed = await deps.readLiveState(pr);
-                      } catch (error) {
-                        appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
-                          step: "sweep.update_branch.head_read_failed", pr_number: pr.prNumber, pr_url: pr.prUrl,
-                          head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
-                      }
+                      } catch { /* successful update; unreadable attribution leaves `new_head_sha` absent */ }
                     }
                     appendLine(deps.ledgerPath, {
                       run_id: deps.runId,
@@ -30929,11 +30925,7 @@ async function runSweepPinned(
         if (outcome === "updated" && deps.readLiveState) {
           try {
             refreshed = await deps.readLiveState(viewOf(target));
-          } catch (error) {
-            appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: target.taskId ?? "SWEEP",
-              step: "sweep.update_branch.head_read_failed", pr_number: target.prNumber, pr_url: target.prUrl,
-              head_sha: target.headSha, error: String((error as Error)?.message ?? error) });
-          }
+          } catch { /* successful update; unreadable attribution leaves `new_head_sha` absent */ }
         }
         appendLine(deps.ledgerPath, {
           run_id: deps.runId,
@@ -31346,6 +31338,9 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
       ...(c.matchingBaseFiles === undefined ? {} : { matching_base_files: c.matchingBaseFiles }),
       source: "light_pass",
     });
+    const readLive = (selected: ArmedStalledPr) => Promise.resolve()
+      .then(() => deps.readLiveState?.(byNumber.get(selected.prNumber)!))
+      .catch((): LiveStateResult => ({ ok: false }));
     // W1-T14315: the snapshot predates the base facts, so a PR that merged since reads its own files as main
     // moving under it. Each selected PR is read live before its write; a merged, closed or moved one stands
     // down and the slot passes to the next eligible candidate. An unreadable read refreshes as before.
@@ -31356,9 +31351,7 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
       target = pool.find((c) => c.prNumber === winner?.prNumber);
       if (!target) return undefined;
       const selected = target;
-      const readLive = () => Promise.resolve().then(() => deps.readLiveState?.(byNumber.get(selected.prNumber)!))
-        .catch((): LiveStateResult => ({ ok: false }));
-      const live = await (timing ? timing.measure("ready_update", readLive) : readLive());
+      const live = await (timing ? timing.measure("ready_update", () => readLive(selected)) : readLive(selected));
       const notOpen = live?.ok !== true ? undefined : terminalStateReason(live.state) ??
         (live.headSha !== undefined && live.headSha !== selected.headSha
           ? `head moved from ${selected.headSha} to ${live.headSha}` : undefined);
@@ -31376,9 +31369,7 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     try {
       const update = () => updateBranch(chosen);
       const outcome = await (timing ? timing.measure("ready_update", update) : update());
-      const after = outcome === "updated" ? await readLive() : undefined;
-      appendLine(deps.ledgerPath, { ...row, step: `sweep.update_branch.${outcome}`,
-        ...(after?.ok === true && typeof after.headSha === "string" ? { new_head_sha: after.headSha } : {}) });
+      appendLine(deps.ledgerPath, { ...row, step: `sweep.update_branch.${outcome}` });
     } catch (e) {
       appendLine(deps.ledgerPath, { ...row, step: "sweep.update_branch.error", error: String((e as Error)?.message ?? e) });
     }
@@ -31412,7 +31403,7 @@ export function armedRatchetRejudgeTargets(openPrs: readonly OpenPrView[], ledge
 export async function runArmedRatchetRejudge(
   openPrs: readonly OpenPrView[],
   deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "readLedger" | "appendLine" | "dryRun" | "now" |
-    "readMainTip" | "readMergedRatchets" | "readActionsStatusSummary" | "readMainChangedPaths">,
+    "readMainTip" | "readMergedRatchets" | "readActionsStatusSummary" | "readMainChangedPaths" | "readLiveState">,
 ): Promise<number[]> {
   const read = deps.readMergedRatchets;
   if (deps.dryRun || !read || !deps.readMainTip) return [];
@@ -31469,10 +31460,7 @@ export async function runArmedRatchetRejudge(
       if (outcome === "updated" && deps.readLiveState) {
         try {
           live = await deps.readLiveState(pr);
-        } catch (error) {
-          appendLine(deps.ledgerPath, { ...update, step: "sweep.update_branch.head_read_failed",
-            error: String((error as Error)?.message ?? error) });
-        }
+        } catch { /* successful update; unreadable attribution leaves `new_head_sha` absent */ }
       }
       appendLine(deps.ledgerPath, { ...update, step: `sweep.update_branch.${outcome}`,
         ...(live?.ok === true && typeof live.headSha === "string" ? { new_head_sha: live.headSha } : {}) });
@@ -33116,19 +33104,20 @@ function reviewInputQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>
   const minted = new Map<string, string>();
   const eligible = new Map<string, string>();
   const eligibleHeads = new Map<string, Set<string>>();
-  const sweepUpdates = new Map<string, Array<{ from: string; to?: string; at: number }>>();
+  const sweepUpdates = new Map<string, Array<{ from: string; to?: string; at: number; rowIndex: number }>>();
+  const eligibleEvents = new Map<string, Array<{ head: string; rowIndex: number }>>();
   const judgedHeads = new Set<string>();
   const isTime = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
   const first = (values: Map<string, string>, key: string, ts: string): void => {
     if (!values.has(key)) values.set(key, ts);
   };
-  for (const row of ledgerLines) {
+  for (const [rowIndex, row] of ledgerLines.entries()) {
     if (!isTime(row.ts)) continue;
     const prKey = String(row.pr_number);
     if (row.step === "sweep.update_branch.updated" && typeof row.head_sha === "string" && row.pr_number !== undefined) {
       sweepUpdates.set(prKey, [...(sweepUpdates.get(prKey) ?? []), {
         from: row.head_sha, ...(typeof row.new_head_sha === "string" ? { to: row.new_head_sha } : {}),
-        at: Date.parse(row.ts),
+        at: Date.parse(row.ts), rowIndex,
       }]);
       continue;
     }
@@ -33147,8 +33136,17 @@ function reviewInputQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>
       continue;
     }
     first(eligible, key, row.ts);
+    eligibleEvents.set(prKey, [...(eligibleEvents.get(prKey) ?? []), { head, rowIndex }]);
     const heads = eligibleHeads.get(prKey) ?? new Set<string>();
     eligibleHeads.set(prKey, heads.add(head));
+  }
+  // Older update rows may not carry `new_head_sha`; the next eligible head is the update's result.
+  for (const [prKey, updates] of sweepUpdates) {
+    const events = eligibleEvents.get(prKey) ?? [];
+    for (const update of updates) {
+      if (update.to !== undefined) continue;
+      update.to = events.find((event) => event.rowIndex > update.rowIndex && event.head !== update.from)?.head;
+    }
   }
   const nowIso = clockFromMillisFn(() => now).iso();
   /** W1-T15162: the unreviewed head a sweep branch update replaced with `head`, or undefined when `head` is new work. */
