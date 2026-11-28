@@ -92,7 +92,7 @@ test("W1-T14929 an unpublished home-tree HEAD with GitHub 422 is not treated as 
     const head = git(wt, "rev-parse", "HEAD").trim();
     r.shim.addRoute({
       when: `api repos/craigoley/remudero/commits/${head}/pulls`,
-      stderr: `gh: HTTP 422: No commit found for SHA ${head}`,
+      stderr: `gh: No commit found for SHA: ${head} (HTTP 422)\n{"message":"No commit found for SHA: ${head}","documentation_url":"https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit"}`,
       exit: 1,
     });
     age(wt, 10 * DAY_HOURS);
@@ -119,7 +119,7 @@ test("W1-T14929 an unpublished HEAD still checks related published PR tips", () 
     const head = git(wt, "rev-parse", "HEAD").trim();
     r.shim.addRoute({
       when: `api repos/craigoley/remudero/commits/${head}/pulls`,
-      stderr: `gh: HTTP 422: No commit found for SHA ${head}`,
+      stderr: `gh: No commit found for SHA: ${head} (HTTP 422)\n{"message":"No commit found for SHA: ${head}","documentation_url":"https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit"}`,
       exit: 1,
     });
     age(wt, 10 * DAY_HOURS);

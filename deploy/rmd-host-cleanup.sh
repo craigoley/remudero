@@ -976,7 +976,10 @@ home_tree_open_pr() {
         head_error="$(GH_PROMPT_DISABLED=1 perl -e 'alarm 20; exec @ARGV' "$gh" api "repos/$slug/commits/$head/pulls" --jq '[.[] | select(.state == "open")] | length' 2>&1)" && head_result="$head_error"
       fi
       if [ -z "${head_result:-}" ]; then
-        case "$head_error" in *'HTTP 422:'*|*'HTTP 422 '*|*'status: 422'*) continue ;; *) return 0 ;; esac
+        case "$head_error" in
+          *'HTTP 422:'*|*'HTTP 422 '*|*'status: 422'*|*'No commit found for SHA:'*'(HTTP 422)'*) continue ;;
+          *) return 0 ;;
+        esac
       fi
       n="$head_result"
       head_result=""
