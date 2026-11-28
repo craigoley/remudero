@@ -171,10 +171,10 @@ export interface Task {
    *  `compareDispatch` (lib/drain.ts); the §5C linter warns on a value outside [0, 99].
    *  Why: docs/forensics/plan.md#taskpriority. */
   priority?: number;
-  /** W1-T14360: why this task's merged fix may pass the freshness restart's minimum lifetime, set only when it is filed
-   *  as the fix for a live leak or storm. Read only by the expedite fast path (deploy-judge.ts `pendingExpedite`);
-   *  a blank value declares nothing. Unlike `priority`, it is an urgency signal. */
+  /** Reason used by the dispatch expedite lane and the deploy freshness fast path. A blank string declares nothing. */
   expedite?: string;
+  /** YAML type of an invalid expedite value, retained for the task linter. */
+  expedite_invalid?: string;
   /** Decorative/initial-state only — real merge state is derived from GitHub (`deriveStatus` in
    *  lib/status.ts) and never written back here; see CLAUDE.md on why this is not a completion signal. */
   status: TaskStatus;
@@ -751,6 +751,16 @@ function yamlTypeOf(v: unknown): string {
   return typeof v;
 }
 
+function taskExpediteFields(expedite: unknown, origin: unknown): Pick<Task, "expedite" | "expedite_invalid"> {
+  if (typeof expedite === "string") return { expedite };
+  if (expedite === true) {
+    const source = typeof origin === "string" ? origin.trim() : "";
+    return { expedite: source ? `expedite: true (origin ${source})` : "expedite: true (no origin)" };
+  }
+  if (expedite === false || expedite === undefined) return {};
+  return { expedite_invalid: yamlTypeOf(expedite) };
+}
+
 /** W1-T2908: validate acceptance before lint/review can throw on a cast YAML value (§5C).
  *  Falsifiers: numeric/boolean claims, scalar acceptance, and empty proof (previously lint-clean).
  *  YAML 1.2 `yes` is a string; use `true` to test booleans. Missing acceptance stays legal:
@@ -907,6 +917,7 @@ export function parseTasksFromYaml(
     if (!TASK_TYPES.includes(type as TaskType)) {
       throw new PlanError(`task ${id}: invalid type '${type}' (must be ${TASK_TYPES.join("|")})`);
     }
+    const expediteFields = taskExpediteFields(e.expedite, e.origin);
     const task: Task = {
       id,
       title: req(e.title as string, "title", id),
@@ -923,8 +934,7 @@ export function parseTasksFromYaml(
       risk,
       band_meaning: bandMeaning,
       priority: typeof e.priority === "number" ? e.priority : undefined,
-      // W1-T14360: only a string declares an expedite; any other value is none, so the floor holds.
-      ...(typeof e.expedite === "string" ? { expedite: e.expedite } : {}),
+      expedite: expediteFields.expedite,
       status,
       dispatch_hold: e.dispatch_hold as boolean | undefined,
       new_path_approval_ref: e.new_path_approval_ref as string | undefined,
@@ -957,6 +967,14 @@ export function parseTasksFromYaml(
       sourcePath: sourceLabel,
       ...(e.needs_input !== undefined ? { needs_input: readNeedsInput(e.needs_input) } : {}),
     };
+    // Invalid expedite metadata is for linting only. Keep it off enumerable contract fields so
+    // operatorReleasePin's structural hash cannot treat an invalid scheduling value as a term.
+    if (expediteFields.expedite_invalid !== undefined) {
+      Object.defineProperty(task, "expedite_invalid", {
+        value: expediteFields.expedite_invalid,
+        enumerable: false,
+      });
+    }
     byId.set(id, task);
     return task;
   });
