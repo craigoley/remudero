@@ -4,7 +4,7 @@ import { join, posix } from "node:path";
 
 import { backlogEvidence, backlogLandingGuard, judgeBacklog, ownProofsHoldOnMain, satisfiedByMainFromRows, type BacklogDisposition } from "./backlog-gardener.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import type { TaskFileInput } from "./feedback-landing.js";
+import { landTaskFilesAsync, type TaskFileInput, type TaskFilesLandingResult } from "./feedback-landing.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { gardenLedgerBucket, gardenStatePath, readGardenState, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { readMainHistory } from "./hot-file-gardener.js";
@@ -40,7 +40,10 @@ export const REDESIGN_JUDGED_STEP = "redesign.judged";
 const REDESIGN_SCORECARD_STEP = `${REDESIGN_NAME}.scorecard`;
 export const REDESIGN_OPS_LANDING_STEP = `${REDESIGN_NAME}.ops_landing_submitted`;
 export const REDESIGN_OPS_LANDING_RESULT_STEP = `${REDESIGN_NAME}.ops_landing_result`;
-const PLAN_OPS_LANDING_STEPS = new Set(["plan.ops_landing", "plan.ops_landing_failed", "plan.ops_landing_skipped"]);
+/** A submitted ops record no landing result answered for this long was lost (a restart, a skipped landing), so is released. */
+export const REDESIGN_OPS_LANDING_LOST_MS = 2 * 60 * 60_000;
+/** A refusal that judged nothing about the record's bytes: another edit holds the path, or main moved under it. */
+const UNJUDGED_REFUSAL = /^(?:another edit of .+ waits for its landing|origin\/main (?:does not hold|changed) )/;
 /** A hold younger than this is left to the fix lane's own next pass; an hour also bounds re-asking on a flapping hold. */
 export const REDESIGN_AFTER_MS = 60 * 60_000;
 /** BACKSTOP on spend: how many tasks one pass asks about. Each answer is one Architect spawn, and each landing is one
@@ -118,8 +121,6 @@ export interface RedesignSources {
   landingRefusal: (rel: string, text: string, pinnedBase?: string) => string | undefined;
   /** Signatures a landed PR carried, an open PR carries, or an operator's close declined: none is asked again. */
   settled: () => ReadonlySet<string>;
-  /** Signatures held by an in-flight or declined ops landing, read by the task runner through the handed-in `ledger`. */
-  opsSettled?: (ledger: RedesignSources["ledger"]) => readonly string[];
   /** A repo file's text at the Architect's head, or undefined when it is absent; lets the edit guard read a grep proof's
    *  target. Without it only a pattern that opens with a comment opener is judged. */
   readTarget?: (rel: string) => string | undefined;
@@ -134,17 +135,74 @@ const rowKeys = (r: Row, signatures: unknown): string[] => [
   ...(Array.isArray(r.evidence_keys) ? r.evidence_keys.map(String) : []),
 ];
 
-/** Attach a sealed plan landing's terminal result to the signatures that started it. */
-export function redesignOpsLandingResult(step: string, extra: Row, submission: Row | undefined): Row | undefined {
-  if (!PLAN_OPS_LANDING_STEPS.has(step) || submission === undefined) return undefined;
-  const hasHeldOutcome = (typeof extra.pr_url === "string" && extra.pr_url.length > 0) ||
-    Number(extra.landed) > 0 || Number(extra.waiting) > 0 || Number(extra.refused) > 0;
-  return {
-    ...submission,
-    ...extra,
-    step: REDESIGN_OPS_LANDING_RESULT_STEP,
-    failure: step !== "plan.ops_landing" || !hasHeldOutcome,
+/** One submitted ops record, keyed by its path and bytes: the edit carries its signature marker, so the bytes name it. */
+const opsRecordKey = (path: string, content: string) => ({ path, content_sha: createHash("sha256").update(content).digest("hex").slice(0, 16) });
+
+export interface RedesignOpsRecordOutcome { path: string; content_sha: string; outcome: "held" | "released"; reason: string }
+
+/**
+ * W1-T14882: what one landing call did with one submitted ops record, read from that record's own entries in the
+ * result, never from the queue's counts (they cover every staged file of the repository). A record the landing
+ * carries, queues, or refused on its own bytes (a preflight red main does not share, the same bytes set aside, a
+ * closed landing PR) stays held: it is in flight or declined. A record the landing never judged is released for
+ * another attempt: the preflight timed out, main was red or its probe could not run, another edit or main moved under
+ * it, or nothing was staged for it at all.
+ */
+export function redesignOpsRecordOutcome(result: TaskFilesLandingResult, input: Pick<TaskFileInput, "relPath" | "content">): RedesignOpsRecordOutcome {
+  const key = opsRecordKey(input.relPath, input.content);
+  const refusal = [...result.refused, ...result.setAside].find((r) => r.path === input.relPath);
+  if (refusal !== undefined) {
+    const unjudged = refusal.timedOut === true || refusal.mainRed === true || refusal.mainRedProbeError !== undefined ||
+      UNJUDGED_REFUSAL.test(refusal.reason);
+    return { ...key, outcome: unjudged ? "released" : "held", reason: refusal.reason };
+  }
+  if (result.landed.includes(input.relPath)) return { ...key, outcome: "held", reason: `carried by ${result.prUrl ?? "the landing pull request"}` };
+  if (result.waiting.includes(input.relPath)) return { ...key, outcome: "held", reason: result.error ?? "staged behind the landing" };
+  return { ...key, outcome: "released", reason: result.error ?? "the landing staged nothing for it" };
+}
+
+/**
+ * W1-T14882: the sealed landing the redesign pass's ops edits go through (productionPlanGardenOps' `landTaskFiles`),
+ * recording each submitted record's own outcome so the next pass holds or releases exactly that record's signatures.
+ */
+export function redesignOpsLandTaskFiles(log: GardenerDeps["log"], land: typeof landTaskFilesAsync = landTaskFilesAsync): typeof landTaskFilesAsync {
+  return async (root, inputs, opts) => {
+    let result: TaskFilesLandingResult;
+    try {
+      result = await land(root, inputs, opts);
+    } catch (error) {
+      // The owner logs the throw too; here it only releases the records it never judged.
+      const reason = `the landing threw: ${String((error as Error)?.message ?? error)}`;
+      log(REDESIGN_OPS_LANDING_RESULT_STEP, { records: inputs.map((i) => ({ ...opsRecordKey(i.relPath, i.content), outcome: "released", reason })) });
+      throw error;
+    }
+    log(REDESIGN_OPS_LANDING_RESULT_STEP, { pr_url: result.prUrl ?? null, records: inputs.map((input) => redesignOpsRecordOutcome(result, input)) });
+    return result;
   };
+}
+
+/**
+ * W1-T14882: the signatures and evidence keys ops landings still hold. Each submitted record is answered by the first
+ * result naming its path and bytes after it: held stays held, released frees it. One no result answered is in flight
+ * until REDESIGN_OPS_LANDING_LOST_MS, after which it was lost. Rows tie on `ts` in ledger order.
+ */
+export function redesignOpsHeld(rows: readonly Row[], now: number): string[] {
+  const records = new Map<string, { keys: string[]; at: number; outcome?: unknown }>();
+  const ordered = rows.map((row, index) => ({ row, index }))
+    .sort((a, b) => String(a.row.ts ?? "").localeCompare(String(b.row.ts ?? "")) || a.index - b.index);
+  for (const { row } of ordered) {
+    if (!Array.isArray(row.records)) continue;
+    for (const entry of row.records as unknown[]) {
+      if (entry === null || typeof entry !== "object") continue;
+      const record = entry as Row;
+      const id = `${String(record.path)}\0${String(record.content_sha)}`;
+      if (row.step === REDESIGN_OPS_LANDING_STEP) records.set(id, { keys: rowKeys(record, record.signatures), at: Date.parse(String(row.ts)) });
+      const submitted = records.get(id);
+      if (row.step === REDESIGN_OPS_LANDING_RESULT_STEP && submitted !== undefined && submitted.outcome === undefined) submitted.outcome = record.outcome;
+    }
+  }
+  return [...records.values()].filter((r) => r.outcome === "held" ||
+    (r.outcome === undefined && Number.isFinite(r.at) && now - r.at <= REDESIGN_OPS_LANDING_LOST_MS)).flatMap((r) => r.keys);
 }
 
 /** The tasks a person was asked to redesign and has not: a refusal-amendment pointer, or a PR the sweep holds. */
@@ -491,11 +549,11 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
       // row, which only a filed PR carries a url on, is what keeps that PR's signatures from a second PR.
       const landed = sources.ledger([REDESIGN_SCORECARD_STEP], fixedClock(0).iso())
         .filter((r) => typeof r.pr_url === "string" && Array.isArray(r.signatures)).flatMap((r) => rowKeys(r, r.signatures));
-      // Ops landings have their own PR lifecycle and are deliberately absent from the public scorecard. Once submitted,
-      // keep their signatures and evidence keys out of the Architect queue while that ops landing is in flight or has
-      // been declined; the public PR must never settle them on the ops catalog's behalf.
-      return new Set([...(state.pending?.targets ?? []), ...(state.declinedTargets ?? [])].map((t) => t.target)
-        .concat(landed, sources.opsSettled?.(sources.ledger) ?? []));
+      // Ops landings have their own PR lifecycle and are deliberately absent from the public scorecard: a submitted ops
+      // record's signatures and evidence keys are held only while its own landing outcome holds them (redesignOpsHeld),
+      // and the public PR never settles them on the ops catalog's behalf.
+      const ops = redesignOpsHeld(sources.ledger([REDESIGN_OPS_LANDING_STEP, REDESIGN_OPS_LANDING_RESULT_STEP], fixedClock(0).iso()), sources.clock.now());
+      return new Set([...(state.pending?.targets ?? []), ...(state.declinedTargets ?? [])].map((t) => t.target).concat(landed, ops));
     }),
   };
 }
@@ -517,7 +575,6 @@ export function redesignGardenSpec(
 ): GardenSpec<RedesignClass, RedesignInventory, RedesignAction, GardenCheckout> {
   const sources = buildRedesignSources(deps, overrides);
   let readOps: PlanOpsCatalog | undefined;
-  let opsLandingSequence = 0;
   const isPublic = (action: RedesignAction) => readOps === undefined || !readOps.shards.has(action.target);
   return {
     name: REDESIGN_NAME,
@@ -552,7 +609,7 @@ export function redesignGardenSpec(
     apply: (ws, plan) => {
       const date = sources.clock.date().toISOString().slice(0, 10);
       const landed: RedesignAction[] = [];
-      const opsInputs: TaskFileInput[] = [];
+      const opsInputs: Array<{ input: TaskFileInput; action: RedesignAction }> = [];
       for (const action of plan.actions) {
         const opsPath = readOps?.shards.get(action.target);
         const abs = join(ws.root, action.shard);
@@ -576,27 +633,26 @@ export function redesignGardenSpec(
               signature: action.signature, evidence_keys: action.keys });
             continue;
           }
-          opsInputs.push({ relPath: opsPath, content: edited.text, claim: redesignLandingClaim(action), proof });
+          opsInputs.push({ input: { relPath: opsPath, content: edited.text, claim: redesignLandingClaim(action), proof }, action });
         }
       }
       if (opsSeam && readOps && opsInputs.length > 0) {
-        const opsActions = plan.actions.filter((action) => readOps!.shards.has(action.target));
-        const attemptId = `${readOps.pin}:${++opsLandingSequence}`;
-        const opsSignatures = opsActions.map((action) => action.signature);
-        const opsEvidenceKeys = opsActions.flatMap((action) => action.keys);
+        // Only the records this landing carries are submitted; each is answered by its own outcome (redesignOpsHeld).
+        const records = opsInputs.map(({ input, action }) => ({ ...opsRecordKey(input.relPath, input.content), signatures: [action.signature], evidence_keys: action.keys }));
         deps.log(REDESIGN_OPS_LANDING_STEP, {
-          attempt_id: attemptId,
           pin: readOps.pin,
-          paths: opsInputs.map((input) => input.relPath),
-          signatures: opsSignatures,
-          evidence_keys: opsEvidenceKeys,
+          paths: opsInputs.map(({ input }) => input.relPath),
+          signatures: opsInputs.map(({ action }) => action.signature),
+          evidence_keys: opsInputs.flatMap(({ action }) => action.keys),
+          records,
         });
         try {
-          opsSeam.land(opsInputs, readOps.pin);
+          opsSeam.land(opsInputs.map(({ input }) => input), readOps.pin);
         } catch (error) {
+          const reason = `the landing threw: ${String((error as Error)?.message ?? error)}`;
           deps.log(REDESIGN_OPS_LANDING_RESULT_STEP, {
-            attempt_id: attemptId, signatures: opsSignatures, evidence_keys: opsEvidenceKeys, failure: true,
-            error: String((error as Error)?.message ?? error),
+            failure: true, error: String((error as Error)?.message ?? error),
+            records: records.map(({ path, content_sha }) => ({ path, content_sha, outcome: "released", reason })),
           });
         }
       }

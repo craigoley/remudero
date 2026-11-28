@@ -404,7 +404,7 @@ import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOvers
 import { assertOpsCheckoutAtPin, opsPlanLandingPreflight, planGardenSpec, productionPlanGardenOps } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
 import { queueJudgeGardenSpec, queueJudgeRouteWindow, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
-import { REDESIGN_OPS_LANDING_RESULT_STEP, REDESIGN_OPS_LANDING_STEP, redesignGardenSpec, redesignOpsLandingResult } from "./lib/redesign-gardener.js";
+import { redesignGardenSpec, redesignOpsLandTaskFiles } from "./lib/redesign-gardener.js";
 import { SCOUT_WINDOW_MS, scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, randomisedRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
@@ -29494,39 +29494,9 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "redesign": {
       const d = deps("redesign", raiseDuplicate);
       const judge = issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log });
-      let latestOpsSubmission: Record<string, unknown> | undefined;
-      const redesignDeps = {
-        ...d,
-        log: (step: string, extra: Record<string, unknown> = {}) => {
-          d.log(step, extra);
-          if (step === REDESIGN_OPS_LANDING_STEP) latestOpsSubmission = { ...extra };
-        },
-      };
-      const ops = productionPlanGardenOps({
-        repoRoot, stateDir, stateRoot: config.root,
-        log: (step, extra = {}) => {
-          log(step, extra);
-          const result = redesignOpsLandingResult(step, extra, latestOpsSubmission);
-          if (result) {
-            latestOpsSubmission = undefined;
-            log(String(result.step), result);
-          }
-        },
-      });
-      const pass = gardenPass(redesignGardenSpec(redesignDeps, {
-        judgeText: (prompt) => judge.judgeText(prompt, 0),
-        opsSettled: (ledger) => {
-          const rows = ledger([REDESIGN_OPS_LANDING_STEP, REDESIGN_OPS_LANDING_RESULT_STEP], new Date(0).toISOString());
-          const submissions = rows.filter((row) => row.step === REDESIGN_OPS_LANDING_STEP);
-          const failedAttempts = new Set(rows.filter((row) => row.step === REDESIGN_OPS_LANDING_RESULT_STEP &&
-            row.failure === true && typeof row.attempt_id === "string").map((row) => String(row.attempt_id)));
-          return submissions.filter((row) => typeof row.attempt_id !== "string" || !failedAttempts.has(String(row.attempt_id)))
-            .flatMap((row) => [
-              ...(Array.isArray(row.signatures) ? row.signatures.map(String) : typeof row.signatures === "string" ? [row.signatures] : []),
-              ...(Array.isArray(row.evidence_keys) ? row.evidence_keys.map(String) : []),
-            ]);
-        },
-      }, ops), d);
+      // W1-T14882: the plan case's ops source; its sealed landing records each redesign record's own outcome.
+      const ops = productionPlanGardenOps({ repoRoot, stateDir, stateRoot: config.root, log, landTaskFiles: redesignOpsLandTaskFiles(log) });
+      const pass = gardenPass(redesignGardenSpec(d, { judgeText: (prompt) => judge.judgeText(prompt, 0) }, ops), d);
       return withDue(async () => { await pass(); await ops.settled(); }, pass.due!);
     }
     case "queue-judge": {
