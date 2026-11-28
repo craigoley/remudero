@@ -138,6 +138,7 @@ test("W1-T14921 a tree on a branch keeps the watchdog verbs on tsx", async () =>
     for (const verb of VERBS) {
       const started = launch(root, verb);
       assert.deepEqual([started.bundled, started.entry], [false, undefined], `${verb} on branch main starts tsx`);
+
     }
   } finally {
     repo.cleanup();
