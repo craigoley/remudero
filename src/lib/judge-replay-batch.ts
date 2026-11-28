@@ -154,7 +154,9 @@ const PROBE_TASK = "You judge a machine-filed plan task before it may run withou
 const CONSEQUENCE_OPTIONS = ["LAND", "REPAIR", "LAND+DEBT", "STOP"];
 const CONSEQUENCE_TASK = "You choose what the automation does with a gate's deterministic finding. LAND closes it and continues; " +
   "REPAIR applies a computable repair and continues; LAND+DEBT continues and files bounded follow-up work; STOP stops, only " +
-  "when the finding is unrecoverable. No finding means the normal path.";
+  "when the finding is unrecoverable. No finding means the normal path. Choose REPAIR only when the finding names a repair " +
+  "the automation can compute and apply in this run. Choose LAND+DEBT when the change is safe and reversible and the " +
+  "remaining work is bounded follow-up. currentConsequence in the input is the gate's default before judgment, not the answer.";
 const ACTION_OPTIONS = ["proceed", "escalate"];
 const ACTION_TASK = "You read a risk judgment of a candidate change and choose whether ordinary work proceeds or the change is escalated to a human.";
 
