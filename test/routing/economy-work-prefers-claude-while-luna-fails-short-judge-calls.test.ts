@@ -3,7 +3,6 @@
 // on short economy calls. Balanced and frontier preferences are unchanged, and the auction still decides when Claude
 // is below its reserve or unreadable.
 import assert from "node:assert/strict";
-import { join } from "node:path";
 import test from "node:test";
 import { loadMounts, mountsPath } from "#src/lib/mounts.js";
 import {
@@ -12,8 +11,8 @@ import {
   type EffectiveProviderRoutingPolicy,
 } from "#src/lib/provider-routing-policy.js";
 import type { ProviderCapacity } from "#src/lib/worker-provider.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..", "..");
 const NOW = Date.parse("2026-11-27T18:00:00.000Z");
 
 function preferences(): Record<string, "claude" | "codex"> {
@@ -24,14 +23,14 @@ function preferences(): Record<string, "claude" | "codex"> {
 
 function policy(): EffectiveProviderRoutingPolicy {
   return {
-    committed: false,
+    provenance: "default",
+    committed: { enabledProviders: ["claude", "codex"], preference: "automatic", reservePercent: 5, parks: [], codexModelPreference: null },
     enabledProviders: ["claude", "codex"],
     routableProviders: ["claude", "codex"],
     preference: "automatic",
     reservePercent: 5,
     parks: [],
-    provenance: "default",
-  } as EffectiveProviderRoutingPolicy;
+  };
 }
 
 function capacity(provider: "claude" | "codex", usedPercent: number): ProviderCapacity {
