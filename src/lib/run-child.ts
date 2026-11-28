@@ -1456,6 +1456,8 @@ export interface DetachedWorkChildHost {
     envelope: object;
     /** W1-T13440: told the run id and an abort while the child waits for its reservation. */
     onPending?: (pending: RunChildPending) => void;
+    /** Re-reads the exact-head review claim in the daemon after child admission. */
+    reviewInFlight?: () => string | undefined;
   }) => Promise<{ runId: string; pid?: number; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | RunChildAbandoned | undefined>;
   spawnRetro: (input: { decision: Record<string, unknown> }) => ReturnType<DetachedWorkChildHost["spawnFix"]>;
 }
