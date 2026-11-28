@@ -445,6 +445,58 @@ test("W1-T15064 criterion 2: a changed test expectation is refused unless its fi
     "withRepo(() => {\n  assert.ok(a());\n});\n";
   assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base: wrapperBase,
     head: wrapperBase.replace("  assert.ok(a());\n", "  assert.ok(a());\n  assert.ok(b());\n") }]), []);
+  // A helper handed a callback is still an expectation: its other arguments are compared, its block bodies elided.
+  const withinBase = "import assert from \"node:assert/strict\";\n" +
+    "const within = (want: string, body: () => void) => { body(); assert.equal(branch(), want); };\n" +
+    "within(\"main\", () => {\n  assert.ok(a());\n});\n";
+  assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base: withinBase, head: withinBase.replace("within(\"main\"", "within(\"dev\"") }]),
+    [{ path: TEST, changed: ["within(\"main\", () => … )"] }], "a wrapper's expected argument is compared");
+  assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base: withinBase,
+    head: withinBase.replace("  assert.ok(a());\n", "  assert.ok(a());\n  assert.ok(b());\n") }]), [], "a line added inside it is not");
+  // This repo's own probes: an expected regex beside a callback, in two real test files.
+  const probes: Array<[string, string, string]> = [
+    ["test/github-event-wake-enforcement-contract.test.ts", "/enforceRatification.*required/",
+      "assertPolicyError(() => validatePolicy(raw), /enforceRatification.*required/)"],
+    ["test/policy.test.ts", "/proofTimeoutMs\\.value.*out of its declared bound/",
+      "throwsPolicyError(() => validatePolicy(raw), /proofTimeoutMs\\.value.*out of its declared bound/)"],
+  ];
+  for (const [path, regex, call] of probes) {
+    const text = readFileSync(join(REPO_ROOT, path), "utf8");
+    assert.ok(text.includes(call), `${path} still holds ${call}`);
+    assert.deepEqual(rewrittenTestExpectations([{ path, base: text, head: text.replace(regex, "/anything/") }]),
+      [{ path, changed: [call] }], `${path}: a helper's expected regex beside its callback is an expectation`);
+  }
+  // The same change, made by a real fix round no finding asks for, is refused at the rung and nothing is pushed.
+  const wakeText = readFileSync(join(REPO_ROOT, probes[0]![0]), "utf8");
+  const regexRound = await round([{ name: "unit", logTail: "✖ inbox guard\n    at released (src/inbox.ts:1:1)" }], (dir) => {
+    writeFileSync(join(dir, SOURCE), LOOSENED);
+    writeFileSync(join(dir, TEST), wakeText.replace(probes[0]![1], "/enforceRatification/"));
+  }, { testText: wakeText });
+  t.after(() => regexRound.repo.cleanup());
+  assert.equal(regexRound.spawns, 1);
+  assert.equal(regexRound.pushes, 0, "the round that changed an assertPolicyError regex does not push");
+  assert.deepEqual(refusalOf(regexRound.rows)?.tests, [TEST]);
+  assert.deepEqual(refusalOf(regexRound.rows)?.changed_assertions, [probes[0]![2]]);
+  // An inline table binds no name: a loop's iterable or a callback's receiver is the expectation of what reads it.
+  for (const inline of ["[[\"a\", 1]].forEach(([input, want]) => assert.equal(f(input), want));\n",
+    "for (const [input, want] of [[\"a\", 1]]) assert.equal(f(input), want);\n",
+    "Object.entries({ a: 1 }).forEach(([input, want]) => assert.equal(f(input), want));\n"]) {
+    const base = `import assert from "node:assert/strict";\n${inline}`;
+    assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base, head: base.replace("1", "2") }]),
+      [{ path: TEST, changed: ["assert.equal(f(input), want) (reads changed inline(input, want))"] }], inline);
+    assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base, head: `${base}assert.equal(g(), 3);\n` }]), [], inline);
+  }
+  // The control: a test's title is not a table its callback's parameter reads.
+  const titled = "test(\"old\", (t) => { t.assert.equal(f(t), 1); });\n";
+  assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base: titled, head: titled.replace("old", "new") }]), []);
+  // A function helper's return type is not its body, whatever brace it holds.
+  for (const signature of ["function near(actual: number, want: number): { ok: boolean }",
+    "async function near(actual: number, want: number): Promise<{ ok: boolean }>"]) {
+    const base = `import assert from "node:assert/strict";\n${signature} { assert.ok(Math.abs(actual - want) < 1e-9); return { ok: true }; }\n` +
+      "near(ratio(), 2);\n";
+    assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base, head: base.replace("near(ratio(), 2)", "near(ratio(), 1)") }]),
+      [{ path: TEST, changed: ["near(ratio(), 2)"] }], signature);
+  }
 
   // A harness merge round: resolving the conflict, the worker also flips the PR's own assertion, which main never had.
   // The finding names only the conflicted file, so the round pushes nothing.

@@ -311,6 +311,9 @@ function closing(tokens: readonly SourceToken[], open: number): number {
 }
 /** A word token: an identifier, or a contextual keyword the scanner names (`assert` scans as AssertKeyword). */
 const isName = (token: SourceToken | undefined) => token !== undefined && /^[A-Za-z_$][\w$]*$/.test(token.text);
+/** A literal value: a string, template, number, regular expression, `true`, `false` or `null`. */
+const isLiteral = ({ text }: SourceToken) => /^(?:["'`]|\.?\d|(?:true|false|null)$)/.test(text)
+  || (text.length > 1 && text.startsWith("/") && text !== "/=");
 const sliceOf = (text: string, tokens: readonly SourceToken[], from: number, to: number) =>
   text.slice(tokens[from]!.start, tokens[to]!.end).replace(/\s+/g, " ");
 
@@ -380,6 +383,26 @@ function statementEnd(tokens: readonly SourceToken[], i: number): number {
   return end;
 }
 
+/** After one of these, a return type's `{` opens an object type, not the body. */
+const TYPE_CONTINUES = /^(?:[:|&,<?]|=>|keyof|typeof|infer|extends|is|asserts|readonly|unique|new)$/;
+
+/** The body's `{` of a function whose parameter list closes at `close`, past a return type such as `: { ok: boolean }`
+ *  or `: Promise<{ ok: boolean }>`; the `;` ending a signature with none (an overload, `declare function`); or -1. */
+function functionBody(tokens: readonly SourceToken[], partner: readonly number[], close: number): number {
+  const typed = tokens[close + 1]?.text === ":";
+  let wantsType = false, angles = 0;
+  for (let k = close + 1; k < tokens.length; k++) {
+    const text = tokens[k]!.text;
+    if (text === ";" && angles === 0) return k;
+    if (text === "{" && !(typed && (wantsType || angles > 0))) return k;
+    if (OPENERS.has(text) && partner[k]! >= 0) { k = partner[k]!; wantsType = false; continue; }
+    if (text === "<") angles++;
+    else if (text === ">" && angles > 0) angles--;
+    wantsType = TYPE_CONTINUES.test(text);
+  }
+  return -1;
+}
+
 /** One declaration: the names it binds, the token range it spans, and whether it holds a function. */
 interface Declaration { names: string[]; from: number; to: number; callable: boolean }
 
@@ -391,10 +414,9 @@ function declarationsIn(tokens: readonly SourceToken[], partner: readonly number
     if (text === "function" && isName(tokens[i + 1]) && tokens[i - 1]?.text !== ".") {
       let params = i + 2;
       while (params < tokens.length && tokens[params]!.text !== "(") params++;
-      // The body's `{`; a signature with none (an overload, `declare function`) ends at its `;`.
-      let body = partner[params] ?? -1;
-      while (body >= 0 && body < tokens.length && tokens[body]!.text !== "{" && tokens[body]!.text !== ";") body++;
-      const to = body < 0 || body >= tokens.length ? tokens.length - 1
+      const close = partner[params] ?? -1;
+      const body = close < 0 ? -1 : functionBody(tokens, partner, close);
+      const to = body < 0 ? tokens.length - 1
         : tokens[body]!.text === ";" ? body : Math.max(partner[body]!, body);
       found.push({ names: [tokens[i + 1]!.text], from: i, to, callable: true });
       continue;
@@ -412,14 +434,21 @@ function declarationsIn(tokens: readonly SourceToken[], partner: readonly number
 /** What each name's value is computed from, file-wide: the names its declarations read, the names a `for…of`/`for…in`
  *  iterable reads (every one, so `Object.entries(TABLE)` binds to TABLE), and, for a callback's parameters, the
  *  names its call reads before it (`TABLE.forEach(([input, want]) => …)` binds both to TABLE). Scopes are not told
- *  apart, so a name declared twice reads from both. */
-function dataSources(tokens: readonly SourceToken[], declarations: readonly Declaration[],
-  { partner, parent }: { partner: readonly number[]; parent: readonly number[] }): Map<string, Set<string>> {
-  const sources = new Map<string, Set<string>>();
-  const bind = (locals: readonly string[], read: readonly string[]) => {
+ *  apart, so a name declared twice reads from both. A table written inline, in a loop's iterable or a callback
+ *  call's receiver (`[["a", 1]].forEach(([input, want]) => …)`), binds no name: it is kept as a declaration of its
+ *  own, `inline(input, want)`, which those locals read. */
+function dataSources(text: string, tokens: readonly SourceToken[], declarations: readonly Declaration[],
+  { partner, parent }: { partner: readonly number[]; parent: readonly number[] }):
+  { sources: Map<string, Set<string>>; inline: Map<string, string[]> } {
+  const sources = new Map<string, Set<string>>(), inline = new Map<string, string[]>();
+  const bind = (locals: readonly string[], read: readonly string[], from = 0, to = -1) => {
+    const literal = tokens.slice(from, to + 1).some(isLiteral);
+    const table = `inline(${locals.join(", ")})`;
+    if (literal && locals.length > 0) inline.set(table, [...(inline.get(table) ?? []), sliceOf(text, tokens, from, to)]);
     for (const local of locals) {
       const bound = sources.get(local) ?? new Set<string>();
       for (const name of read) if (name !== local) bound.add(name);
+      if (literal) bound.add(table);
       sources.set(local, bound);
     }
   };
@@ -433,7 +462,7 @@ function dataSources(tokens: readonly SourceToken[], declarations: readonly Decl
       while (of < close && !(parent[of] === open && (tokens[of]!.text === "of" || tokens[of]!.text === "in"))) of++;
       if (of >= close) continue;
       const first = ["const", "let", "var"].includes(tokens[open + 1]?.text ?? "") ? open + 2 : open + 1;
-      bind(namesIn(tokens, first, of - 1), namesIn(tokens, of + 1, close - 1));
+      bind(namesIn(tokens, first, of - 1), namesIn(tokens, of + 1, close - 1), of + 1, close - 1);
       continue;
     }
     // A callback: `(params) =>`, `name =>` or `function (params)`.
@@ -461,9 +490,10 @@ function dataSources(tokens: readonly SourceToken[], declarations: readonly Decl
       break;
     }
     if (callee === call) continue;
-    bind(namesIn(tokens, paramsFrom, paramsTo), [...namesIn(tokens, callee, call - 1), ...namesIn(tokens, call + 1, paramsFrom - 1)]);
+    bind(namesIn(tokens, paramsFrom, paramsTo), [...namesIn(tokens, callee, call - 1), ...namesIn(tokens, call + 1, paramsFrom - 1)],
+      callee, call - 1);
   }
-  return sources;
+  return { sources, inline };
 }
 
 /** The file's assertion heads: `assert`, `expect`, named node:assert imports, and every file-local function whose body
@@ -487,9 +517,28 @@ function assertionHeads(tokens: readonly SourceToken[], declarations: readonly D
   return heads;
 }
 
+/** The outermost block bodies, `{` to `}`, of the callbacks within tokens `from..to`: `() => { … }`, `function () { … }`. */
+function blockBodies(tokens: readonly SourceToken[], partner: readonly number[], from: number, to: number): Array<[number, number]> {
+  const blocks: Array<[number, number]> = [];
+  for (let k = from; k <= to; k++) {
+    let open = -1;
+    if (tokens[k]!.text === "=>") open = k + 1;
+    else if (tokens[k]!.text === "function") {
+      let params = k + 1;
+      while (params <= to && tokens[params]!.text !== "(") params++;
+      if (params <= to && partner[params]! >= 0) open = functionBody(tokens, partner, partner[params]!);
+    }
+    if (open < 0 || open > to || tokens[open]!.text !== "{" || partner[open]! < 0 || partner[open]! > to) continue;
+    blocks.push([open, partner[open]!]);
+    k = partner[open]!;
+  }
+  return blocks;
+}
+
 /** Each assertion in the file, whole, whitespace collapsed, with the names its arguments read: a call to an assertion
  *  head with its chained matchers. `t.assert.equal(…)` counts as `assert.equal(…)`. */
-function assertionsOf(text: string, tokens: readonly SourceToken[], heads: ReadonlySet<string>): Array<{ call: string; reads: Set<string> }> {
+function assertionsOf(text: string, tokens: readonly SourceToken[], heads: ReadonlySet<string>, partner: readonly number[]):
+  Array<{ call: string; reads: Set<string> }> {
   const found: Array<{ call: string; reads: Set<string> }> = [];
   const namedImports = namedAssertionImports(tokens);
   for (let i = 0; i < tokens.length; i++) {
@@ -501,10 +550,19 @@ function assertionsOf(text: string, tokens: readonly SourceToken[], heads: Reado
     if (tokens[at]?.text !== "(") continue;
     let end = closing(tokens, at);
     while (tokens[end + 1]?.text === "." && isName(tokens[end + 2]) && tokens[end + 3]?.text === "(") end = closing(tokens, end + 3);
-    // A local helper handed a callback (`withRepo(() => { … })`) wraps a block of test code: its own assertions are
-    // read one by one, so a line added inside it is not read as a rewrite of the whole block.
-    if (!BUILTIN_HEADS.has(head.text) && !namedImports.has(head.text)
-      && tokens.slice(at + 1, end).some((token) => token.text === "=>" || token.text === "function")) continue;
+    // A local helper handed a callback with a block body (`withRepo(() => { … })`) wraps test code: the call is
+    // compared with each block elided, so its other arguments (`assertPolicyError(() => …, /regex/)`) are still an
+    // expectation, and the assertions inside are read one by one, so a line added inside is not a rewrite.
+    const blocks = BUILTIN_HEADS.has(head.text) || namedImports.has(head.text) ? [] : blockBodies(tokens, partner, at + 1, end - 1);
+    if (blocks.length > 0) {
+      const kept: Array<[number, number]> = [];
+      let from = i;
+      for (const [open, close] of blocks) { kept.push([from, open - 1]); from = close + 1; }
+      kept.push([from, end]);
+      found.push({ call: kept.map(([a, b]) => sliceOf(text, tokens, a, b)).join(" … "),
+        reads: new Set(kept.flatMap(([a, b]) => namesIn(tokens, Math.max(a, at + 1), Math.min(b, end - 1)))) });
+      continue;
+    }
     found.push({ call: sliceOf(text, tokens, i, end), reads: new Set(namesIn(tokens, at + 1, end - 1)) });
     i = end;
   }
@@ -539,16 +597,18 @@ function changedDeclarations(base: Map<string, string[]>, head: Map<string, stri
 /** A test file read once: its assertions, its declarations, and what each name's value is computed from. */
 interface TestSource {
   assertions: Array<{ call: string; reads: Set<string> }>; declarations: Map<string, string[]>;
-  /** Read only when a declaration changed. */
+  /** What each name's value is computed from; `declarations` also holds each inline table it names. */
   sources: () => Map<string, Set<string>>;
 }
 const testSource = (text: string): TestSource => {
   const tokens = sourceTokens(text);
   const brackets = bracketsOf(tokens);
   const declared = declarationsIn(tokens, brackets.partner);
-  let sources: Map<string, Set<string>> | undefined;
-  return { assertions: assertionsOf(text, tokens, assertionHeads(tokens, declared)),
-    declarations: bindingDeclarationsOf(text, tokens, declared), sources: () => (sources ??= dataSources(tokens, declared, brackets)) };
+  const { sources, inline } = dataSources(text, tokens, declared, brackets);
+  const declarations = bindingDeclarationsOf(text, tokens, declared);
+  for (const [table, texts] of inline) declarations.set(table, texts);
+  return { assertions: assertionsOf(text, tokens, assertionHeads(tokens, declared), brackets.partner), declarations,
+    sources: () => sources };
 };
 
 /** One changed expectation: the assertion, and the changed declarations it reads (none when the assertion went). */
