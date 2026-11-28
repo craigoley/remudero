@@ -8,6 +8,7 @@
  * update first, never a search per task. The carry keeps which tasks each listed PR credits and the newest update
  * the listing has seen, so a later build lists only the PRs updated since.
  */
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import type { FlowRow } from "./field-trials-flow.js";
 import { readLastGoodOpsCatalogSnapshot, readOpsCatalogSnapshotAsync } from "./ops-catalog-source.js";
 import { planDestinationRepository } from "./plan-destination.js";
@@ -103,8 +104,10 @@ export async function readCaseFileCatalog(publicPlan: Plan, readOps: () => Promi
 export type ListPrsPage = (page: number) => Promise<ListedPr[]>;
 /** `gh pr view <n>`; throws on a failed read. */
 export type ViewPr = (number: number) => Promise<Record<string, unknown>>;
-/** The clock and the wait, taken from the seams that already carry them (no new deps shape). */
-export type CaseFilePacing = Required<Pick<CaseFileCommandInput, "nowIso">> & Required<Pick<GhReadCadenceDeps, "sleep">>;
+/** The clock and the wait, taken from the seams that already carry them (no new deps shape). W1-T14906: `remint`
+ *  renews the installation token once after a 401; it is absent when the pass holds no token it can renew. */
+export type CaseFilePacing = Required<Pick<CaseFileCommandInput, "nowIso">> & Required<Pick<GhReadCadenceDeps, "sleep">>
+  & { remint?: () => Promise<unknown> };
 
 /** PRIMARY CONTROL: the wait before the first retry of a read GitHub refused for its rate limit; doubled per
  *  retry, to 15 minutes. It paces retries only: every refused read is retried until it is answered. */
@@ -182,12 +185,34 @@ export function isRateLimited(error: unknown): boolean {
   return /rate limit|abuse detection|HTTP 429/i.test(text);
 }
 
+/** W1-T14906: a read GitHub refused with HTTP 401 (a dead or revoked token), as `gh` reports it. */
+export function isUnauthorized(error: unknown): boolean {
+  const text = error instanceof Error ? `${error.message} ${String((error as { stderr?: unknown }).stderr ?? "")}` : String(error);
+  return /HTTP 401|Bad credentials/i.test(text);
+}
+
+/** W1-T14906: GitHub kept refusing the pass's token, so the pass stopped and wrote nothing. */
+export class CaseFileTokenRefused extends RmdError {
+  constructor(target: string, cause: string, reminted: boolean) {
+    super("github", GENERIC_EXIT_CODE,
+      `GitHub refused ${target} with HTTP 401 ${reminted ? "after the token re-mint" : "and no token can be re-minted"}: ${cause}`);
+    this.name = "CaseFileTokenRefused";
+  }
+}
+
 async function paced<T>(pacing: CaseFilePacing, firstWaitMs: number, read: () => Promise<T>,
-  counts: { rateLimitWaits: number }): Promise<T> {
+  counts: { rateLimitWaits: number }, auth: { reminted: boolean }, target: string): Promise<T> {
   let wait = firstWaitMs;
   for (;;) {
     try { return await read(); }
     catch (error) {
+      // W1-T14906: one re-mint per pass and one retry; a 401 after it ends the pass instead of failing every read.
+      if (isUnauthorized(error)) {
+        if (auth.reminted || pacing.remint === undefined) throw new CaseFileTokenRefused(target, errorText(error), auth.reminted);
+        auth.reminted = true;
+        await pacing.remint();
+        continue;
+      }
       if (!isRateLimited(error)) throw error;
       counts.rateLimitWaits += 1;
       await pacing.sleep(wait);
@@ -214,13 +239,14 @@ export function ghPrListingPage(gh: (args: string[]) => Promise<string>, repo: s
  *  the next build lists the gap again; the PRs already listed still update the index. */
 async function listPrs(prior: FieldTrialsCaseFileCarry, listPage: ListPrsPage, pacing: CaseFilePacing, firstWaitMs: number,
   counts: { listPages: number; listedPrs: number; listFailed: number; rateLimitWaits: number },
-  readFailures: CaseFileReadFailure[]): Promise<Pick<FieldTrialsCaseFileCarry, "listedPrs" | "listedThrough">> {
+  readFailures: CaseFileReadFailure[], auth: { reminted: boolean }): Promise<Pick<FieldTrialsCaseFileCarry, "listedPrs" | "listedThrough">> {
   const listedPrs = { ...prior.listedPrs };
   let newest: string | undefined;
   for (let page = 1; ; page += 1) {
     let rows: ListedPr[];
-    try { rows = await paced(pacing, firstWaitMs, () => listPage(page), counts); }
+    try { rows = await paced(pacing, firstWaitMs, () => listPage(page), counts, auth, `PR listing page ${page}`); }
     catch (error) {
+      if (error instanceof CaseFileTokenRefused) throw error;
       counts.listFailed = 1;
       readFailures.push({ read: "list", target: `page ${page}`, error: errorText(error) });
       return { listedPrs, ...(prior.listedThrough === undefined ? {} : { listedThrough: prior.listedThrough }) };
@@ -269,7 +295,8 @@ export async function planFieldTrialsCaseFiles(source: FieldTrialsCaseFileSource
     prReadsCarried: 0, prReadsFailed: 0, rateLimitWaits: 0 };
   const prNumbers = new Map<string, number>();
   const readFailures: CaseFileReadFailure[] = [];
-  const listed = await listPrs(prior, listPage, pacing, firstWaitMs, counts, readFailures);
+  const auth = { reminted: false };
+  const listed = await listPrs(prior, listPage, pacing, firstWaitMs, counts, readFailures, auth);
   carry.listedPrs = listed.listedPrs;
   if (listed.listedThrough !== undefined) carry.listedThrough = listed.listedThrough;
   const creditedBy = new Map<string, number[]>();
@@ -301,11 +328,12 @@ export async function planFieldTrialsCaseFiles(source: FieldTrialsCaseFileSource
     counts.prReads += 1;
     try {
       const readAt = pacing.nowIso();
-      const raw = await paced(pacing, firstWaitMs, () => viewPr(number), counts);
+      const raw = await paced(pacing, firstWaitMs, () => viewPr(number), counts, auth, `PR #${number}`);
       const read = { readAt, raw };
       prReads.set(number, read);
       if (finished(raw)) carry.finishedPrs[String(number)] = read;
     } catch (error) {
+      if (error instanceof CaseFileTokenRefused) throw error;
       counts.prReadsFailed += 1;
       readFailures.push({ read: "view", target: String(number), error: errorText(error) });
     }
