@@ -159,12 +159,15 @@ export function repairDraftedFragment(
     }
 
     // A new title moves the slug, so the slug-named test it declared moves with it, or the title fix raises V2 itself.
-    if (checks.has("draft-path-missing") || checks.has("draft-test-unplaced") || title !== (stringOf(node, "title") ?? "")) {
+    const draftedTitle = stringOf(node, "title") ?? "";
+    if (checks.has("draft-path-missing") || checks.has("draft-test-unplaced") || title !== draftedTitle) {
       const expected = facts.expectedTestPath(title, files);
+      // The old title's slug test moves even when CREATES declares it: it is named for the placeholder, not a choice.
+      const stale = title !== draftedTitle ? facts.expectedTestPath(draftedTitle, files) : undefined;
       const design = stringOf(node, "design") ?? "";
       const creates = new Set([...design.matchAll(/^[ \t]*CREATES:[ \t]*(\S+)[ \t]*$/gm)].map((m) => m[1]));
       const misnamed = files.filter((path) => NEW_TEST_PATH.test(path) && path !== expected && !facts.pathExists(path)
-        && (!creates.has(path) || !isPlacedTestPath(path)));
+        && (path === stale || !creates.has(path) || !isPlacedTestPath(path)));
       const filesNode = node.get("files", true);
       if (misnamed.length === 1 && !files.includes(expected) && isSeq(filesNode)) {
         const from = misnamed[0];

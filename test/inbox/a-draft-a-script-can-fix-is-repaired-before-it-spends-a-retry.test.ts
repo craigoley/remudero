@@ -82,10 +82,21 @@ test("repairDraftedFragment moves an unplaced new test, its CREATES line include
 });
 
 test("repairDraftedFragment moves the slug-named test with a title it repairs", () => {
-  const dirty = withFile(BASE.replace('title: "Tighten', 'title: "NEW-1 Tighten'), "test/plan/new-1-tighten-the-empty-input-guard-in-parsetasksfromyaml.test.ts");
+  const old = "test/plan/new-1-tighten-the-empty-input-guard-in-parsetasksfromyaml.test.ts";
+  const dirty = withFile(BASE.replace('title: "Tighten', 'title: "NEW-1 Tighten'), old);
   const fixed = repairDraftedFragment(dirty, checks("draft-placeholder-title"), facts);
   assert.deepEqual(fixed.repaired, ["title:NEW-1", "test-path:NEW-1"]);
   assert.deepEqual(task(fixed.fragmentYaml).files, ["src/lib/plan.ts", SLUG_TEST]);
+  // The same move when the draft's design CREATES the old slug test, as the drafter writes a new test.
+  const declared = dirty.replace("  design: |\n", `  design: |\n    CREATES: ${old}\n`);
+  assert.ok(String(task(declared).design).includes(`CREATES: ${old}`), "fixture: the old slug test is CREATES-declared");
+  const moved = repairDraftedFragment(declared, checks("draft-placeholder-title"), facts);
+  assert.deepEqual(moved.repaired, ["title:NEW-1", "test-path:NEW-1"]);
+  assert.deepEqual(task(moved.fragmentYaml).files, ["src/lib/plan.ts", SLUG_TEST]);
+  assert.match(String(task(moved.fragmentYaml).design), new RegExp(`^CREATES: ${SLUG_TEST.replace(/[.]/g, "\\.")}$`, "m"));
+  const linted = lintDraftedFragmentWithRepair(declared, "P9", STAMP);
+  assert.deepEqual(task(linted.fragmentYaml).files, ["src/lib/plan.ts", SLUG_TEST], "the rung's repair moves it too");
+  assert.ok(!linted.fragmentYaml.includes(old), "no trace of the old slug test is left");
 });
 
 test("repairDraftedFragment sets a verify outside the enum to auto, or to human for a workflow-path task", () => {
