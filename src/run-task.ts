@@ -1121,6 +1121,7 @@ import {
   renderInbox,
   renderRatifyTelemetry,
   INBOX_DRAFT_DISALLOWED_TOOLS,
+  DRAFT_RETRY_FULL_INDEX_FILE,
   runDraftRung,
   captureInboxDraftSnapshot,
   inboxDraftGeneration,
@@ -38081,6 +38082,8 @@ export async function draftProposalBatch(
         repoFacts: checkoutRepoFacts(worktreePath),
         causalScope,
         lane,
+        indexMode: config.inboxDraftIndex,
+        topK: config.inboxDraftTopK,
         spawn: async (proposal, prompt, ctx) => {
           const spawnArgs = { ...buildInboxDraftSpawnArgs({
             cwd: worktreePath,
@@ -38126,6 +38129,7 @@ export async function draftProposalBatch(
         } : {}),
         cashFit: input => cashDraftFit(config, input),
         cashResumes,
+        retryFullIndex: existsSync(join(config.root, "state", DRAFT_RETRY_FULL_INDEX_FILE)),
         log,
       },
       runId,

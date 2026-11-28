@@ -32,7 +32,7 @@ const READ = ["api", "repos/fixture/loop/pulls/1"];
  *  `waits` lists every blocking sleep, and each sleep advances the clock. */
 function scene(opts: { gapMs?: number; agoMs?: number; floor?: string; stampText?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}shared-gap-`));
-  const env: NodeJS.ProcessEnv = { RMD_GH_CACHE_HOME: root, RMD_GH_TRANSPORT_FLOOR: opts.floor ?? "advisory" };
+  const env: NodeJS.ProcessEnv = { RMD_GH_CACHE_HOME: root, RMD_GH_TRANSPORT_FLOOR: opts.floor ?? "advisory", RMD_GH_COOLDOWN_S: "180" }; // W1-T15055
   if (opts.gapMs !== undefined) env.RMD_GH_SHARED_READ_GAP_MS = String(opts.gapMs);
   const stamp = ghReadCadenceStampPath(env, "core")!;
   stampGhRead(stamp, opts.stampText ?? "advisory\n", 1_800_000_000_000);

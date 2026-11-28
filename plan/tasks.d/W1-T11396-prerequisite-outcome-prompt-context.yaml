@@ -8,7 +8,7 @@
   risk: high
   band_meaning: span
   author_class: machine
-  status: queued
+  status: merged
   attempts: 0
   id: W1-T11396
   title: Recon and implementation prompts receive bounded verified prerequisite outcome references
