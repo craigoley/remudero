@@ -4,8 +4,8 @@ import { appendFileSync, readFileSync, rmSync } from "node:fs";
 import { fakeGitHubPullRequest, type FakePullHeadRead, type FakePullRequest } from "#test/helpers/fake-github.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import {
-  DEFAULT_SWEEP_POLICY, drainInFlightReviews, lightPassReviewQueuedAt, observeLightPassReviewEligibility, runSweep,
-  runSweepLightPass, UPDATE_HEAD_POLL_WAITS_MS, type OpenPrView, type SweepDeps,
+  buildSweepEffects, DEFAULT_SWEEP_POLICY, drainInFlightReviews, lightPassReviewQueuedAt, observeLightPassReviewEligibility,
+  runSweep, runSweepLightPass, UPDATE_HEAD_POLL_WAITS_MS, type BuildSweepEffectsDeps, type OpenPrView, type SweepDeps,
 } from "#test/helpers/sweep-test.js";
 
 // W1-T15162: a head made by the sweep's own branch update keeps the review queue place of the unreviewed head it
@@ -370,4 +370,44 @@ test("W1-T15162 criterion 2: invariant a-new-head-of-new-work-requeues — a pus
     assert.equal(await lightFirst(ledger, at("13:22:05"), [fixed, competitor]), 21112,
       "a head after a fix dispatch queues from its own eligibility");
   });
+});
+
+test("W1-T15162: the default commit-parent reader returns GitHub's parent shas and reads a body without a parent list as unreadable", async () => {
+  const { dir, path: ledgerPath } = writeLedger();
+  const bodies: unknown[] = [
+    { parents: [{ sha: "ba824f8" }, { sha: "main-tip" }, {}] },
+    { sha: "bb74b21" },
+    undefined,
+    { parents: "ba824f8" },
+  ];
+  const reads: string[][] = [];
+  try {
+    const effects = buildSweepEffects({
+      owner: "o", repo: "r", repoRoot: process.cwd(), localRepoName: "r",
+      config: { root: dir, claudeBin: "/bin/true" } as BuildSweepEffectsDeps["config"],
+      ledgerPath, runId: "sweep-update-parents-test",
+      plan: { tasks: [], byId: new Map() } as unknown as BuildSweepEffectsDeps["plan"],
+      log: () => {}, policy: DEFAULT_SWEEP_POLICY, reviewRunner: async () => 0,
+      issuesImpl: { create: () => "https://github.com/o/r/issues/1" }, stallNotice: () => {},
+      armImpl: undefined, armSessionPrsOverride: true, updateBranchImpl: async () => "updated",
+      captureRepairFeedbackImpl: () => {}, ghRunImpl: () => {}, spawnWallClockBoundMsOverride: 1,
+      reclaimWorkerImpl: () => {}, disarmImpl: () => undefined,
+      readJsonImpl: async (args) => {
+        reads.push(args);
+        return bodies.shift();
+      },
+      updatePrBodyImpl: async () => {},
+      registeredWorktreeOwnerImpl: () => undefined,
+      registeredOwnerRecovery: { capture: () => undefined, remove: () => undefined },
+    });
+    const subject = pr(21097, at("10:21:00"), "ba824f8");
+    assert.deepEqual(await effects.readCommitParents!(subject, "bb74b21"), ["ba824f8", "main-tip"]);
+    assert.deepEqual(reads[0], ["api", "repos/o/r/git/commits/bb74b21"]);
+    assert.equal(await effects.readCommitParents!(subject, "bb74b21"), undefined, "a commit body with no parent list");
+    assert.equal(await effects.readCommitParents!(subject, "bb74b21"), undefined, "no body at all");
+    assert.equal(await effects.readCommitParents!(subject, "bb74b21"), undefined, "a parent field that is not a list");
+    assert.equal(reads.length, 4);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
