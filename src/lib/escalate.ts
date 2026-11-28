@@ -2365,8 +2365,8 @@ export function ghIssueGateway(
     opts.exec ??
     ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   if (route.outcome === "unfiled") {
-    // Unrouted: the code repository's own issues, unfiltered, exactly as before this task.
-    const local = issueGatewaySteps(code, run, runStepsSync) as IssueGateway;
+    // Unrouted: the code repository's own issues as before this task, less another repository's recorded ones.
+    const local = withoutOtherRecordedIssues(issueGatewaySteps(code, run, runStepsSync), code) as IssueGateway;
     if (opts.exec === undefined) asyncIssueTwins.set(local, ghIssueGatewayAsync(owner, repo, { destination: () => route }));
     return local;
   }
@@ -2387,7 +2387,7 @@ export function ghIssueGatewayAsync(
   const route = escalationIssueRoute(opts, code);
   if (route.outcome === "unfiled" && route.unrouted !== true) return unfiledIssueGateway(route.reason);
   const run = opts.exec ?? ((args: string[]) => ghTextAsync(args));
-  if (route.outcome === "unfiled") return issueGatewaySteps(code, run, runStepsAsync); // unrouted: as ghIssueGateway's
+  if (route.outcome === "unfiled") return withoutOtherRecordedIssues(issueGatewaySteps(code, run, runStepsAsync), code); // as ghIssueGateway's
   const raw = issueGatewaySteps(route.repository, run, runStepsAsync);
   const gateway = opts.scopeToCodeRepository === false ? raw
     : scopedToCodeRepository(raw, route.repository, code, true);
@@ -2483,6 +2483,23 @@ export function pooledIssueIsCodeRepositorys(issue: Pick<OpenIssue, "url" | "bod
   listedFrom?: string): boolean {
   const owner = escalationCodeRepository(issue.body) ?? listedFrom ?? issueUrlRepository(issue.url);
   return owner !== undefined && owner.toLowerCase() === codeRepository.toLowerCase();
+}
+
+/** W1-T14998 — whether `body` records a code repository other than `codeRepository`: never its, routed or not. */
+export function recordsAnotherCodeRepository(body: string | undefined, codeRepository: string): boolean {
+  const recorded = escalationCodeRepository(body);
+  return recorded !== undefined && recorded.toLowerCase() !== codeRepository.toLowerCase();
+}
+
+/** An unrouted gateway's listing, less issues recording another code repository (a pool this repository is). */
+function withoutOtherRecordedIssues(gateway: AsyncIssueGateway, codeRepository: string): AsyncIssueGateway {
+  const { listOpen } = gateway;
+  if (!listOpen) return gateway;
+  const own = (open: OpenIssue[]) => open.filter((issue) => !recordsAnotherCodeRepository(issue.body, codeRepository));
+  return { ...gateway, listOpen: (label: string) => {
+    const open = listOpen(label);
+    return open instanceof Promise ? open.then(own) : own(open);
+  } };
 }
 
 /** W1-T14998 — whether `gateway` lists from a routed pool (a real gateway on a configured route, even one naming the
@@ -2643,7 +2660,7 @@ export function ghIssueGatewayGraphql(
   };
   // Unrouted, it lists the code repository's own issues as the REST forms do; routed, it is the same pool they scope
   // (a route naming the code repository itself included), so its listing and writes are scoped the same way.
-  if (route.outcome === "unfiled") return gateway;
+  if (route.outcome === "unfiled") return withoutOtherRecordedIssues(gateway, code);
   const scoped = scopedToCodeRepository(gateway, repoArg, code, true);
   markGateway(scoped, GATEWAY_REPOSITORY_MARK, repoArg);
   return scoped;

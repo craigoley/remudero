@@ -74,6 +74,7 @@ import {
   parseLabelledIssuesRest,
   pooledIssueIsCodeRepositorys,
   issueUrlRepository,
+  recordsAnotherCodeRepository,
   renderIssueBody,
   scopedToCodeRepository,
   splitConcatenatedJsonPages,
@@ -265,9 +266,10 @@ export function ghEscalationAnswerGateway(
   const refusalRaw = ghIssueGatewayAsync(owner, repo, { exec: readText, scopeToCodeRepository: false });
   // W1-T14998: a pool when the issues live in another repository than the code one, or when a configured escalation
   // repository is this one (the ops catalog's daemon reads the pool core and site file in). Only a pool is filtered,
-  // with the reconciler's rule; an unrouted reader of its own repository answers every issue there, as on main.
+  // with the reconciler's rule; an unrouted reader answers its own issues as on main, never one recording another.
   const routed = codeRepository.toLowerCase() !== repoArg.toLowerCase() || issueGatewayRepository(refusalRaw) !== undefined;
-  const own = (issue: ListedIssue): boolean => !routed || pooledIssueIsCodeRepositorys(issue, codeRepository, repoArg);
+  const own = (issue: ListedIssue): boolean => routed ? pooledIssueIsCodeRepositorys(issue, codeRepository, repoArg)
+    : !recordsAnotherCodeRepository(issue.body, codeRepository);
   const run = (args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   const parents = new Map<number, FeedbackAdmissionSubject>();
   const adminReads = new Map<string, Promise<boolean>>();

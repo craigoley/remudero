@@ -31,7 +31,7 @@ import { loadConfig, type Config, type WorkerProviderId } from "./config.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import {
-  escalationBodyInLegacyOrder, escalationHeadSha, escalationIssueRepository, ghIssueGatewayAsync, hostEscalationDestination, pooledIssueIsCodeRepositorys, prReferentFromIssueText, splitConcatenatedJsonPages,
+  escalationBodyInLegacyOrder, escalationHeadSha, escalationIssueRepository, ghIssueGatewayAsync, hostEscalationDestination, pooledIssueIsCodeRepositorys, prReferentFromIssueText, recordsAnotherCodeRepository, splitConcatenatedJsonPages,
   type AsyncIssueGateway,
 } from "./escalate.js";
 import { feedbackCaptured, stageFeedbackCapture } from "./feedback.js";
@@ -1301,9 +1301,10 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
     log: opts.log,
     listOpenIssues: async () => {
       // W1-T14998: from a pool this garden judges (and closes) only the issues that record this code repository, or
-      // record none and live in it; unrouted, its own repository's issues are all its own, as before.
+      // record none and live in it; unrouted, its own repository's issues as before, less another's recorded ones.
       listed = parseOpenIssuesRest(await readText(openIssuesRestArgs(issueOwner, issueRepo)))
-        .filter((issue) => !pooled || pooledIssueIsCodeRepositorys(issue, repoArg, `${issueOwner}/${issueRepo}`));
+        .filter((issue) => pooled ? pooledIssueIsCodeRepositorys(issue, repoArg, `${issueOwner}/${issueRepo}`)
+          : !recordsAnotherCodeRepository(issue.body, repoArg));
       stepRows = undefined;
       commits = undefined;
       shardList = undefined;
