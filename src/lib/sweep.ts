@@ -2743,8 +2743,13 @@ async function askFixProgressJudgeOnce(spawn: (args: SpawnWorkerArgs) => Promise
   const reaskedFrom: FixProgressReaskedFrom = { provider: provider ?? "unknown", model: first?.routedModel || assigned?.model || first?.model || "unknown",
     subtype: first?.subtype ?? "threw" }; // the error text is never copied: a message may carry a secret
   const exclude = provider === undefined ? args.excludeProviders : [...new Set([...(args.excludeProviders ?? []), provider])];
+  // Cash is a blocked-auction fallback, not an auction candidate. Excluding it alone can send a
+  // second blocked auction straight back into that same fallback before this spawn returns.
+  // Pin this one re-ask to a subscription provider so the excluded cash route cannot re-enter.
+  const reaskMount = provider === "cash" ? "claude" : args.mountProvider;
   let result: WorkerResult;
-  try { result = await spawn({ ...args, ...(exclude === undefined || exclude.length === 0 ? {} : { excludeProviders: exclude }) }); }
+  try { result = await spawn({ ...args, ...(exclude === undefined || exclude.length === 0 ? {} : { excludeProviders: exclude }),
+    ...(reaskMount === undefined ? {} : { mountProvider: reaskMount }) }); }
   catch (error) {
     if (firstThrew) throw error;
     return undefined; // a returned failure followed by a throw preserves the caller's unparseable/re-ask path

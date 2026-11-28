@@ -59,6 +59,20 @@ test("W1-T15163 criterion 1: a judge worker that ends with error_exit_1 or throw
   assert.equal(exited.spawned.length, 2);
   assert.equal(exited.spawned[0]!.excludeProviders, undefined);
   assert.deepEqual(exited.spawned[1]!.excludeProviders, ["codex"]);
+  // With both subscriptions blocked and cashFallbackWhenBlocked enabled, cash is the
+  // blocked-auction fallback. Excluding that fallback by itself would re-enter cash forever;
+  // the re-ask must pin a subscription provider so the cash route is unreachable.
+  const cashFallback = judgeWith(root, async (args, n) => {
+    if (n === 1) return worker("", { subtype: "openweight_error", provider: "cash", model: "gpt-6-luna", isError: true });
+    assert.deepEqual(args.excludeProviders, ["cash"]);
+    assert.equal(args.mountProvider, "claude");
+    return worker(VERDICT, { provider: "claude" });
+  });
+  const afterCashFallback = await cashFallback.judge(input());
+  assert.equal(afterCashFallback?.verdict, "continue");
+  assert.deepEqual(afterCashFallback?.reasked_from, { provider: "cash", model: "gpt-6-luna", subtype: "openweight_error" });
+  assert.equal(cashFallback.spawned.length, 2, "cash fallback exclusion must not re-enter the blocked-auction fallback");
+  assert.equal(cashFallback.spawned[1]!.mountProvider, "claude");
   // A throw after a worker selection keeps that provider identity and excludes it on the re-ask.
   const thrown = judgeWith(root, async (args, n) => {
     if (n === 1) {
