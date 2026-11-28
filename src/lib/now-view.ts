@@ -1173,11 +1173,17 @@ export function createNowView(opts: NowViewOptions): {
     const path = nowPlanPath(instance);
     if (!path) throw new NowViewError(`instance ${instance.name} names no repository, so it has no plan`);
     // An absent target plan is a healthy empty input (the daemon boots and idles in this case).
-    // Do not let that expected state become a recurring failed Now build.
-    if (targetPlanAbsent(path)) return { tasks: [], byId: new Map() };
-    // Read with the target-aware dependency policy: foreign catalog tasks may carry dependency ids
-    // that this checkout cannot hold. Core's thread pin is strict and turns those into view failures.
-    return loadTargetPlanQuarantiningDuplicates(path, instance.repo ?? "").plan;
+    // Do not let that expected state become a recurring failed Now build. A pinned plan answers from its commit.
+    if (threadPlanPin(path) === "" && targetPlanAbsent(path)) return { tasks: [], byId: new Map() };
+    try {
+      // The thread's one shared parse (and its pin): the task and workstreams views read this same object.
+      return threadPlan(path);
+    } catch (error) {
+      // deliberate: the shared parse is strict, so a foreign catalog task's unseen dependency id throws there and
+      // recurred as read_model.now_view_failed. Re-read as the instance's daemon does; a real fault throws again.
+      void error;
+      return loadTargetPlanQuarantiningDuplicates(path, instance.repo ?? "").plan;
+    }
   });
   const planKey = (instance: NowInstance): string => {
     const path = nowPlanPath(instance);
