@@ -12934,6 +12934,10 @@ export async function postReviewStatus(
           continue;
         }
       }
+      // W1-T15030: inside the guarded renewal scope a stderr-confirmed 401 goes straight to postRenewingOnce, which
+      // renews once and retries once. The Error's message echoes the description, so a transient signature named
+      // there must not spend this loop's backoff retries on a refused token, before the renewal or after it.
+      if (guardedRenewalScope.getStore() === true && ghUnauthorizedError(e)) throw e;
       const transient = classifyFailure({ text: ghErrorText(e) }) === "transient";
       if (!transient || attempt >= maxAttempts) throw e; // permanent, or transient-but-exhausted: surface once
       await sleep(backoffMs(attempt));

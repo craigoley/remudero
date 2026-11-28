@@ -415,6 +415,26 @@ test("W1-T15030 criterion 2: a non-401 refusal whose description names HTTP 401 
   assert.equal(app401.exchanges.length - 1, 1, "control: a real 401 mints one new token");
 });
 
+test("W1-T15030 criterion 2: a 401 whose description names a transient signature is not retried before or after renewal", async (t) => {
+  // OBSERVED (review of 4e2926dce): the retry loop classified transience from the Error's message, which echoes
+  // `-f description=`; a real 401 whose description named "connection reset by peer" was retried 4 times before the
+  // renewal and 4 times after it. A stderr-confirmed 401 inside the guarded renewal scope goes straight to the renewal.
+  const { root, app } = await withAppToken(t, "401-names-transient");
+  const ledgerPath = join(root, "ledger.ndjson");
+  const sha = "f".repeat(40);
+  const fresh = { status: "fresh" as const, codeSha: "c".repeat(40), originMainSha: "c".repeat(40), advance: "none" as const };
+  const posts = await withGhShim([{ when: "-X POST", stderr: "gh: Bad credentials (HTTP 401)", exit: 1 }, ...READS], async (shim) => {
+    await postReviewStatusGuarded({ owner: "acme", repo: "remudero", sha, state: "failure",
+      description: "a proof hit connection reset by peer", taskId: "W1-T15030", runId: "review-PR15030-401-transient", ledgerPath,
+      prUrl: "https://github.com/acme/remudero/pull/15030", reviewInputDigest: reviewInputDigest(sha, "Remudero-Task: W1-T15030"),
+      evidence: "executed", reviewerCodeFreshness: fresh, fetchLifecycle: () => ({ merged: false, closed: false }) }).catch(() => undefined);
+    return shim.calls().filter((call) => call.includes("-X POST"));
+  });
+  assert.ok(posts.some((call) => call.includes("connection reset by peer")), `fixture assumption: the POST's description names a transient signature: ${posts.join(" | ")}`);
+  assert.equal(posts.length, 2, "THE CLAIM: one post, one renewal, one retry, no backoff retries on a refused token");
+  assert.equal(app.exchanges.length - 1, 1, "THE CLAIM: the 401 mints exactly one new token");
+});
+
 test("W1-T15030 criterion 2: an ops task's terminal post refused twice still lands its private findings", async (t) => {
   // W1-T15077 lands an outboxed terminal status's private findings at once; a token_unrenewable refusal leaves the same
   // outbox entry for a later drain, so it must land them too (review of #21071, 2026-11-27).
