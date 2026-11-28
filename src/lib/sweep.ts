@@ -22647,6 +22647,8 @@ export type FixAdmissionResidents = ({ readonly [K in FixAdmissionClass]: readon
   /** W1-T15115: every live fix and review entry of this container, the readable and the unread. Absent (an injected
    *  reading): no live child is charged, and each reservation is charged as before this field existed. */
   readonly live?: readonly LiveHostedChild[];
+  /** W1-T15115: the reading run child's own fix entry, never in `live`; `residentMib` absent when it cannot be read. */
+  readonly ownFix?: { readonly residentMib?: number };
 }) | undefined;
 
 /** W1-T15115: one owned, unreleased fix or review entry of this container, as the fix admission charges it. */
@@ -22786,7 +22788,8 @@ export function productionFixMemoryCalm(
  * `chargeReleased` when a fix admission lock under `<root>/state/fix-admission` reads charge_released for a pid its
  * record names. The locks are read only when a live fix entry is. An entry whose record names this process (`selfPid`)
  * is the reading process's own, as a run child's own reservation is: its memory is this controller's, never a live child
- * charged beside it, so it is left out of `live` (each worker charged once).
+ * charged beside it, so it is left out of `live` (each worker charged once). A run child's own fix entry is read apart,
+ * as `ownFix` (non-enumerable too): its claim is for that tree.
  */
 export function productionFixAdmissionResidents(
   root: string,
@@ -22834,8 +22837,13 @@ export function productionFixAdmissionResidents(
     }
     return [{ id: entry.id, workerClass, ...("unread" in resident ? {} : { residentMib: resident.mib }), chargeReleased }];
   });
+  const own = reading.entries.find((entry) => entry.id === ownReservationId && entry.status === "owned" &&
+    !entry.occupancyReleased && entry.workerClass === "fix");
+  const [ownResident] = own === undefined ? [] : residentsOf(readFile, [own.path]);
+  const ownFix = ownResident === undefined ? undefined : "unread" in ownResident ? {} : { residentMib: ownResident.mib };
   Object.defineProperties(out, {
     pendingFix: { value: pendingFix }, readFixMemoryCalm: { value: readFixMemoryCalm }, live: { value: children },
+    ownFix: { value: ownFix },
   });
   return out;
 }
@@ -22942,29 +22950,56 @@ export function createSweepFixAdmissionController(input: {
   // W1-T15115: the residency read on every readable refresh, for the live children's charge; `residents` stays the view
   // the reservation terms and rungs read, exposed exactly when origin/main read it.
   let reading: FixAdmissionResidents;
-  // W1-T15115: each reservation and the live fix entries already there at its claim. Its child is the first entry seen
-  // since (pair by count, in claim order); once matched, the entry carries its charge through the live term.
+  // W1-T15115: each reservation and the live fix entries that cannot be its child's: those there at its claim or
+  // hand-off. Its child is the first entry seen since (pair by count, in claim order), which then carries its charge.
   type HeldReservation = { baseline?: ReadonlySet<string>; matched?: string; handed: boolean };
   const held: HeldReservation[] = [];
-  // Every entry a reservation was ever matched to on this controller. A matched hand-off leaves `held`, but its entry
-  // stays its child's: a later reservation that saw no entries at its claim must wait for its own child, never take one
-  // already paired (two fixes handed off in one light pass, the first child visible first).
+  // The entries reservations are matched to. A matched hand-off leaves `held`, but its entry stays its child's: a later
+  // reservation must wait for its own (two fixes handed off in one light pass, the first child visible first).
   const paired = new Set<string>();
+  let seenFixIds: ReadonlySet<string> = new Set(); // The live fix entries at the last refresh that read them.
   let liveFixChargeMib = 0;
-  const liveFixIds = (): ReadonlySet<string> | undefined => reading?.live === undefined ? undefined
-    : new Set(reading.live.filter((child) => child.workerClass === "fix").map((child) => child.id));
-  // A handed-off reservation ends once its child's entry is visible; a held one is charged through that entry meanwhile.
+  let unclaimedOwnMib = 0; // A run child's own resident while its claim is still to come.
+  const liveFixes = (): LiveHostedChild[] | undefined => reading?.live?.filter((child) => child.workerClass === "fix");
+  const liveFixIds = (): ReadonlySet<string> | undefined => {
+    const fixes = liveFixes();
+    return fixes === undefined ? undefined : new Set(fixes.map((child) => child.id));
+  };
+  // W1-T15115: a held reservation is charged through an entry only while that entry is live and still charged: one gone,
+  // or waiting on CI, charges it whole again. A handed-off reservation ends once its child's entry is visible.
   const matchLiveEntries = (): void => {
-    const ids = liveFixIds();
-    if (ids === undefined) return;
+    const fixes = liveFixes();
+    // A run child's own reservation is carried by its own entry (`ownFix`), never by a sibling's.
+    if (fixes === undefined || reading?.ownFix !== undefined) return;
+    const ids = new Set(fixes.map((child) => child.id));
+    const carrying = new Set(fixes.filter((child) => !child.chargeReleased).map((child) => child.id));
     for (const r of held) {
+      const lost = r.matched;
+      if (lost !== undefined && !carrying.has(lost)) {
+        paired.delete(lost);
+        r.matched = undefined;
+        // An entry already seen while the lost one carried this charge is another worker's.
+        r.baseline = new Set([...(r.baseline ?? []), ...seenFixIds].filter((id) => id !== lost));
+      }
       if (r.matched !== undefined || r.baseline === undefined) continue;
-      const id = [...ids].find((candidate) => !r.baseline!.has(candidate) && !paired.has(candidate));
+      const id = [...(r.handed ? ids : carrying)].find((candidate) => !r.baseline!.has(candidate) && !paired.has(candidate));
       if (id === undefined) continue;
       r.matched = id;
       paired.add(id);
     }
+    seenFixIds = ids;
     for (let i = held.length - 1; i >= 0; i--) if (held[i]!.handed && held[i]!.matched !== undefined) held.splice(i, 1);
+    reservations = held.length;
+  };
+  // W1-T15115: a handed-off child spawns after this, so no entry already there is its own, matched before now or not.
+  // With no entries ever read to watch for, the hand-off is origin/main's release.
+  const handOver = (r: HeldReservation): void => {
+    const now = liveFixIds();
+    if (now === undefined && r.baseline === undefined) held.splice(held.indexOf(r), 1);
+    else r.baseline = new Set([...(r.baseline ?? []), ...(r.matched === undefined ? [] : [r.matched]), ...(now ?? [])]);
+    if (r.matched !== undefined) paired.delete(r.matched);
+    r.matched = undefined;
+    r.handed = true;
     reservations = held.length;
   };
   // W1-T13879: absent, false or a throw is not calm, so a reading without the calm reader reads as before this rung.
@@ -22987,6 +23022,7 @@ export function createSweepFixAdmissionController(input: {
   // started, so it is charged whole on the reading the claim was judged on.
   const compute = () => {
     charge = undefined;
+    unclaimedOwnMib = 0;
     if (!pressure) {
       available = Math.max(0, Math.max(0, input.hostWorkerBudget - activeWorkers) - charged() - reservations);
       return;
@@ -23001,12 +23037,16 @@ export function createSweepFixAdmissionController(input: {
     const estimates = { fix: fix.estimateMib, review: review.estimateMib };
     liveFixChargeMib = liveChildren === undefined ? 0
       : liveHostedChildChargeMib(liveChildren.filter((child) => child.workerClass === "fix"), estimates);
+    // W1-T15115: a run child claims for its own running tree, whose resident the headroom already holds, so its claim
+    // is charged only the rest of the estimate: the parent's admission is not charged a second time in the child.
+    const ownResidentMib = Math.min(reading?.ownFix?.residentMib ?? 0, fix.estimateMib);
+    unclaimedOwnMib = reservations === 0 ? ownResidentMib : 0;
     charge = {
       headroomMib: Math.max(0, pressure.availableMib - pressure.floorMib),
       reviewChargeMib: fixAdmissionChargeMib(charged(), review.estimateMib, residents?.review),
       // W1-T15115: with the live entries read, a reservation whose child is visible is charged through that entry.
       fixChargeMib: liveChildren === undefined ? fixAdmissionChargeMib(reservations, fix.estimateMib, residents?.fix)
-        : fix.estimateMib * held.filter((r) => r.matched === undefined).length,
+        : Math.max(0, fix.estimateMib * held.filter((r) => r.matched === undefined).length - ownResidentMib),
       fixEstimateMib: fix.estimateMib,
       fixEstimateSource: fix.samples > 0 ? "measured" : "default-unmeasured",
       ...(fix.basis ? { fixEstimateBasis: fix.basis } : {}),
@@ -23019,7 +23059,7 @@ export function createSweepFixAdmissionController(input: {
     };
     // The rungs below read origin/main's arithmetic; only the fits rung subtracts the live children's charge.
     const left = charge.headroomMib - charge.reviewChargeMib - charge.fixChargeMib;
-    available = Math.floor(Math.max(0, left - charge.liveChildChargeMib) / Math.max(1, fix.estimateMib));
+    available = Math.floor(Math.max(0, left + unclaimedOwnMib - charge.liveChildChargeMib) / Math.max(1, fix.estimateMib));
     if (available > 0) {
       charge.admissionRung = "fits";
       return;
@@ -23060,12 +23100,13 @@ export function createSweepFixAdmissionController(input: {
       else overtaken.add(review.prNumber);
     }
   };
-  const refresh = () => {
+  const refresh = (handing?: HeldReservation) => {
     activeWorkers = Math.max(0, Math.trunc(input.readActiveWorkers?.() ?? input.activeWorkers));
     reviewReservations = Math.max(0, Math.trunc(input.readReviewReservations?.() ?? input.reviewReservations));
     pressure = input.readPressure?.();
     const readable = pressure !== undefined && pressure.reason === undefined;
     reading = readable ? readResidents() : undefined;
+    if (handing) handOver(handing);
     matchLiveEntries();
     residentsRead = readable && reviewReservations + reservations > 0;
     residents = residentsRead ? reading : undefined;
@@ -23144,7 +23185,7 @@ export function createSweepFixAdmissionController(input: {
       if (available <= 0) {
         fixesRefused++;
         if (charge) noteRepairMemoryRefusal({ prNumber: pr.prNumber, waitingSinceMs: since ?? systemClock.now(), refusedAtMs: systemClock.now(),
-          shortMib: Math.max(0, charge.fixEstimateMib -
+          shortMib: Math.max(0, charge.fixEstimateMib - unclaimedOwnMib -
             (charge.headroomMib - charge.reviewChargeMib - charge.fixChargeMib - charge.liveChildChargeMib)) }); // W1-T9706
         emit(order());
         const arithmetic = refusalArithmetic();
@@ -23179,15 +23220,10 @@ export function createSweepFixAdmissionController(input: {
         refresh();
         emit();
       }, handOff: standIn ? undefined : () => {
-        // W1-T15115: the host spawns the child after this; its entry takes the charge over once visible. With no live
-        // entries to watch for, the hand-off is origin/main's release.
+        // W1-T15115: the host spawns the child after this; its entry takes the charge over once visible ({@link handOver}).
         if (state !== "held") return;
-        state = "handed";
-        if (mine.baseline === undefined) {
-          state = "gone";
-          drop();
-        } else mine.handed = true;
-        refresh();
+        refresh(mine);
+        state = held.includes(mine) ? "handed" : "gone";
         emit();
       } };
     },

@@ -14,6 +14,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import type { HostMemoryReading, ReadingEntry } from "#src/lib/host-memory-ledger.js";
+import { RUN_CHILD_SCHEMA } from "#src/lib/run-child-contract.js";
+import { withRunChildReservation } from "#src/lib/run-child-reservation.js";
 import {
   createSweepFixAdmissionController, liveHostedChildChargeMib, productionFixAdmissionResidents,
   type FixAdmissionResidents, type OpenPrView,
@@ -230,6 +232,167 @@ test("W1-T15115 criterion 2: two fixes handed off together each stay charged unt
   assert.equal(done.pending_reservations, 0);
   assert.equal(done.live_child_count, 2);
   assert.equal(done.live_child_charge_mib, 2 * (FIX_MIB - 100));
+});
+
+/** A hosted child's own admission (run-task.ts): a controller in its run-child context, over its own entry. */
+function inRunChild<T>(reservationId: string, run: () => T): T {
+  return withRunChildReservation({ schema: RUN_CHILD_SCHEMA, taskId: "W1-T15115", runId: `work-${reservationId}`,
+    instance: "test", engine: { sourceHash: "test", sha: "test" }, planSnapshotPath: "unused", reservationId, options: {} }, run);
+}
+
+test("W1-T15115 criterion 2: every fix the parent admitted and handed off passes its own child's claim, charged less its resident", () => {
+  for (const [count, residentMib] of [[2, 200], [3, 200], [4, 200], [2, 1_500], [3, 900]] as const) {
+    const shape = `${count} children at ${residentMib} MiB`;
+    const room = count * FIX_MIB + 50;
+    const box = container();
+    const rows: Row[] = [];
+    const parentInput = { rows, headroomMib: room, residents: () => box.residents() };
+    const parent = controller(parentInput);
+    const grants = Array.from({ length: count }, () => parent.claim(pr));
+    assert.ok(grants.every((grant) => grant.admitted), shape);
+    for (const grant of grants) if (grant.admitted) grant.handOff?.();
+    // Above any pid the kernel hands out, so no child reads as this test process.
+    const pidOf = (i: number) => 5_000_000 + i;
+    for (let i = 0; i < count; i++) box.live.push({ id: `child-${i}`, workerClass: "fix", pid: pidOf(i), mib: residentMib });
+    parentInput.headroomMib = room - count * residentMib;
+    assert.equal(parent.claim(pr).admitted, false, shape);
+    assert.equal(rows.at(-1)!.live_child_charge_mib, count * (FIX_MIB - residentMib), shape);
+    assert.equal(rows.at(-1)!.pending_reservations, 0, shape);
+
+    // Each child's headroom reading already holds all the residents; it charges its siblings and the rest of itself.
+    const claimAs = (i: number, headroomMib: number, own: Row[]) => inRunChild(`child-${i}`, () =>
+      controller({ rows: own, headroomMib, residents: () => box.residents(undefined, pidOf(i)) }).claim(pr));
+    for (let i = 0; i < count; i++) {
+      const own: Row[] = [];
+      assert.equal(claimAs(i, room - count * residentMib, own).admitted, true, `${shape}: child ${i}`);
+      assert.equal(own[0]!.live_child_count, count - 1, shape);
+      assert.equal(own[0]!.live_child_charge_mib, (count - 1) * (FIX_MIB - residentMib), shape);
+      assert.equal(own[0]!.admission_rung, "fits", shape);
+      assert.equal(own.at(-1)!.fix_charge_mib, FIX_MIB - residentMib, `${shape}: one estimate less its resident`);
+      assert.equal(own.at(-1)!.fix_admissions_available, 0, `${shape}: what the parent's claims left, 50 MiB`);
+      // One MiB less than the parent's admission accounts for is refused: the siblings are still charged.
+      assert.equal(claimAs(i, count * FIX_MIB - 1 - count * residentMib, []).admitted, false, `${shape}: short`);
+    }
+  }
+});
+
+test("W1-T15115 criterion 2: only a run child's own readable fix entry is netted from its claim, and no sibling carries it", () => {
+  const box = container([{ id: "own", workerClass: "fix", pid: 91, mib: 300 }]);
+  const residents = () => box.residents(undefined, 91);
+  const rows: Row[] = [];
+  const grant = inRunChild("own", () => {
+    const c = controller({ rows, headroomMib: FIX_MIB - 300, residents });
+    const first = c.claim(pr);
+    box.live.push({ id: "sibling", workerClass: "fix", pid: 92, mib: 100 });
+    assert.equal(c.claim(pr).admitted, false, "a second claim is charged whole");
+    return first;
+  });
+  assert.equal(grant.admitted, true);
+  assert.equal(rows[0]!.admission_rung, "fits");
+  assert.equal(rows.at(-1)!.pending_reservations, 1);
+  assert.equal(rows.at(-1)!.fix_charge_mib, FIX_MIB - 300, "the sibling's entry carries the sibling, not this claim");
+  box.live.pop();
+
+  // The same process outside a run-child context, and a child whose own tree cannot be read, are charged whole.
+  const outside: Row[] = [];
+  controller({ rows: outside, headroomMib: FIX_MIB - 300, residents });
+  assert.equal(outside[0]!.admission_rung, "none", "no netting: the fits rung does not cover a whole estimate");
+  box.live[0]!.mib = undefined;
+  const unread: Row[] = [];
+  inRunChild("own", () => controller({ rows: unread, headroomMib: FIX_MIB - 1, residents }));
+  assert.equal(unread[0]!.admission_rung, "typical");
+  assert.equal(unread[0]!.live_child_count, 0, "still its own entry, never a live child beside it");
+});
+
+test("W1-T15115 criterion 2: an entry already there at the hand-off is not the handed child's", () => {
+  const box = container();
+  const rows: Row[] = [];
+  const c = controller({ rows, headroomMib: FIX_MIB + 50, residents: () => box.residents() });
+  const grant = c.claim(pr);
+  assert.equal(grant.admitted, true);
+  if (!grant.admitted) return;
+  box.live.push({ id: "another-fix", workerClass: "fix", pid: 81, mib: 100 });
+  assert.equal(c.claim(pr).admitted, false);
+  grant.handOff?.();
+  assert.equal(rows.at(-1)!.pending_reservations, 1, "its child has not spawned");
+  assert.equal(rows.at(-1)!.fix_charge_mib, FIX_MIB);
+  assert.equal(rows.at(-1)!.fix_admissions_available, 0);
+  box.live.push({ id: "handed-fix", workerClass: "fix", pid: 82, mib: 100 });
+  assert.equal(c.claim(pr).admitted, false);
+  assert.equal(rows.at(-1)!.pending_reservations, 0);
+  assert.equal(rows.at(-1)!.live_child_charge_mib, 2 * (FIX_MIB - 100));
+});
+
+test("W1-T15115 criterion 5: a held grant whose entry stops carrying it is charged whole again", (t) => {
+  const { dir: root } = ownedFixtureDir(t, "w1-t15115-lost-entry");
+  const locks = join(root, "state", "fix-admission");
+  mkdirSync(locks, { recursive: true });
+  const held = (headroomMib = FIX_MIB + 50) => {
+    const box = container();
+    const rows: Row[] = [];
+    const c = controller({ rows, headroomMib, residents: () => box.residents(root) });
+    const grant = c.claim(pr);
+    assert.equal(grant.admitted, true);
+    /** The next claim's refusal row, without the two fields this task adds. */
+    const refused = () => {
+      assert.equal(c.claim(pr).admitted, false);
+      const { live_child_charge_mib: _charge, live_child_count: _count, ...rest } = rows.at(-1)!;
+      return rest;
+    };
+    return { box, rows, grant, refused };
+  };
+  // The control never has a live entry, so it reads as origin/main (the digest below).
+  const control = held();
+  control.refused();
+  const expected = control.refused();
+  assert.equal(expected.fix_charge_mib, FIX_MIB);
+
+  const leaves: Array<[string, (box: ReturnType<typeof container>) => void]> = [
+    ["gone", (box) => void box.live.pop()],
+    ["occupancy released", (box) => void (box.live[0]!.occupancyReleased = true)],
+    ["no longer owned", (box) => void (box.live[0]!.status = "uncertain")],
+  ];
+  for (const [name, leave] of leaves) {
+    const run = held();
+    run.box.live.push({ id: "worker", workerClass: "fix", pid: 81, mib: 100 });
+    run.refused();
+    assert.equal(run.rows.at(-1)!.fix_charge_mib, 0, `${name}: carried by its live entry`);
+    assert.equal(run.rows.at(-1)!.live_child_charge_mib, FIX_MIB - 100, name);
+    leave(run.box);
+    assert.deepEqual(run.refused(), expected, name);
+    assert.deepEqual(run.refused(), { ...expected, fixes_refused: 3 }, `${name}: and stays charged`);
+    if (run.grant.admitted) run.grant.release?.();
+    assert.equal(run.rows.at(-1)!.pending_reservations, 0, name);
+  }
+
+  // The same round's next worker, seen on the refresh that loses the first, carries it again.
+  const next = held();
+  next.box.live.push({ id: "worker-1", workerClass: "fix", pid: 81, mib: 100 });
+  next.refused();
+  next.box.live.splice(0, 1, { id: "worker-2", workerClass: "fix", pid: 82, mib: 300 });
+  next.refused();
+  assert.equal(next.rows.at(-1)!.fix_charge_mib, 0);
+  assert.equal(next.rows.at(-1)!.live_child_charge_mib, FIX_MIB - 300);
+
+  // A worker already live beside the first is another round's: it does not take over the charge.
+  const beside = held();
+  beside.box.live.push({ id: "worker", workerClass: "fix", pid: 81, mib: 100 });
+  beside.refused();
+  beside.box.live.push({ id: "beside", workerClass: "fix", pid: 82, mib: 100 });
+  beside.refused();
+  beside.box.live.shift();
+  beside.refused();
+  assert.equal(beside.rows.at(-1)!.fix_charge_mib, FIX_MIB);
+
+  // Matched to an entry whose lock then reads charge_released: that entry charges nothing, so the grant is charged.
+  const waiting = held();
+  waiting.box.live.push({ id: "worker", workerClass: "fix", pid: 83, mib: 100 });
+  waiting.refused();
+  writeFileSync(join(locks, `${createHash("sha256").update("waiting").digest("hex")}.lock`), JSON.stringify(
+    { run_id: "r", host: hostname(), startedAt: "2026-11-27T09:29:17.000Z", pid: 83, charge_released: true }));
+  waiting.refused();
+  assert.equal(waiting.rows.at(-1)!.fix_charge_mib, FIX_MIB);
+  assert.equal(waiting.rows.at(-1)!.live_child_charge_mib, 0);
 });
 
 test("W1-T15115 criterion 3: a round waiting on CI, and an entry whose occupancy is released, hold no unrealized charge", (t) => {
