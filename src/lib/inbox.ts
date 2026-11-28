@@ -1991,7 +1991,9 @@ export interface ParsedDraft {
   stampLine: string;
 }
 
-function composeDraftStamp(proposalId: string, draft: ParsedDraft, clock?: Clock): ParsedDraft {
+/** The draft as the rung lints and caches it: its blocked tasks queued and the harness's STAMP composed from the model's
+ *  summary. The in-spawn evaluation judges this same draft, so its verdict matches the rung's. */
+export function composeDraftStamp(proposalId: string, draft: ParsedDraft, clock?: Clock): ParsedDraft {
   if (draft.releaseTaskId !== undefined) return draft;
   const fragmentYaml = queueDraftedBlockedTasks(draft.fragmentYaml);
   const fragment = safeParseFragment(fragmentYaml, proposalId);

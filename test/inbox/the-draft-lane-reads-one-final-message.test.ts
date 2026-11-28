@@ -98,7 +98,8 @@ test("draft rejection telemetry counts the same final message that the parser re
 test("the in-spawn draft evaluation judges an answer the repair makes clean as clean, unless the kill switch is set", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}draft-autofix-evaluate-`));
   const fixable = inboxDraftExampleFragmentYaml().replace('title: "Tighten', 'title: "NEW-1: Tighten').replace("verify: auto", "verify: manual");
-  const answer = `=== FRAGMENT START ===\n${fixable}\n=== FRAGMENT END ===\nSTAMP: - P9 (tighten the guard) — RATIFIED 2026-01-01 -> NEW-1.`;
+  // A summary-only STAMP, as the draft prompt asks for: the evaluation composes it as the rung does before it lints.
+  const answer = `=== FRAGMENT START ===\n${fixable}\n=== FRAGMENT END ===\nSTAMP: tighten the guard`;
   try {
     const evaluate = () => buildInboxDraftSpawnArgs({cwd: REPO_ROOT, settingsFile: join(REPO_ROOT, "fixture-settings-not-read.json"),
       prompt: "fixture only; do not spawn", mount: {model: "sonnet", effort: "medium", maxTurns: 1, contextBudget: 8192},

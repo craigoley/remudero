@@ -1128,6 +1128,7 @@ import {
   readDraftCashResumes,
   parseDraftedCandidate,
   lintDraftedFragmentWithRepair,
+  composeDraftStamp,
   stageBundleProposals,
   summarizeInboxPoll,
   updateProposalRegistry,
@@ -37929,9 +37930,11 @@ export function buildInboxDraftSpawnArgs(args: {
       paidCashDeployments: args.paidCashDeployments,
       cashAvoidModels: cashRetry?.avoidModels,
       evaluate: (worker: WorkerResult) => withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, registryRecord), () => {
-        const parsed = parseDraftedCandidate(workerTranscript(worker), args.proposal, args.currentPlanText);
+        const raw = parseDraftedCandidate(workerTranscript(worker), args.proposal, args.currentPlanText);
+        // The rung composes the STAMP, then repairs before it judges, so an answer it would cache clean is clean here
+        // too and buys no fallback.
+        const parsed = raw === null ? null : composeDraftStamp(args.proposalId!, raw);
         const facts = checkoutRepoFacts(args.cwd);
-        // The rung repairs before it judges, so an answer its repair makes clean is clean here too and buys no fallback.
         return { contractFailed: parsed === null,
           clean: parsed !== null && (parsed.releaseTaskId !== undefined || lintDraftedFragmentWithRepair(parsed.fragmentYaml,
             args.proposalId!, parsed.stampLine, facts, !draftAutofixOff(join(args.config.root, "state"))).violations.length === 0) };

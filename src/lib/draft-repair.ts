@@ -33,18 +33,39 @@ export const AUTOFIXABLE_DRAFT_CHECKS: ReadonlySet<string> = new Set([
 const NEW_TEST_PATH = /^test\/[\w./-]+\.test\.[mc]?[jt]s$/;
 const TITLE_ID_TOKEN = /\b(?:W\d+-T\d+|NEW-\d+)\b/g;
 
-/** The title with its own id and every NEW-n placeholder taken out, the brackets and separators they leave tidied.
- *  `undefined` when nothing is left, since an empty title is no repair. */
+const TITLE_SEPARATORS = "\\s:;,|/\u2013\u2014-";
+const SEPARATORS_BEFORE = new RegExp(`[${TITLE_SEPARATORS}]*$`);
+const SEPARATORS_AFTER = new RegExp(`^[${TITLE_SEPARATORS}]*`);
+
+/** The title with its own id and every NEW-n placeholder taken out. Only the text around each removed token is tidied:
+ *  the brackets that wrapped it alone and the separators beside it. The rest of the title is left as the model wrote it,
+ *  so `[]`, `()` and `.env` elsewhere survive. `undefined` when nothing is left, since an empty title is no repair. */
 export function titleWithoutOwnId(title: string, taskId: string): string | undefined {
-  const stripped = title
-    .replace(TITLE_ID_TOKEN, (token) => (token === taskId || token.startsWith("NEW-") ? " " : token))
-    .replace(/\(\s*\)|\[\s*\]/g, " ")
-    .replace(/\s+([,.;:)\]])/g, "$1")
-    .replace(/([([])\s+/g, "$1")
-    .replace(/\s{2,}/g, " ")
-    .replace(/^[\s:;,.|/–—-]+/, "")
-    .replace(/[\s:;,|/–—-]+$/, "")
-    .trim();
+  const removed = [...title.matchAll(TITLE_ID_TOKEN)].filter((m) => m[0] === taskId || m[0].startsWith("NEW-"));
+  if (removed.length === 0) return title;
+  let out = title;
+  for (const m of removed.reverse()) {
+    let start = m.index!;
+    let end = start + m[0].length;
+    const open = /([([])\s*$/.exec(out.slice(0, start));
+    const close = /^\s*([)\]])/.exec(out.slice(end));
+    if (open && close && (open[1] === "(") === (close[1] === ")")) {
+      start -= open[0].length;
+      end += close[0].length;
+    }
+    const before = SEPARATORS_BEFORE.exec(out.slice(0, start))![0];
+    const after = SEPARATORS_AFTER.exec(out.slice(end))![0];
+    const head = start - before.length === 0;
+    const tail = end + after.length === out.length;
+    const rest = out.slice(end + after.length);
+    let join: string;
+    if (head || tail) join = "";
+    else if (after.trim().length > 0) join = after;
+    else if (before.trim().length > 0) join = before;
+    else join = /^[,.;:!?)\]]/.test(rest) ? "" : " ";
+    out = out.slice(0, start - before.length) + join + rest;
+  }
+  const stripped = out.trim();
   return stripped.length > 0 ? stripped : undefined;
 }
 
@@ -59,7 +80,7 @@ function stringOf(node: YAMLMap, key: string): string | undefined {
 }
 
 function pathPattern(path: string): RegExp {
-  return new RegExp(`(?<![\\w./-])${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w./-])`, "g");
+  return new RegExp(`(?<![\\w./-])${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?!\\.?[\\w/-])`, "g");
 }
 
 /**
