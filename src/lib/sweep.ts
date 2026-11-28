@@ -300,6 +300,7 @@ import {
   type CapacityDecision,
   type ReviewDemandOptions,
 } from "./host-memory-priority.js";
+import { FLOW_SNAPSHOT_STEP, publishFlowSnapshot, type FlowSnapshotOptions } from "./flow-snapshot.js";
 import { clearRepairMemoryDemand, noteRepairMemoryRefusal, repairMemoryDemandMark, repairYieldLedgerFields, settleRepairMemoryPass, type RepairYieldDecision } from "./repair-memory-demand.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import {
@@ -18433,6 +18434,8 @@ export interface SweepDeps {
   escalateMemoryCapacity?: (decision: CapacityDecision) => string | null;
   /** W1-T7095 — seams for the review-demand row (location, instance, clock). Production omits it. */
   reviewDemand?: ReviewDemandOptions;
+  /** W1-T15009 — seams for the flow snapshot (location, instance, clock, history path). Production omits it. */
+  flowSnapshot?: FlowSnapshotOptions;
   /** W1-T1275 — an OPTIONAL fresh read of ONE PR's live rollup, consulted immediately before a
    *  blocked-fixable disposition acts, never the snapshot this pass started from:
    *  {@link staleCiGateTransition} must compare against a sibling's CURRENT latest attempt. NOT a
@@ -32465,6 +32468,8 @@ async function runSweepLightPassCore(
   }
   if (openPrs.length === 0) {
     noteIdleReviewDemand(0, 0, deps.now ? deps.now() : systemClock.now());
+    // ledger-read-intent: live — the snapshot folds the live rows into its own history; it never reads rotations.
+    publishPassFlowSnapshot(deps.snapshotOpenPrs ?? [], (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath), deps, passId);
     return [await runSweep([], { ...deps, sharedMemoryPass: memoryPass }, policy)];
   }
   // A light pass fans out into one runSweep per PR; their issue snapshot belongs to this pass.
@@ -32550,6 +32555,7 @@ async function runSweepLightPassCore(
   const spawning = selected.spawning.filter(admitAfterLatch);
   const planFilings = selected.planFilings.filter(admitAfterLatch);
   publishLightPassReviewDemand(demandCandidates, spawning, policy, now, outcomes, deps);
+  publishPassFlowSnapshot(queuePrs, selectionLedgerLines, deps, passId);
   // W1-T7734: what this pass leaves waiting is what an idle daemon should keep a light pass running for.
   noteIdleReviewDemand(Math.max(0, ownQueueDepth - spawning.length), openPrs.length, now);
   lightPassSpawningReservations += spawning.length;
@@ -33239,6 +33245,35 @@ export function publishLightPassReviewDemand(
       deps.log?.("memory_budget.capacity_decision_failed", { scenario: decision.scenario, error: String((error as Error)?.message ?? error) });
     }
   }
+}
+
+/** W1-T15009 — PUBLISH THIS INSTANCE'S FLOW SNAPSHOT from the open board this pass holds (its own heads and the
+ *  tick's whole snapshot), every owner counted, and write one `flow.snapshot` row with the same numbers. Once per tick:
+ *  a tick's batches share one board, so the first batch publishes it. OBSERVATION ONLY: nothing here reads the
+ *  snapshot, and `publishFlowSnapshot` never throws. A dry run writes nothing. */
+let lastFlowSnapshotPass: string | undefined;
+function publishPassFlowSnapshot(
+  board: readonly OpenPrView[],
+  lines: ReadonlyArray<Readonly<Record<string, unknown>>>,
+  deps: SweepDeps,
+  passId: string,
+): void {
+  const passKey = deps.lightTickId ?? passId;
+  if (deps.dryRun || lastFlowSnapshotPass === passKey) return;
+  lastFlowSnapshotPass = passKey;
+  const snapshot = publishFlowSnapshot(board.map((pr) => ({
+    prUrl: pr.prUrl, checksState: pr.checksState, reviewState: pr.reviewState,
+    owner: isFleetOwnedRunBranch(pr.headRefName) ? "fleet" as const : "operator" as const,
+    ...(pr.createdAt === undefined ? {} : { createdAt: pr.createdAt }),
+  })), lines, deps.ledgerPath, {
+    root: dirname(dirname(deps.ledgerPath)),
+    log: (event) => deps.log?.(String(event.event ?? "flow.snapshot_error"), event),
+    ...deps.flowSnapshot,
+  });
+  if (!snapshot) return;
+  const { schema, ...numbers } = snapshot;
+  void schema; // The file's format version, not one of the numbers the row carries.
+  (deps.appendLine ?? appendLedger)(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", step: FLOW_SNAPSHOT_STEP, ...numbers });
 }
 
 /** W1-T14748: the operator escalation for a task-files landing held because the destination gate's findings cannot be read. */

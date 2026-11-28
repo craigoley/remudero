@@ -1414,6 +1414,7 @@
     "worktree_retire.would_retire"
   ],
   "recordOnly": {
+    "flow.snapshot": "W1-T15009: an observation row carrying the numbers of this instance's flow snapshot file, once per pass; the flow allocation (W1-T15010) reads the snapshot files, so nothing re-reads the row yet.",
     "sweep.resequence_close_dropped": "W1-T15185: the receipt for a kept resequence close the reversal dropped because its task has a newer open pull request; the kept file is removed with it, so nothing re-reads the row.",
     "worker.flight_signal.tripped": "W1-T4049: an observe-only mid-run trip of the repetition or error-loop predicate, once per run per predicate; nothing halts or decides on it until its trip precision is measured.",
     "worker.flight_signal.error": "W1-T4049: a diagnostic that a live flight-signal predicate threw; the stream loop carries on, so nothing re-reads the row.",
