@@ -1424,6 +1424,8 @@
     "dispatch.expedited": "W1-T14654: an audit row for the operator, one per expedited start with its reason and lane share; nothing decides on it",
     "review.proof_execution": "W1-T14036: phase-time measurement rows read by operator analysis, not by code",
     "review.proof_phase": "W1-T14036: phase-time measurement rows read by operator analysis, not by code",
+    "memory.shed": "W1-T15181: an audit row for the operator, one per child the container-shed rung ended, with its outcome; the rung decides from its in-memory episode, so nothing re-reads the row.",
+    "memory.shed_held": "W1-T15181: an audit row for the operator, at most one per shed episode, naming the condition missing; nothing decides on it.",
     "dispatch.no_start.detected": "W1-T14608: the daemon's own row for a no-start page; the operator reads it, and the catalogue's escalated row carries the dedup",
     "dispatch.no_start.unassessed": "W1-T14608: a diagnostic for a no-start judgement that could not be made; it records the error and pages nothing",
     "target_job.stalled": "W1-T14600: the operator page for a target job the core daemon deferred past its bound; the catalogue's own dedup reads the escalated row",
