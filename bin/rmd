@@ -73,15 +73,25 @@ process.stdout.write(kept.join(" "));
 fi
 
 # W1-T14921: the host watchdog verbs start from the bundle too. A bundled main has no tsx loader, so a self-sync
-# re-exec of its .ts entry could not start: they use it only where no re-exec can happen (the guard is set, or HEAD is
-# on no branch, as in a daemon's detached tree). Anything else starts tsx exactly as before.
+# re-exec of its .ts entry could not start: they use it only where no re-exec can happen. That is: the guard is set, or
+# HEAD is on no branch both in this tree (a daemon's detached tree) and in the cwd's. Self-sync acts on --repo-root,
+# else the cwd's tree, else this one (resolveRepoRoot, src/lib/repo-location.ts), so naming --repo-root is doubt too.
+# Anything else starts tsx exactly as before.
 RMD_MAIN_VERB=""
 case "${1:-}" in
   daemon|review) RMD_MAIN_VERB="$1" ;;
   host-alert|live-edits|progress-watchdog|deploy-run)
-    if [ "${RMD_SELF_SYNC_DONE:-}" = 1 ] || ! git -C "$DIR" symbolic-ref -q HEAD >/dev/null 2>&1; then
+    RMD_NAMES_ROOT=""
+    for RMD_ARG in "$@"; do
+      if [ "$RMD_ARG" = "--repo-root" ]; then RMD_NAMES_ROOT=1; fi
+    done
+    if [ "${RMD_SELF_SYNC_DONE:-}" = 1 ]; then
+      RMD_MAIN_VERB="$1"
+    elif [ -z "$RMD_NAMES_ROOT" ] && ! git -C "$DIR" symbolic-ref -q HEAD >/dev/null 2>&1 &&
+      ! git symbolic-ref -q HEAD >/dev/null 2>&1; then
       RMD_MAIN_VERB="$1"
     fi
+    unset RMD_NAMES_ROOT RMD_ARG
     ;;
 esac
 if [ -n "$RMD_MAIN_VERB" ]; then

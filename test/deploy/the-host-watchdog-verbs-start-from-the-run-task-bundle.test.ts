@@ -56,13 +56,18 @@ const detachedTree = (): string => fillLaunchTree(mkdtempSync(join(tmpdir(), "rm
 
 const out = (root: string, file: string): string => join(root, build.OUT_DIR, file);
 
-function launch(root: string, verb: string): { bundled: boolean; entry?: string; argv: string[] } {
+/** Where and how `bin/rmd` is called: its cwd (default: its own tree), its args, and the self-sync guard. */
+type From = { cwd?: string; args?: string[]; selfSynced?: boolean };
+
+function launch(root: string, verb: string, from: From = {}): { bundled: boolean; entry?: string; argv: string[] } {
+  const { cwd = root, args = ["--flag"], selfSynced = false } = from;
   const env = { ...process.env };
   delete env.RMD_MAIN_ENTRY;
   delete env.RMD_SELF_SYNC_DONE;
+  if (selfSynced) env.RMD_SELF_SYNC_DONE = "1";
   // W1-T2732: blank the coverage session var: enrolled, the child's coverage names fixture files gone by report time.
   env.NODE_V8_COVERAGE = undefined;
-  const run = spawnSync("bash", [join(root, "bin", "rmd"), verb, "--flag"], { cwd: root, encoding: "utf8", env });
+  const run = spawnSync("bash", [join(root, "bin", "rmd"), verb, ...args], { cwd, encoding: "utf8", env });
   assert.equal(run.status, 0, run.stderr);
   return JSON.parse(run.stdout.trim().split("\n").pop() ?? "{}");
 }
@@ -130,17 +135,47 @@ test("W1-T14921 a doubtful bundle starts tsx and builds nothing", async () => {
 });
 
 // A tree on a branch can self-sync and re-exec its .ts entry, which a bundled main (no tsx loader) could not start.
+// Self-sync acts on --repo-root, else the cwd's tree, else bin/rmd's own tree: none of them may be on a branch.
 test("W1-T14921 a tree on a branch keeps the watchdog verbs on tsx", async () => {
   const repo = gitRepo({ kind: "watchdog-bundle-branch" });
+  const checkout = gitRepo({ kind: "watchdog-bundle-caller" });
+  const outside = mkdtempSync(join(tmpdir(), "rmd-watchdog-bundle-outside-"));
   try {
     const root = fillLaunchTree(repo.dir);
     await build.buildChildEntries({ root });
+    const below = join(checkout.dir, "below");
+    mkdirSync(below);
+    const choice = (verb: string, from?: From) => {
+      const started = launch(root, verb, from);
+      return [started.bundled, started.entry];
+    };
+    const onTsx = [false, undefined];
+    const fromBundle = [true, "bundle:source-hash-match"];
     for (const verb of VERBS) {
-      const started = launch(root, verb);
-      assert.deepEqual([started.bundled, started.entry], [false, undefined], `${verb} on branch main starts tsx`);
+      assert.deepEqual(choice(verb), onTsx, `${verb} on branch main starts tsx`);
+      assert.deepEqual(choice(verb, { cwd: outside }), onTsx, `${verb}: bin/rmd's own tree is on a branch`);
+    }
 
+    repo.git("checkout", "--quiet", "--detach");
+    for (const verb of VERBS) {
+      assert.deepEqual(choice(verb), fromBundle, `${verb} from the detached tree starts the bundle`);
+      assert.deepEqual(choice(verb, { cwd: outside }), fromBundle, `${verb} from no checkout syncs the detached tree`);
+      assert.deepEqual(choice(verb, { cwd: checkout.dir }), onTsx, `${verb} from a checkout on main starts tsx`);
+      assert.deepEqual(choice(verb, { cwd: below }), onTsx, `${verb} from below a checkout on main starts tsx`);
+      const named = { args: ["--repo-root", checkout.dir] };
+      assert.deepEqual(choice(verb, named), onTsx, `${verb} naming --repo-root starts tsx`);
+      for (const from of [{ cwd: checkout.dir }, named]) {
+        assert.deepEqual(choice(verb, { ...from, selfSynced: true }), fromBundle, `${verb}: the guard rules out a re-exec`);
+      }
+    }
+
+    checkout.git("checkout", "--quiet", "--detach");
+    for (const verb of VERBS) {
+      assert.deepEqual(choice(verb, { cwd: checkout.dir }), fromBundle, `${verb} from a detached checkout starts the bundle`);
     }
   } finally {
     repo.cleanup();
+    checkout.cleanup();
+    rmSync(outside, { recursive: true, force: true });
   }
 });
