@@ -15,6 +15,8 @@ import type { Plan } from "#src/lib/plan.js";
 import type { OpenPrView } from "#src/lib/sweep.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for owner/repo.
+process.env.RMD_ESCALATION_REPOSITORY ??= "owner/repo";
 
 function primaryShadowOperatorChannel(opts: Parameters<typeof escalation.primaryShadowOperatorChannel>[0]) {
   assert.equal(typeof escalation.primaryShadowOperatorChannel, "function", "the primary-shadow channel is available");

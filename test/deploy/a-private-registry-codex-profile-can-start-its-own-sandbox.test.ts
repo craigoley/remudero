@@ -126,14 +126,16 @@ test("the selected-registry profile grants the derived executable reads and stil
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("W1-T11550 criterion 1: the worktree's parent is denied on both profile surfaces for every intent", TIMEOUT, async () => {
+// W1-T15268 narrowed this criterion's parent-deny assertion to writer and review: a reader cannot write beside its
+// worktree, and the deny hid its own cwd (W1-T15268 criteria 1 and 3). "Never readable" and the root deny stay for every intent.
+test("W1-T11550 criterion 1: the worktree's parent is denied on both profile surfaces for writer and review, and readable for no intent", TIMEOUT, async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}codex-parent-deny-`)));
   try {
     const install = codexInstall(root);
     for (const intent of ["reader", "writer", "review"] as const) {
       const { overrides, profileText, cwd } = await selectedProfileOverrides(root, install.bin, intent, "worktrees/run-1", true);
       for (const surface of [profileText, overrides.join("\n")]) {
-        assert.ok(surface.includes(`${JSON.stringify(dirname(cwd))}="deny"`), `${intent}: the parent is denied`);
+        if (intent !== "reader") assert.ok(surface.includes(`${JSON.stringify(dirname(cwd))}="deny"`), `${intent}: the parent is denied`);
         assert.equal(surface.includes(`${JSON.stringify(dirname(cwd))}="read"`), false, `${intent}: never readable, which would expose sibling worktrees`);
         assert.ok(surface.includes('":root"="deny"'), `${intent}: the root deny stays`);
       }
@@ -161,6 +163,42 @@ test("W1-T11564 criterion 1: a working directory that is not a git checkout root
       const { overrides, profileText, cwd } = await selectedProfileOverrides(root, install.bin, intent, "tmp/isolation-probe-1");
       for (const surface of [profileText, overrides.join("\n")]) {
         assert.equal(surface.includes(`${JSON.stringify(dirname(cwd))}=`), false, `${intent}: a plain probe directory's parent is untouched`);
+        assert.ok(surface.includes('":root"="deny"'), `${intent}: the root deny stays`);
+      }
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T15268 criterion 1: a reader at a git checkout root gets no parent deny on either profile surface, and the root deny stays", TIMEOUT, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}codex-reader-git-root-`)));
+  try {
+    const install = codexInstall(root);
+    const { overrides, profileText, cwd } = await selectedProfileOverrides(root, install.bin, "reader", "worktrees/run-1", true);
+    assert.ok(profileText.includes('extends=":read-only"'), "the fixture is a read-only run");
+    for (const surface of [profileText, overrides.join("\n")]) {
+      assert.equal(surface.includes(`${JSON.stringify(dirname(cwd))}="deny"`), false, "reader: the parent deny would hide its own cwd");
+      assert.equal(surface.includes(`${JSON.stringify(dirname(cwd))}="read"`), false, "reader: the parent is never readable either");
+      assert.ok(surface.includes('":root"="deny"'), "reader: the root deny stays, so sibling worktrees stay hidden");
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T15268 criterion 2: writer and review at a git checkout root keep the W1-T11550 parent deny, and a non-git cwd keeps its parent untouched for every intent", TIMEOUT, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}codex-writer-git-root-`)));
+  try {
+    const install = codexInstall(root);
+    for (const intent of ["writer", "review"] as const) {
+      const { overrides, profileText, cwd } = await selectedProfileOverrides(root, install.bin, intent, "worktrees/run-1", true);
+      for (const surface of [profileText, overrides.join("\n")]) {
+        assert.ok(surface.includes(`${JSON.stringify(dirname(cwd))}="deny"`), `${intent}: the parent is denied`);
+        assert.equal(surface.includes(`${JSON.stringify(dirname(cwd))}="read"`), false, `${intent}: never readable`);
+        assert.ok(surface.includes('":root"="deny"'), `${intent}: the root deny stays`);
+      }
+    }
+    for (const intent of ["reader", "writer", "review"] as const) {
+      const { overrides, profileText, cwd } = await selectedProfileOverrides(root, install.bin, intent, "tmp/isolation-probe-1");
+      for (const surface of [profileText, overrides.join("\n")]) {
+        assert.equal(surface.includes(`${JSON.stringify(dirname(cwd))}=`), false, `${intent}: a non-git cwd's parent is untouched`);
         assert.ok(surface.includes('":root"="deny"'), `${intent}: the root deny stays`);
       }
     }
@@ -203,5 +241,23 @@ test("W1-T11550 criterion 3: a real sandbox refuses a write beside the worktree 
     assert.match(run.stdout, /rc=1\nrc=0/);
     assert.equal(existsSync(join(dirname(cwd), "beside")), false);
     assert.ok(existsSync(join(cwd, "inside")));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T15268 criterion 3: a real sandbox lets a reader at a git checkout root read its own AGENTS.md", {
+  ...TIMEOUT,
+  skip: linuxCodex() === undefined ? "needs Linux with codex on PATH; the image is the real check" : false,
+}, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}codex-reader-real-`)));
+  try {
+    const codex = linuxCodex()!;
+    const { overrides, codexHome, cwd } = await selectedProfileOverrides(root, codex, "reader", "worktrees/run-1", true);
+    const agents = "# reader AGENTS.md W1-T15268\n";
+    writeFileSync(join(cwd, "AGENTS.md"), agents);
+    const run = spawnSync(codex, ["sandbox", ...overrides, "--", "/bin/cat", "AGENTS.md"],
+      { encoding: "utf8", cwd, env: { ...process.env, CODEX_HOME: codexHome }, timeout: 45_000 });
+    assert.doesNotMatch(`${run.stdout}${run.stderr}`, /permission denied/i, "the reader's cwd is readable under its own profile");
+    assert.equal(run.status, 0, `cat exits 0: ${run.stderr}`);
+    assert.equal(run.stdout, agents, "the file's bytes, exactly");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

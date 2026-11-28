@@ -23,6 +23,8 @@ import {
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { planCommand } from "../src/run-task.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for craigoley/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "craigoley/remudero";
 
 /**
  * A real, throwaway git repo seeded with a baseline `plan/tasks.yaml` + `MASTER-PLAN.md` and

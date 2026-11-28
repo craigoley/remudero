@@ -748,7 +748,7 @@ import {
   type AsyncIssueGateway,
   type IssueGateway,
   type OpenIssue,
-  type PresenceMode, prReferentFromIssueText, loadEscalationLinkSecret,} from "./lib/escalate.js";
+  type PresenceMode, prReferentFromIssueText, loadEscalationLinkSecret, issueUrlRepository, escalationIssueRepositories,} from "./lib/escalate.js";
 import {
   boardPrsRestArgs,
   checkRunsRestArgs,
@@ -34000,7 +34000,8 @@ export async function sweepEscalationTriage(
     // Async transport: this sweep runs on the daemon loop, so the relabel must not block the event loop.
     const relabel = io.relabel ?? (async (url: string, label: string): Promise<void> => {
       assertLiveWriteAllowed("gh-transport", "routing an escalation after triage");
-      await ghTextAsync(["issue", "edit", url, "--repo", `${owner}/${repo}`, "--add-label", label,
+      // W1-T14998: the issue lives where it was filed (the escalation repository), named by its own URL.
+      await ghTextAsync(["issue", "edit", url, "--repo", issueUrlRepository(url) ?? `${owner}/${repo}`, "--add-label", label,
         "--remove-label", label === "needs-human" ? "fleet-notice" : "needs-human"], {}, io.execAsync);
     });
     const candidates: StaleEscalationRejudgeCandidate[] = [];
@@ -36461,7 +36462,8 @@ async function landTriageStatusOutcome(i: {
         ? i.grillIssueUrl ? { action: "grill" as const, publicationPr: prUrl, detail: decision.detail, questionIssueUrl: i.grillIssueUrl }
           : { action: "error" as const, reason: "The intake question has no verified publication." }
         : { action: decision.action, publicationPr: prUrl, detail: decision.detail };
-    const response = recordEscalationIntakeOutcome(i.entry, outcome, { threadStorePath: i.threadStorePath, repository: i.repository });
+    const response = recordEscalationIntakeOutcome(i.entry, outcome, { threadStorePath: i.threadStorePath, repository: i.repository,
+      issueRepositories: escalationIssueRepositories(...(i.repository.split("/") as [string, string])) });
     log("triage.escalation_response", { feedback_id: feedbackId, ...response, work: "pending" });
   } catch (error) {
     log("triage.escalation_response", { feedback_id: feedbackId, state: "unknown", reason: String((error as Error)?.message ?? error) });
@@ -37097,7 +37099,7 @@ async function triageCommandLocked(
     // Acknowledging intake ends the ask; it does not claim CI, merge or work completion.
     try {
       const response = recordEscalationIntakeOutcome(entry, { action: decision.action, publicationPr: prUrl, detail: decision.detail },
-        { threadStorePath: inboxThreadStorePath(config.root), repository: `${owner}/${repo}` });
+        { threadStorePath: inboxThreadStorePath(config.root), repository: `${owner}/${repo}`, issueRepositories: escalationIssueRepositories(owner, repo) });
       log("triage.escalation_response", { feedback_id: feedbackId, ...response, work: "pending" });
     } catch (error) {
       log("triage.escalation_response", { feedback_id: feedbackId, state: "unknown", reason: String((error as Error)?.message ?? error) });

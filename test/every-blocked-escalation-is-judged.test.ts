@@ -47,6 +47,8 @@ import type { RunResult } from "../src/lib/run-result.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { ghShim } from "./helpers/gh-shim.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for craigoley/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "craigoley/remudero";
 
 // ── fixture plumbing — the same recipe test/daemon-crashloop-wiring.test.ts already established
 // for driving daemonCommand's real self-target boot path without a live daemon loop ──────────────

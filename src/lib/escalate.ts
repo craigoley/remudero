@@ -3,7 +3,9 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { closeSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createOrReadExclusive, createOrReadPublished, HEX_SECRET_RE, InvalidSecretFileError } from "./fs-race-safe.js";
+import { OwnerRepoUnresolvableError, resolveOwnerRepoAt } from "./owner-repo.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { appendLedger } from "./ledger.js";
 import { appendThreadMessage } from "./inbox-thread.js";
@@ -18,7 +20,8 @@ import {
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 // W1-T5283/W1-T5284: shared steps run synchronously for CLI callers, asynchronously on the daemon.
 import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
-import { validateDecisionSummary, type DecisionSummary, type SummarizeDeps } from "./feedback.js";
+import { instanceStateDir, validateDecisionSummary, type DecisionSummary, type SummarizeDeps } from "./feedback.js";
+import { planDestinationRepository } from "./plan-destination.js";
 import type { Mount, Mounts } from "./mounts.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { benchmarkNonDispatchSpawn, withReceiptIdentity } from "./benchmark-run.js";
@@ -2006,6 +2009,25 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
 }
 
 const asyncIssueTwins = new WeakMap<IssueGateway, AsyncIssueGateway>();
+/** W1-T14998: the repository each real gateway files in, and the reason a gateway files nowhere. */
+const gatewayRepository = new WeakMap<object, string>();
+const unfiledGateways = new WeakMap<object, string>();
+/** Also own symbol properties, so a producer's `{ ...issues }` wrapper carries them: an unrouted engine escalation
+ *  through a wrapper stays a ledger row, never a thrown create. */
+const GATEWAY_REPOSITORY_MARK: unique symbol = Symbol("rmd.escalation-gateway.repository");
+const GATEWAY_UNFILED_MARK: unique symbol = Symbol("rmd.escalation-gateway.unfiled");
+type MarkedGateway = { [GATEWAY_REPOSITORY_MARK]?: string; [GATEWAY_UNFILED_MARK]?: string };
+
+function markGateway(gateway: object, mark: typeof GATEWAY_REPOSITORY_MARK | typeof GATEWAY_UNFILED_MARK, value: string): void {
+  (mark === GATEWAY_REPOSITORY_MARK ? gatewayRepository : unfiledGateways).set(gateway, value);
+  (gateway as MarkedGateway)[mark] = value;
+}
+
+function gatewayMark(gateway: object, mark: typeof GATEWAY_REPOSITORY_MARK | typeof GATEWAY_UNFILED_MARK): string | undefined {
+  const carried = (gateway as MarkedGateway)[mark];
+  return typeof carried === "string" ? carried
+    : (mark === GATEWAY_REPOSITORY_MARK ? gatewayRepository : unfiledGateways).get(gateway);
+}
 
 function driveSynchronousEscalation<T>(drive: () => T): T {
   // Latched producers and SRE feedback can consume an incident after this call. Preserve
@@ -2195,6 +2217,13 @@ function* escalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>, al
   validateEscalationOptionKinds(e);
   const resolved = withExplicitConsequence(refuseUnlessResolvable(e));
   recordThreadMessage(resolved, deps);
+  // W1-T14998: with no private escalation repository the escalation is a ledger row only, never a public issue.
+  const unfiled = issueGatewayUnfiled(deps.issues);
+  if (unfiled !== undefined) {
+    appendLedger(deps.ledgerPath, { run_id: deps.runId, task_id: resolved.taskId, step: "escalation.not_filed",
+      class: resolved.class, summary: resolved.summary, reason: unfiled });
+    return "";
+  }
   if (!allowAsyncJudge) return yield* raiseEscalation(resolved, deps, allowAsyncJudge);
   return yield* escalateOncePerKey(resolved, deps, () => raiseEscalation(resolved, deps, allowAsyncJudge));
 }
@@ -2327,13 +2356,23 @@ export async function triageExistingEscalation(
 export function ghIssueGateway(
   owner: string,
   repo: string,
-  opts: { exec?: (args: string[]) => string } = {},
+  opts: { exec?: (args: string[]) => string; destination?: EscalationDestinationRead } = {},
 ): IssueGateway {
+  const code = `${owner}/${repo}`;
+  const route = escalationIssueRoute(opts, code);
+  if (route.outcome === "unfiled" && route.unrouted !== true) return unfiledIssueGateway(route.reason, "sync") as IssueGateway;
   const run =
     opts.exec ??
     ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
-  const gateway = issueGatewaySteps(`${owner}/${repo}`, run, runStepsSync) as IssueGateway;
-  if (opts.exec === undefined) asyncIssueTwins.set(gateway, ghIssueGatewayAsync(owner, repo));
+  if (route.outcome === "unfiled") {
+    // Unrouted: the code repository's own issues as before this task, less another repository's recorded ones.
+    const local = withoutOtherRecordedIssues(issueGatewaySteps(code, run, runStepsSync), code) as IssueGateway;
+    if (opts.exec === undefined) asyncIssueTwins.set(local, ghIssueGatewayAsync(owner, repo, { destination: () => route }));
+    return local;
+  }
+  const gateway = scopedToCodeRepository(issueGatewaySteps(route.repository, run, runStepsSync), route.repository, code, true) as IssueGateway;
+  markGateway(gateway, GATEWAY_REPOSITORY_MARK, route.repository);
+  if (opts.exec === undefined) asyncIssueTwins.set(gateway, ghIssueGatewayAsync(owner, repo, { destination: () => route }));
   return gateway;
 }
 
@@ -2342,9 +2381,208 @@ export function ghIssueGateway(
 export function ghIssueGatewayAsync(
   owner: string,
   repo: string,
-  opts: { exec?: (args: string[]) => Promise<string> } = {},
+  opts: { exec?: (args: string[]) => Promise<string>; destination?: EscalationDestinationRead; scopeToCodeRepository?: boolean } = {},
 ): AsyncIssueGateway {
-  return issueGatewaySteps(`${owner}/${repo}`, opts.exec ?? ((args: string[]) => ghTextAsync(args)), runStepsAsync);
+  const code = `${owner}/${repo}`;
+  const route = escalationIssueRoute(opts, code);
+  if (route.outcome === "unfiled" && route.unrouted !== true) return unfiledIssueGateway(route.reason);
+  const run = opts.exec ?? ((args: string[]) => ghTextAsync(args));
+  if (route.outcome === "unfiled") return withoutOtherRecordedIssues(issueGatewaySteps(code, run, runStepsAsync), code); // as ghIssueGateway's
+  const raw = issueGatewaySteps(route.repository, run, runStepsAsync);
+  const gateway = opts.scopeToCodeRepository === false ? raw
+    : scopedToCodeRepository(raw, route.repository, code, true);
+  markGateway(gateway, GATEWAY_REPOSITORY_MARK, route.repository);
+  return gateway;
+}
+
+/**
+ * W1-T14998 — WHERE A FLEET ESCALATION ISSUE IS FILED: the host's private plan destination (the ops repository),
+ * never public core (OBSERVED 2026-11-26: #21036, #21001, #21006). The body names the public PR by URL. With no route,
+ * managed repositories file in themselves and the engine repository writes a ledger row only. An unreadable
+ * destination or engine origin stops filing. An injected `exec` changes the transport, never the route.
+ */
+export type EscalationDestinationRead = () => { outcome: "named"; repository: string } | { outcome: "unfiled"; reason: string; unrouted?: true };
+
+/** W1-T14998 — an operator's explicit escalation repository, `<owner>/<name>`, ahead of the plan destination. */
+export const ESCALATION_REPOSITORY_ENV = "RMD_ESCALATION_REPOSITORY";
+
+/** The host's own route, read on each gateway construction: {@link ESCALATION_REPOSITORY_ENV} when set, else the plan
+ *  destination its instance config names. A set value that is not `<owner>/<name>` files nowhere, never a fallback. */
+export const hostEscalationDestination: EscalationDestinationRead = () => escalationDestinationAt(instanceStateDir())();
+
+/** W1-T14998 — the route for state directory `stateDir`: {@link ESCALATION_REPOSITORY_ENV} when set, else the plan
+ *  destination it names (`rmd host-alert` and serve get theirs from `--state-root`, not HOME's config). */
+export function escalationDestinationAt(stateDir: string | undefined): EscalationDestinationRead {
+  return () => {
+    const explicit = process.env[ESCALATION_REPOSITORY_ENV];
+    if (explicit !== undefined && explicit !== "") {
+      return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(explicit) && !/(^|\/)\.+(\/|$)/.test(explicit)
+        ? { outcome: "named", repository: explicit }
+        : { outcome: "unfiled", reason: `${ESCALATION_REPOSITORY_ENV} is not <owner>/<name>` };
+    }
+    const named = planDestinationRepository(stateDir);
+    if (named.outcome === "named") return { outcome: "named", repository: `${named.owner}/${named.repo}` };
+    return named.outcome === "off" ? { outcome: "unfiled", reason: NO_ESCALATION_ROUTE, unrouted: true }
+      : { outcome: "unfiled", reason: `private-escalation-repository-unreadable: ${named.reason}` };
+  };
+}
+
+function escalationIssueRoute(opts: { destination?: EscalationDestinationRead }, code: string): ReturnType<EscalationDestinationRead> {
+  // Production producers inject an exec too (SRE lane, liveness, host-alert), so only a destination names a route.
+  const route = (opts.destination ?? hostEscalationDestination)();
+  if (route.outcome === "named" || route.unrouted !== true) return route;
+  try {
+    if (engineRepository().toLowerCase() !== code.toLowerCase()) return route;
+    return { outcome: "unfiled", reason: route.reason };
+  } catch (error) {
+    if (!(error instanceof OwnerRepoUnresolvableError)) throw error;
+    return { outcome: "unfiled", reason: "engine-repository-unreadable" };
+  }
+}
+
+
+/** W1-T14998 — the repository the host's escalation issues live in, for their readers: the route's, else the code's. */
+export function escalationIssueRepository(owner: string, repo: string,
+  destination: EscalationDestinationRead = hostEscalationDestination): [string, string] {
+  const route = destination();
+  if (route.outcome !== "named") return [owner, repo];
+  const [routeOwner, routeRepo] = route.repository.split("/") as [string, string];
+  return [routeOwner, routeRepo];
+}
+
+/** W1-T14998 — every repository an escalation issue of `owner/repo` may live in: the route's (new issues), then the
+ *  code repository (legacy ones, still read and answered). One entry when the route is the code repository or none. */
+export function escalationIssueRepositories(owner: string, repo: string,
+  destination: EscalationDestinationRead = hostEscalationDestination): string[] {
+  const code = `${owner}/${repo}`;
+  const route = destination();
+  return route.outcome === "named" && route.repository.toLowerCase() !== code.toLowerCase() ? [route.repository, code] : [code];
+}
+
+/** W1-T14998 — the `<owner>/<name>` an issue URL names, or undefined when it is not a GitHub issue URL. */
+export function issueUrlRepository(url: string): string | undefined {
+  return /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/\d+\/?$/.exec(url.trim())?.[1];
+}
+
+/** W1-T14998 — the code repository a body's `**Code-Repository:**` machine field records, or undefined. A routed
+ *  gateway stamps it on each issue so one repository's listing, dedup and close in a shared pool skip another's. */
+export function escalationCodeRepository(body: string | undefined): string | undefined {
+  return /^\*\*Code-Repository:\*\*\s*(\S+)\s*$/m.exec(normalizeCandidateBody(escalationBodyInLegacyOrder(body) ?? ""))?.[1];
+}
+
+/** W1-T14998 — the `<owner>/<name>` of the first `/pull/<n>` URL in `text`, or undefined. A reading aid only: no
+ *  listing classifies an issue's owner by the PR it names. */
+export function prReferentRepositoryFromIssueText(text: string | undefined): string | undefined {
+  return /(?:github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?\/pull\/\d+/.exec(escalationBodyInLegacyOrder(text) ?? "")?.[1];
+}
+
+/** W1-T14998 — whether `issue`, from a ROUTED (pooled) listing, is `codeRepository`'s. Its recorded code repository
+ *  decides; recording none, it belongs to where it lives (`listedFrom`, else its URL's repository), since a routed
+ *  producer stamps every write. PR links never decide. */
+export function pooledIssueIsCodeRepositorys(issue: Pick<OpenIssue, "url" | "body">, codeRepository: string,
+  listedFrom?: string): boolean {
+  const owner = escalationCodeRepository(issue.body) ?? listedFrom ?? issueUrlRepository(issue.url);
+  return owner !== undefined && owner.toLowerCase() === codeRepository.toLowerCase();
+}
+
+/** W1-T14998 — whether `body` records a code repository other than `codeRepository`: never its, routed or not. */
+export function recordsAnotherCodeRepository(body: string | undefined, codeRepository: string): boolean {
+  const recorded = escalationCodeRepository(body);
+  return recorded !== undefined && recorded.toLowerCase() !== codeRepository.toLowerCase();
+}
+
+/** An unrouted gateway's listing, less issues recording another code repository (a pool this repository is). */
+function withoutOtherRecordedIssues(gateway: AsyncIssueGateway, codeRepository: string): AsyncIssueGateway {
+  const { listOpen } = gateway;
+  if (!listOpen) return gateway;
+  const own = (open: OpenIssue[]) => open.filter((issue) => !recordsAnotherCodeRepository(issue.body, codeRepository));
+  return { ...gateway, listOpen: (label: string) => {
+    const open = listOpen(label);
+    return open instanceof Promise ? open.then(own) : own(open);
+  } };
+}
+
+/** W1-T14998 — whether `gateway` lists from a routed pool (a real gateway on a configured route, even one naming the
+ *  code repository), so readers apply {@link pooledIssueIsCodeRepositorys}; unrouted, fake or unfiled ones do not. */
+export function escalationListingIsRouted(_owner: string, _repo: string, gateway: object): boolean {
+  return gatewayMark(gateway, GATEWAY_REPOSITORY_MARK) !== undefined;
+}
+
+/** W1-T14998 — `body` with its code repository recorded first in its machine fields, so it is the one
+ *  {@link escalationCodeRepository} reads even when the detail quotes another such line. A body already read as this
+ *  repository's, or one the field would push past GitHub's body limit, is returned unchanged (that issue is then
+ *  read as the repository it lives in, by {@link pooledIssueIsCodeRepositorys}). */
+export function withCodeRepositoryField(body: string, codeRepository: string): string {
+  if (escalationCodeRepository(body)?.toLowerCase() === codeRepository.toLowerCase()) return body;
+  const line = `**Code-Repository:** ${codeRepository}`;
+  // Right after the `**Host:**` line: the Class/Task/Host run and a fields block opening on `**Class:**` are what the
+  // body's layout readers recognise. A body with no Host line (a hand-rendered one) takes it as its first line.
+  const stamped = editEscalationMachineFields(body, (fields) => {
+    const host = /^\*\*Host:\*\*.*$/m.exec(fields);
+    if (!host) return `${line}\n${fields}`;
+    const end = host.index + host[0].length; // `.` stops before `\r`, so a CRLF body's `\r` follows the match
+    const crlf = fields[end] === "\r";
+    return `${fields.slice(0, end)}${crlf ? "\r\n" : "\n"}${line}${fields.slice(end)}`;
+  });
+  return stamped.length <= GITHUB_ISSUE_BODY_LIMIT ? stamped : body;
+}
+
+/** W1-T14998 — a gateway filing in route `route` for `codeRepository`: writes are stamped and its open listing (dedup,
+ *  the main-health rung, reconcilers) holds only that repository's issues, by {@link pooledIssueIsCodeRepositorys}. */
+export function scopedToCodeRepository(gateway: AsyncIssueGateway, route: string, codeRepository: string,
+  filterSameRepository = false): AsyncIssueGateway {
+  // `filterSameRepository`: `route` is a configured pool even when it is the code repository; else such a gateway is
+  // unrouted and stays unfiltered and unstamped.
+  if (!filterSameRepository && route.toLowerCase() === codeRepository.toLowerCase()) return gateway;
+  const own = (open: OpenIssue[]) => open.filter((issue) => pooledIssueIsCodeRepositorys(issue, codeRepository, route));
+  const { create, listOpen, editBody } = gateway;
+  return {
+    ...gateway,
+    create: (title, body, labels) => create(title, withCodeRepositoryField(body, codeRepository), labels),
+    ...(listOpen ? { listOpen: (label: string) => {
+      const open = listOpen(label);
+      return open instanceof Promise ? open.then(own) : own(open);
+    } } : {}),
+    ...(editBody ? { editBody: (url: string, body: string) => editBody(url, withCodeRepositoryField(body, codeRepository)) } : {}),
+  };
+}
+
+/** W1-T14998 — the repository a gateway files in, or undefined for a fake gateway or one that files nowhere. */
+export function issueGatewayRepository(gateway: object): string | undefined {
+  return gatewayMark(gateway, GATEWAY_REPOSITORY_MARK);
+}
+
+/** W1-T14998 — why a gateway files nowhere, or undefined when it files somewhere. */
+export function issueGatewayUnfiled(gateway: object): string | undefined {
+  return gatewayMark(gateway, GATEWAY_UNFILED_MARK);
+}
+
+/** A gateway that opens nothing: no open issue to dedupe against or retire, and every write refused with its reason. */
+function unfiledIssueGateway(reason: string, form: "sync" | "async" = "async"): AsyncIssueGateway {
+  const error = () => new Error(`no escalation issue is filed: ${reason}`);
+  const gateway: AsyncIssueGateway = form === "sync" ? {
+    create: () => { throw error(); }, closeWithComment: () => { throw error(); }, comment: () => { throw error(); },
+    editBody: () => { throw error(); }, editComment: () => { throw error(); },
+    listOpen: () => [], listCommentsSince: () => [], ensureLabel: () => false,
+  } : {
+    create: () => Promise.reject(error()), closeWithComment: () => Promise.reject(error()), comment: () => Promise.reject(error()),
+    editBody: () => Promise.reject(error()), editComment: () => Promise.reject(error()),
+    listOpen: () => Promise.resolve([]), listCommentsSince: () => Promise.resolve([]), ensureLabel: () => Promise.resolve(false),
+  };
+  markGateway(gateway, GATEWAY_UNFILED_MARK, reason);
+  return gateway;
+}
+
+const NO_ESCALATION_ROUTE = "no-private-escalation-repository";
+const engineRepositoryCache: { value?: string } = {};
+
+/** The engine repository is the checkout this installed module came from, independent of which managed target it drains. */
+function engineRepository(): string {
+  if (engineRepositoryCache.value !== undefined) return engineRepositoryCache.value;
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  const { owner, repo } = resolveOwnerRepoAt(root);
+  engineRepositoryCache.value = `${owner}/${repo}`;
+  return engineRepositoryCache.value;
 }
 
 const OPEN_ISSUES_BY_LABEL_QUERY =
@@ -2360,11 +2598,15 @@ const CREATE_ISSUE_MUTATION =
  *  {@link parseLabelledIssuesRest} returns; `create` reads the repository id and every label id in one
  *  query, then calls the createIssue mutation. There is no `ensureLabel`: a label with no id fails the create. */
 export function ghIssueGatewayGraphql(
-  owner: string,
-  repo: string,
-  opts: { exec?: (args: string[]) => Promise<string> } = {},
+  codeOwner: string,
+  codeRepo: string,
+  opts: { exec?: (args: string[]) => Promise<string>; destination?: EscalationDestinationRead } = {},
 ): AsyncIssueGateway {
-  const repoArg = `${owner}/${repo}`;
+  const code = `${codeOwner}/${codeRepo}`;
+  const route = escalationIssueRoute(opts, code);
+  if (route.outcome === "unfiled" && route.unrouted !== true) return unfiledIssueGateway(route.reason);
+  const repoArg = route.outcome === "named" ? route.repository : code;
+  const [owner, repo] = repoArg.split("/") as [string, string];
   const run = opts.exec ?? ((args: string[]) => ghTextAsync(args));
   const graphql = async (query: string, vars: Record<string, string>): Promise<Record<string, unknown>> => {
     const args = ["api", "graphql", "-f", `query=${query}`];
@@ -2375,7 +2617,7 @@ export function ghIssueGatewayGraphql(
     }
     return answer.data;
   };
-  return {
+  const gateway: AsyncIssueGateway = {
     async listOpen(label) {
       const issues: LabelledIssue[] = [];
       let cursor: string | undefined;
@@ -2416,6 +2658,12 @@ export function ghIssueGatewayGraphql(
       return url;
     },
   };
+  // Unrouted, it lists the code repository's own issues as the REST forms do; routed, it is the same pool they scope
+  // (a route naming the code repository itself included), so its listing and writes are scoped the same way.
+  if (route.outcome === "unfiled") return withoutOtherRecordedIssues(gateway, code);
+  const scoped = scopedToCodeRepository(gateway, repoArg, code, true);
+  markGateway(scoped, GATEWAY_REPOSITORY_MARK, repoArg);
+  return scoped;
 }
 
 function issueGatewaySteps(

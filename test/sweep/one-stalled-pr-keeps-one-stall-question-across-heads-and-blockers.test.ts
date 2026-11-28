@@ -10,6 +10,8 @@ import { escalationIssueTitle, ghIssueGatewayAsync, renderIssueBody, type Escala
 import type { Plan, Task } from "#src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { stageStallResolution } from "#src/lib/issue-revalidation-garden.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for craigoley/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "craigoley/remudero";
 
 // Operator ruling 2026-11-01: one open stage-stall issue per PR. Observed the same day, single PRs held 8 to 16
 // open stall issues (#15520 x16, #15638 x12, #15656 x10, #15368 x9), mostly a blocker cycling at one head.
@@ -162,5 +164,6 @@ test(`${TITLE}: the real issue gateway rewrites a body with one gh issue edit on
   const gateway = ghIssueGatewayAsync("craigoley", "remudero", { exec: async args => { calls.push(args); return ""; } });
   const url = "https://github.com/craigoley/remudero/issues/17000";
   await gateway.editBody!(url, `**Head:** ${HEAD_B}`);
-  assert.deepEqual(calls, [["issue", "edit", url, "--repo", "craigoley/remudero", "--body", `**Head:** ${HEAD_B}`]]);
+  assert.deepEqual(calls, [["issue", "edit", url, "--repo", "craigoley/remudero", "--body",
+    `**Code-Repository:** craigoley/remudero\n**Head:** ${HEAD_B}`]]);
 });

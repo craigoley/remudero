@@ -43,6 +43,8 @@ import {
   type CiFailureFetchOptions,
 } from "../src/run-task.js";
 import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for o/r.
+process.env.RMD_ESCALATION_REPOSITORY ??= "o/r";
 
 type Row = Record<string, unknown>;
 const HEAD = "a".repeat(40);
