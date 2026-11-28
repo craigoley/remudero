@@ -12,6 +12,7 @@ import { MOVER_BRANCH_PREFIX, movedFromCommit, parseMoverReceipts, verifyMoverRe
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { isWorkerProviderId, loadConfig, type Config, type WorkerProviderId } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { disarmOutcomeWithdrawn, disarmAutoMerge, armIfVerdictPermitsAsync, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
@@ -72,6 +73,7 @@ import { resolveReviewTarget, reviewTaskIdFromBody, reviewPrNumber, reviewViewAr
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "../../lib/staged-install.js";
 import { UNTASKED_REVIEW_BUDGET_USD, isPlanOnlyFilingPr, resolveReviewTaskId, reviewStateFromRollup, reviewStatusHistoryFromRest, usesUntaskedReviewMetadata } from "../../lib/tick-read-worker.js";
 import { freshPullRowRead, resolvePullRequestTaskSubject, type PullRequestTaskSubject } from "../../lib/task-dispatch-hold.js";
+import { execWhitelistedProofAsync, memoizeAsyncProofExecutor, type WhitelistedProof } from "../../lib/review.js";
 
 export interface ReviewCommandHost {
   readonly GIT_UNTRACKED_FILES_ALL: string;
@@ -832,13 +834,9 @@ export async function reviewHostedCiFileEvidence(
   }
 }
 
-// ── W1-T11157: CI'S PROOF-DISCRIMINATION RECORD, COMPARED IN SHADOW ───────────────────────────────────────────────
-// Operator trust decision 2026-11-03: the record is authenticated only as the log of a successful GitHub Actions job of
-// the proof-discrimination workflow at this exact head, read through the App gateway; the executor is the gate's import
-// closure plus its toolchain inputs and workflow (scripts/proof-discrimination-gate.mjs computes it for both sides); and
-// a hosted outcome counts toward no verdict. The review still runs every proof and only ledgers agreement.
+// CI's proof-discrimination record is authenticated by the successful workflow job at the exact head.
 
-/** One row per review that ran proofs at a head checkout: per-proof agreement, or why the record was not eligible. */
+/** One row per proof phase with the hosted eligibility, comparisons, reuse and audit results. */
 export const PROOF_REUSE_SHADOW_STEP = "review.proof_reuse_shadow";
 
 interface HostedProofOutcome { proof: string; head: string; base: string; verdict: string }
@@ -926,21 +924,25 @@ interface ProofReuseShadowInput {
   listTracked?: (dir: string) => Promise<string[]>;
 }
 
-/** The {@link PROOF_REUSE_SHADOW_STEP} row for one review. Reads the head checkout only and never throws: the verdict
- *  is already built and this row is all it produces. `would_save_ms` is the host proof time an eligible reuse skips. */
+type ProofReuseInput = Omit<ProofReuseShadowInput, "hostCriteria" | "hostProofMs">;
+type ProofReuseComparison = { eligible: false; reason: string; hosted_run_id?: number; hosted_job_id?: number } |
+  { eligible: true; record: ProofDiscriminationRecord; hosted_run_id: number; hosted_job_id: number };
+
 export async function proofReuseShadowRow(read: ProofDiscriminationRecordRead, input: ProofReuseShadowInput): Promise<Record<string, unknown>> {
   try {
-    return await compareProofReuse(read, input);
+    return proofReuseLogRow(await compareProofReuse(read, input), input);
   } catch (error) {
-    return { pr_url: input.prUrl, head_sha: input.headSha, host_proof_ms: input.hostProofMs, eligible: false, would_save_ms: 0,
-      reason: `shadow comparison failed: ${String((error as Error)?.message ?? error).slice(0, 300)}` };
+    return proofReuseLogRow({ eligible: false, reason: proofReuseComparisonError(error) }, input);
   }
 }
 
-async function compareProofReuse(read: ProofDiscriminationRecordRead, input: ProofReuseShadowInput): Promise<Record<string, unknown>> {
-  const row = { pr_url: input.prUrl, head_sha: input.headSha, host_proof_ms: input.hostProofMs };
+function proofReuseComparisonError(error: unknown): string {
+  return `shadow comparison failed: ${String((error as Error)?.message ?? error).slice(0, 300)}`;
+}
+
+async function compareProofReuse(read: ProofDiscriminationRecordRead, input: ProofReuseInput): Promise<ProofReuseComparison> {
   const hosted = read.kind === "record" ? { hosted_run_id: read.runId, hosted_job_id: read.jobId } : {};
-  const ineligible = (reason: string) => ({ ...row, eligible: false, reason, would_save_ms: 0, ...hosted });
+  const ineligible = (reason: string) => ({ eligible: false as const, reason, ...hosted });
   if (read.kind === "ineligible") return ineligible(read.reason);
   const record = read.record;
   if (record.head_sha !== input.headSha) return ineligible("result record names another head");
@@ -964,14 +966,213 @@ async function compareProofReuse(read: ProofDiscriminationRecordRead, input: Pro
   if (touched.length > 0) return ineligible(`diff touches the executor: ${touched.slice(0, 5).join(", ")}${touched.length > 5 ? ` and ${touched.length - 5} more` : ""}`);
   if (digests.executor_digest !== record.executor_digest) return ineligible("executor digest mismatch");
   if (digests.workflow_digest !== record.workflow_digest) return ineligible("workflow digest mismatch");
+  return { eligible: true, record, hosted_run_id: read.runId, hosted_job_id: read.jobId };
+}
+
+interface ProofAuditActivity {
+  reused: ReadonlySet<string>;
+  audited: ReadonlySet<string>;
+  share: number;
+  savedMs: number;
+  unavailable?: string;
+}
+
+function proofReuseLogRow(comparison: ProofReuseComparison, input: ProofReuseShadowInput, activity?: ProofAuditActivity): Record<string, unknown> {
+  const row = { pr_url: input.prUrl, head_sha: input.headSha, host_proof_ms: input.hostProofMs,
+    reused_proofs: [...(activity?.reused ?? [])], audited_proofs: [...(activity?.audited ?? [])], saved_ms: activity?.savedMs ?? 0 };
+  if (!comparison.eligible) return { ...row, ...comparison, would_save_ms: 0 };
+  const { record, ...hosted } = comparison;
   const proofs = (record.proofs ?? []).map(outcome => {
+    const identity = { proof: outcome.proof, hosted: outcome.verdict, hosted_head: outcome.head, hosted_base: outcome.base };
+    if (activity?.reused.has(outcome.proof)) return { ...identity, reused: true, agree: undefined };
     const host = input.hostCriteria.find(criterion => criterion.proof.trim() === outcome.proof)?.proof_exec ?? "not_judged";
-    return { proof: outcome.proof, hosted: outcome.verdict, hosted_head: outcome.head, hosted_base: outcome.base, host,
-      agree: HOSTED_VERDICT_AS_HOST[outcome.verdict] === host };
+    return { ...identity, host, agree: HOSTED_VERDICT_AS_HOST[outcome.verdict] === host };
   });
   const agreed = proofs.filter(proof => proof.agree).length;
-  return { ...row, eligible: true, ...hosted, criteria_source: record.criteria_source, would_save_ms: input.hostProofMs,
-    agreed, disagreed: proofs.length - agreed, proofs };
+  return { ...row, ...hosted, criteria_source: record.criteria_source,
+    ...(activity?.reused.size ? {} : { would_save_ms: input.hostProofMs }), audit_share: activity?.share,
+    ...(activity?.unavailable ? { audit_unavailable: activity.unavailable } : {}),
+    agreed, disagreed: proofs.filter(proof => proof.agree === false).length, proofs };
+}
+
+function proofAuditTransaction<T>(path: string, act: (db: DatabaseSync) => T): T {
+  mkdirSync(dirname(path), { recursive: true });
+  const db = new DatabaseSync(path, { timeout: 5_000 });
+  try {
+    db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE IF NOT EXISTS epoch (generation INTEGER NOT NULL);
+      INSERT INTO epoch SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM epoch);
+      CREATE TABLE IF NOT EXISTS samples (head TEXT PRIMARY KEY, agreements INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS agreements (head TEXT, proof TEXT, elapsed_ms REAL NOT NULL, PRIMARY KEY (head, proof));
+    `);
+    const result = act(db);
+    db.exec("COMMIT");
+    return result;
+  } finally {
+    db.close();
+  }
+}
+
+function startProofAudit(path: string, head: string) {
+  return proofAuditTransaction(path, db => {
+    const { generation } = db.prepare("SELECT generation FROM epoch").get() as { generation: number };
+    const totals = db.prepare("SELECT count(*) AS agreements, coalesce(avg(elapsed_ms), 0) AS mean_ms FROM agreements").get() as
+      { agreements: number; mean_ms: number };
+    db.prepare("INSERT OR IGNORE INTO samples VALUES (?, ?)").run(head, totals.agreements);
+    const { agreements } = db.prepare("SELECT agreements FROM samples WHERE head = ?").get(head) as { agreements: number };
+    // With zero disagreements since the reset, the Beta(1, agreements + 1) mean is 1/(agreements + 2).
+    // Normalize by the no-history mean so the first head is audited in full.
+    return { generation, share: 2 / (agreements + 2), meanMs: totals.mean_ms };
+  });
+}
+
+function settleProofAudit(path: string, generation: number, head: string, agreements: ReadonlyMap<string, number>, disagreement: boolean): boolean {
+  return proofAuditTransaction(path, db => {
+    if (disagreement) {
+      db.exec("UPDATE epoch SET generation = generation + 1; DELETE FROM samples; DELETE FROM agreements;");
+      db.prepare("INSERT INTO samples VALUES (?, 0)").run(head);
+      return false;
+    }
+    if (db.prepare("SELECT generation FROM epoch").get()?.generation !== generation) return false;
+    const insert = db.prepare("INSERT OR IGNORE INTO agreements VALUES (?, ?, ?)");
+    for (const [proof, elapsedMs] of agreements) insert.run(head, proof, elapsedMs);
+    return true;
+  });
+}
+
+function auditSelects(head: string, proof: string, share: number): boolean {
+  const draw = createHash("sha256").update(JSON.stringify([head, proof])).digest().readUInt32BE();
+  return draw / 2 ** 32 < share;
+}
+
+function proofCommandKey(cwd: string, proof: WhitelistedProof): string {
+  return JSON.stringify([cwd, proof.command, proof.args]);
+}
+
+type PreparedReview = Awaited<ReturnType<typeof preparePromisedReviewDecision>>;
+
+async function prepareHostedProofs(comparison: Extract<ProofReuseComparison, { eligible: true }>, input: ProofReuseInput,
+  args: Pick<Parameters<typeof runReview>[1], "owner" | "repo" | "ledgerPath" | "baseCheckoutDir" | "baseIsCheckout" | "baseIsGrepTree" | "log">) {
+  const hostedOutcomes = new Map<string, Array<NonNullable<typeof comparison.record.proofs>[number]>>();
+  for (const outcome of comparison.record.proofs ?? []) {
+    const proof = outcome.proof.trim();
+    hostedOutcomes.set(proof, [...(hostedOutcomes.get(proof) ?? []), outcome]);
+  }
+  const passes = new Map<string, NonNullable<typeof comparison.record.proofs>[number]>(
+    [...hostedOutcomes].filter(([, outcomes]) => outcomes.length > 0 && outcomes.every(outcome => outcome.verdict === "pass"))
+      .map(([proof, outcomes]) => [proof, outcomes[0]!] as const));
+  if (passes.size === 0) return undefined;
+  const repository = `${args.owner}/${args.repo}`.toLowerCase();
+  const path = join(dirname(args.ledgerPath), "review-proof-audit", createHash("sha256").update(repository).digest("hex") + ".sqlite");
+  const target = { owner: args.owner, repo: args.repo };
+  const head = input.headCheckoutDir, base = args.baseCheckoutDir;
+  const baseMatches = base === undefined || args.baseIsCheckout === true &&
+    (await hostWorktreeGitAsync(base, ["rev-parse", "HEAD"])).trim() === comparison.record.base_sha ||
+    args.baseIsGrepTree === true && (await hostWorktreeGitAsync(head, ["merge-base", "origin/main", "HEAD"])).trim() === comparison.record.base_sha;
+  const byCommand = new Map<string, string>();
+  const shared = new Set<string>();
+  for (const criterion of input.criteria) {
+    const proof = criterion.proof.trim();
+    const resolved = resolveProofTestPath(proof, head, { target });
+    const command = parseWhitelistedProof(resolved.proof, target);
+    if (!command) continue;
+    const keys = [proofCommandKey(head, command)];
+    if (base !== undefined) {
+      const atBase = resolved.note === undefined ? command :
+        parseWhitelistedProof(resolveProofTestPath(proof, base, { target }).proof, target) ?? command;
+      keys.push(proofCommandKey(base, atBase));
+    }
+    for (const key of keys) {
+      const previous = byCommand.get(key);
+      if (previous !== undefined && previous !== proof) { shared.add(previous); shared.add(proof); }
+      byCommand.set(key, proof);
+    }
+  }
+  const snapshot = startProofAudit(path, input.headSha);
+  const reuse = new Set([...passes].filter(([proof, outcome]) => !shared.has(proof) && baseMatches &&
+    (base === undefined || ["fail", "no-match", "ABSENT"].includes(outcome.base)) &&
+    !auditSelects(input.headSha, proof, snapshot.share)).map(([proof]) => proof));
+  const elapsed = new Map<string, number>(), audited = new Set<string>(), reused = new Set<string>();
+  const reported = new Set<string>();
+  let auditAll = false;
+  let unavailable: string | undefined;
+  let withinFoldReuses = 0;
+  const host = memoizeAsyncProofExecutor(async (proof, cwd) => {
+    const name = byCommand.get(proofCommandKey(cwd, proof));
+    if (name === undefined || !passes.has(name) || shared.has(name)) return execWhitelistedProofAsync(proof, cwd);
+    const started = performance.now();
+    audited.add(name);
+    try {
+      return await execWhitelistedProofAsync(proof, cwd);
+    } finally {
+      elapsed.set(name, (elapsed.get(name) ?? 0) + (performance.now() - started));
+    }
+  });
+  const execute = async (proof: WhitelistedProof, cwd: string) => {
+    const name = byCommand.get(proofCommandKey(cwd, proof));
+    if (auditAll || name === undefined || !reuse.has(name)) return host(proof, cwd);
+    reused.add(name);
+    return cwd === head ? "pass" as const : "no-match" as const;
+  };
+  const disagreements = (result: ReviewVerdict) => {
+    const byProof = new Map<string, CriterionVerdict>();
+    for (const criterion of result.criteria) {
+      const proof = criterion.proof.trim();
+      if (audited.has(proof) && criterion.proof_exec !== "executed_pass" && !reported.has(proof)) {
+        byProof.set(proof, criterion);
+      }
+    }
+    return [...byProof.values()];
+  };
+  const record = (unmatched: CriterionVerdict[]) => {
+    for (const { proof, proof_exec } of unmatched) {
+      reported.add(proof.trim());
+      args.log("proof_reuse.disagreement", { pr_url: input.prUrl, pr_number: reviewPrNumber(input.prUrl), head_sha: input.headSha, proof: proof.trim(),
+        hosted: "pass", host: proof_exec, hosted_run_id: comparison.hosted_run_id, hosted_job_id: comparison.hosted_job_id });
+    }
+  };
+  const settle = (unmatched: CriterionVerdict[]) => {
+    try {
+      return settleProofAudit(path, snapshot.generation, input.headSha, elapsed, unmatched.length > 0);
+    } catch (error) {
+      const reason = String(error);
+      unavailable = reason;
+      return false;
+    }
+  };
+  return {
+    // A reset invalidates earlier hosted receipts and forces the next decision through the audit.
+    receipt: reuse.size === 0 && snapshot.generation === 0 ? undefined :
+      [snapshot.generation, comparison.hosted_run_id, comparison.hosted_job_id, [...reuse]],
+    executions: host.observations,
+    // The skipped calls have no current timings. Estimate from the measured head/base host work in this epoch.
+    activity: (): ProofAuditActivity => ({ reused, audited, share: auditAll ? 1 : snapshot.share,
+      savedMs: Math.round(snapshot.meanMs * reused.size), unavailable }),
+    judge: async (judge: PreparedReview["judge"], evidence: Parameters<PreparedReview["judge"]>[0]) => {
+      const judgeWithAudit = () => judge({ ...evidence, asyncExecProof: execute });
+      let result = await judgeWithAudit();
+      const unmatched = disagreements(result);
+      if ((!auditAll || unmatched.length > 0) && !settle(unmatched)) {
+        auditAll = true;
+        if (reused.size > 0) {
+          reused.clear();
+          result = await judgeWithAudit();
+          if (unmatched.length === 0) {
+            const newlyUnmatched = disagreements(result);
+            if (newlyUnmatched.length > 0) settle(newlyUnmatched);
+          }
+        }
+      }
+      record(disagreements(result));
+      withinFoldReuses += result.proofReuses ?? 0;
+      const marker = `reused hosted proof PASS (run ${comparison.hosted_run_id}, job ${comparison.hosted_job_id})`;
+      return { ...result, proofUniqueRuns: host.uniqueRuns(), proofReuses: withinFoldReuses + host.reuses(),
+        criteria: result.criteria.map(c => reused.has(c.proof.trim()) && c.proof_exec === "executed_pass" ? { ...c,
+          reason: c.reason.replace("proof executed and PASSED on the PR head", marker)
+            .replace("also re-run against the PR's merge-base and did NOT pass there", "hosted proof did not pass at the PR's merge-base") } : c) };
+    },
+  };
 }
 
 // Project at the final write: status guards may replace a description with a private failure reason.
@@ -1252,6 +1453,8 @@ export async function runReview(host: ReviewCommandHost, args: {
   baseUnreadablePaths?: ReadonlySet<string>;
   /** R-11: true when `baseCheckoutDir` is a real merge-base worktree — see buildBaseProofDir. */
   baseIsCheckout?: boolean;
+  /** A grep-only tree has no git metadata; verify its recorded merge-base through the head checkout. */
+  baseIsGrepTree?: boolean;
   /** (W1-T3190) see {@link BaseProofDir.addedTestFiles}. */
   addedTestFiles?: ReadonlySet<string>;
   /**
@@ -1481,6 +1684,12 @@ export async function runReview(host: ReviewCommandHost, args: {
   const taskIdEvidence = await reviewTaskIdEvidenceAsync(diff, args.headRefName, args.headCheckoutDir,
     args.reservationHomeDir && args.headCheckoutDir ? satelliteReservationRead(args.headCheckoutDir, args.reservationHomeDir) : undefined);
   const ownership = taskIdEvidence.ownership;
+  const proofReuseInput = args.headCheckoutDir !== undefined && discriminationProofs(criteria).length > 0
+    ? { prUrl, headSha, diff, body: inputBody, criteria, headCheckoutDir: args.headCheckoutDir }
+    : undefined;
+  const proofReuseRead = proofReuseInput === undefined ? undefined : readProofDiscriminationRecord({ owner, repo, headSha })
+    .catch((error: unknown): ProofDiscriminationRecordRead =>
+      ({ kind: "ineligible", reason: `record unreadable: ${String((error as Error)?.message ?? error).slice(0, 300)}` }));
   const preparedDecision = await preparePromisedReviewDecision({
     input: { headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership, moverRemoval: args.moverRemoval,
       sharedReviewHistory: initialStatusHistory.kind === "readable" ? {
@@ -1489,6 +1698,22 @@ export async function runReview(host: ReviewCommandHost, args: {
       } : undefined, ...narrative },
     headCheckoutDir: args.headCheckoutDir, task, ledgerPath: args.ledgerPath, prUrl,
   });
+  const comparison = proofReuseRead === undefined ? undefined :
+    await compareProofReuse(await proofReuseRead, proofReuseInput!).catch(error =>
+      ({ eligible: false as const, reason: proofReuseComparisonError(error) }));
+  let proofAuditUnavailable: string | undefined;
+  const hostedProofs = comparison?.eligible !== true || args.calibrationCase ? undefined :
+    await prepareHostedProofs(comparison, proofReuseInput!, args).catch(error => {
+      const reason = String(error);
+      proofAuditUnavailable = reason;
+      return undefined;
+    });
+  if (hostedProofs !== undefined) {
+    const hostJudge = preparedDecision.judge;
+    Object.assign(preparedDecision, { judge: (evidence: Parameters<PreparedReview["judge"]>[0]) =>
+      hostedProofs.judge(hostJudge, evidence) });
+  }
+  const proofExecutions = hostedProofs?.executions ?? preparedDecision.proofExecutions;
   // W1-T9970: read once per review; a reviewer-image re-review of this head is its own decision.
   const runtimeImageSha = args.runtimeImageSha === undefined ? readRuntimeImageSha() : args.runtimeImageSha ?? undefined;
   const requeues = runtimeImageSha === undefined ? [] : (await readLedgerUnionRawLinesAsync(dirname(args.ledgerPath),
@@ -1497,6 +1722,11 @@ export async function runReview(host: ReviewCommandHost, args: {
   });
   let decisionDigest = reviewerImageDecisionDigest(requiredSemanticDecisionDigest(preparedDecision.decisionDigest,
     args.requireSemanticReview === true), { headSha, runtimeImageSha, requeues });
+  if (hostedProofs?.receipt !== undefined) {
+    decisionDigest = createHash("sha256").update(JSON.stringify({
+      decisionDigest, hostedProofReceipt: hostedProofs.receipt,
+    })).digest("hex");
+  }
   let planLintRetry: Parameters<typeof claimReviewDecision>[0]["planLintRetry"];
   let retryReuseFacts: ReviewReuseFacts | undefined;
   if (args.planLintRetryHead !== undefined && !args.shadow) {
@@ -1661,12 +1891,6 @@ export async function runReview(host: ReviewCommandHost, args: {
   // W1-T13868: review.finding rows name why a reviewer's served model is null; the provenance type stays unchanged.
   let reviewerServedModelReason: string | undefined;
   const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
-  // W1-T11157 (shadow): CI's record for this head is read beside the host's proof run; nothing reads it before the
-  // binding verdict below is built, and the comparison only ledgers agreement.
-  const proofReuseRead = args.headCheckoutDir !== undefined && discriminationProofs(criteria).length > 0
-    ? readProofDiscriminationRecord({ owner, repo, headSha }).catch((error: unknown): ProofDiscriminationRecordRead =>
-      ({ kind: "ineligible", reason: `record unreadable: ${String((error as Error)?.message ?? error).slice(0, 300)}` }))
-    : undefined;
   const hostedCiFilePassed = await reviewHostedCiFileEvidence({ owner, repo, headSha, criteria,
     headCheckoutDir: args.headCheckoutDir, log });
   const proofEvidence: Parameters<typeof preparedDecision.judge>[0] = {
@@ -1734,7 +1958,7 @@ export async function runReview(host: ReviewCommandHost, args: {
         writeFileSync(proofEvidencePath, JSON.stringify({
           headSha, phase: "pre-semantic", mergeVerdict: false,
           baseProvided: args.baseCheckoutDir !== undefined, baseIsCheckout: args.baseIsCheckout === true,
-          executions: preparedDecision.proofExecutions().map(({ cwd, ...execution }) => ({ ...execution,
+          executions: proofExecutions().map(({ cwd, ...execution }) => ({ ...execution,
             side: cwd === args.headCheckoutDir ? "head" : cwd === args.baseCheckoutDir ? "base" : "other" })),
           capped: preliminaryProofs!.capped, floorDegraded: preliminaryProofs!.floorDegraded,
           criteria: preliminaryProofs!.criteria.map((criterion, index) => ({ index: index + 1,
@@ -1771,7 +1995,7 @@ export async function runReview(host: ReviewCommandHost, args: {
         let reviewerAssignment: WorkerSelectionAssignment | undefined;
         // W1-T14037: the proofs the orchestrator recorded at this head; a reviewer command call that re-runs one is its own
         // kind in worker.tool_lineage. Recorded only: nothing reads the kind to decide anything.
-        const recordedProofCommands = preparedDecision.proofExecutions()
+        const recordedProofCommands = proofExecutions()
           .filter((execution) => execution.cwd === args.headCheckoutDir)
           .map(({ command, args: argv, cwd }) => ({ command, args: [...argv], cwd }));
         try {
@@ -1999,10 +2223,10 @@ export async function runReview(host: ReviewCommandHost, args: {
     openTaskIds: args.openTaskIds,
   });
   phases.judge = systemClock.now();
-  if (proofReuseRead !== undefined) {
-    log(PROOF_REUSE_SHADOW_STEP, await proofReuseShadowRow(await proofReuseRead, { prUrl, headSha, diff, body: inputBody,
-      criteria, headCheckoutDir: args.headCheckoutDir!, hostCriteria: computed.criteria,
-      hostProofMs: preliminaryProofMs + phases.judge - phases.lint }));
+  if (comparison !== undefined) {
+    log(PROOF_REUSE_SHADOW_STEP, { ...proofReuseLogRow(comparison, { ...proofReuseInput!, hostCriteria: computed.criteria,
+      hostProofMs: preliminaryProofMs + phases.judge - phases.lint }, hostedProofs?.activity()),
+      ...(proofAuditUnavailable ? { audit_unavailable: proofAuditUnavailable } : {}) });
   }
 
   // W1-T359: ADVISORY rubric layer — invoked AFTER `computed` above, over the
@@ -3678,6 +3902,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
             baseCheckoutDir: baseProof?.baseCheckoutDir,
             baseUnreadablePaths: baseProof?.baseUnreadablePaths,
             baseIsCheckout: baseProof?.baseIsCheckout,
+            baseIsGrepTree: baseProof?.baseIsGrepTree,
             addedTestFiles: baseProof?.addedTestFiles,
             // W1-T233: the named reason materialization failed (absent ⇒ it was
             // never attempted at all) — carried onto the posted CAPPED description
