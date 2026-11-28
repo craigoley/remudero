@@ -8234,19 +8234,25 @@ export async function renewReviewPublisherToken(opts: RenewReviewTokenOpts = {})
   return opts.force !== true && held.expiresAtMs > now ? "fresh" : "token_unrenewable";
 }
 
+/** W1-T15030: set while {@link postRenewingOnce} owns a status post's single 401 renewal and retry. */
+const guardedRenewalScope = new AsyncLocalStorage<true>();
+
 /** W1-T15030: posts `status`, and on a 401 renews the token once and retries once. Undefined once a post lands; the
  *  second 401's message when GitHub refused the renewed token too. Any other failure is thrown, as before. */
 async function postRenewingOnce<S>(post: (status: S) => Promise<void> | void, status: S,
   renewToken: (() => Promise<ReviewTokenRenewal>) | undefined): Promise<string | undefined> {
+  // W1-T15030: this is the stack's one renew-and-retry. Whatever poster wraps a raw postReviewStatus (the outbox replay,
+  // catalogReviewPoster, failureRecordingPoster), its own W1-T15038 re-mint stays off while it runs in here.
+  const postOwned = () => guardedRenewalScope.run(true, async () => post(status));
   try {
-    await post(status);
+    await postOwned();
     return undefined;
   } catch (first) {
     if (!ghUnauthorizedError(first)) throw first;
   }
   await (renewToken ?? (() => renewReviewPublisherToken({ force: true })))();
   try {
-    await post(status);
+    await postOwned();
     return undefined;
   } catch (second) {
     if (!ghUnauthorizedError(second)) throw second;
@@ -12906,7 +12912,8 @@ export async function postReviewStatus(
   const backoffMs = retryOpts.backoffMs ?? ((failedAttempt) => POST_REVIEW_STATUS_BASE_DELAY_MS * 2 ** (failedAttempt - 1));
   const sleep = retryOpts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const exec = retryOpts.exec ?? execGhStatusPostAsync;
-  const reauth = retryOpts.reauth ?? (reviewerToken || !process.env.GH_APP_ID
+  // W1-T15030: inside the guarded publisher's one renew-and-retry this post makes no re-mint of its own.
+  const reauth = retryOpts.reauth ?? (reviewerToken || !process.env.GH_APP_ID || guardedRenewalScope.getStore() === true
     ? undefined : async () => (await refreshReviewPublisherToken()).ok);
   let reauthed = false;
 

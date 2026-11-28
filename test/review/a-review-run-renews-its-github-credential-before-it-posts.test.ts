@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { failureRecordingPoster, refreshReviewSubjectInstallAsync, renewingIssueGateway, reviewCommand, type ReviewCommandDeps,
+import { catalogReviewPoster, failureRecordingPoster, refreshReviewSubjectInstallAsync, renewingIssueGateway, reviewCommand, type ReviewCommandDeps,
   type ReviewCommandHost, runReview, withdrawAfterPublication, withdrawArmIfVerdictRefusesAsync } from "#src/cli/commands/review.js";
 import { disarmAutoMergeAsync } from "#src/lib/arm-auto-merge.js";
 import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
@@ -17,7 +17,7 @@ import { appendLedger } from "#src/lib/ledger.js";
 import type { Mount } from "#src/lib/mounts.js";
 import type { AcceptanceCriterion } from "#src/lib/plan.js";
 import type { StagedInstallFailure } from "#src/lib/staged-install.js";
-import { holdReviewRunLive, postReviewPending, postReviewStatusGuarded, postUnreadTaskHoldGuarded, refreshReviewPublisherToken,
+import { holdReviewRunLive, postReviewPending, postReviewStatus, postReviewStatusGuarded, postUnreadTaskHoldGuarded, refreshReviewPublisherToken,
   renewReviewPublisherToken, reviewDecisionDigest, reviewInputDigest, reviewOwnerOrphaned } from "#src/lib/review.js";
 import { tryEscalateAsync } from "#src/lib/escalate.js";
 import { buildOpenPrViewsAsync } from "#src/lib/tick-read-worker.js";
@@ -304,6 +304,80 @@ test("W1-T15030 criterion 2: runReview's poster cannot renew and retry inside th
   assert.equal(refusals.length, 1);
   assert.equal(run.rows.some((row) => row.step === "review.posted" && row.state === "failure"), false,
     "the second 401 leaves the status unchanged");
+});
+
+/** Point the process at a fake GitHub App and mint its first installation token, as a review run does at start. */
+async function withAppToken(t: TestContext, label: string) {
+  const root = mkdtempSync(join(tmpdir(), `rmd-w1-t15030-${label}-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const keyPath = join(root, "app.pem");
+  let minted = 0;
+  const app = fakeApp(t, () => Date.now() + 60 * 60_000, () => `app-${label}-token-${++minted}`);
+  writeFileSync(keyPath, app.pem);
+  const previous = { GH_TOKEN: process.env.GH_TOKEN, GH_APP_ID: process.env.GH_APP_ID,
+    GH_APP_INSTALLATION_ID: process.env.GH_APP_INSTALLATION_ID, GH_APP_PRIVATE_KEY_PATH: process.env.GH_APP_PRIVATE_KEY_PATH,
+    REVIEWER_TOKEN: process.env.REMUDERO_REVIEWER_TOKEN, fetch: globalThis.fetch };
+  t.after(() => {
+    for (const key of ["GH_TOKEN", "GH_APP_ID", "GH_APP_INSTALLATION_ID", "GH_APP_PRIVATE_KEY_PATH"] as const) {
+      const value = previous[key];
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    if (previous.REVIEWER_TOKEN === undefined) delete process.env.REMUDERO_REVIEWER_TOKEN;
+    else process.env.REMUDERO_REVIEWER_TOKEN = previous.REVIEWER_TOKEN;
+    globalThis.fetch = previous.fetch;
+  });
+  delete process.env.REMUDERO_REVIEWER_TOKEN;
+  Object.assign(process.env, { GH_APP_ID: "42", GH_APP_INSTALLATION_ID: "7", GH_APP_PRIVATE_KEY_PATH: keyPath });
+  globalThis.fetch = app.fetchImpl;
+  assert.equal((await refreshReviewPublisherToken({ fetchImpl: app.fetchImpl, readKey: () => app.pem })).ok, true);
+  return { root, app };
+}
+
+test("W1-T15030 criterion 2: no poster the guarded retry wraps renews on its own — outbox replay and unread hold", async (t) => {
+  // OBSERVED (review of 57ab54106d): a raw postReviewStatus handed to the guarded publisher re-minted and retried inside
+  // its one renew-and-retry, so a persistent 401 made 4 POSTs and 3 mints, and 401, 401, ok published. Two production
+  // callers still hand it the raw poster: the claim's outbox replay (postReviewPending -> drainReviewOutbox with no
+  // `post`, as runReview's claim and the sweep's postPending call it) and reviewCommand's unread hold
+  // (catalogReviewPoster("ops", postReviewStatus)). GitHub refuses every status POST here.
+  const REFUSE_EVERY_POST = { when: "-X POST", stderr: "gh: Bad credentials (HTTP 401)", exit: 1 };
+  const sha = "f".repeat(40);
+  const body = "Remudero-Task: W1-T15030";
+  const digest = reviewInputDigest(sha, body);
+  const prUrl = "https://github.com/acme/remudero/pull/15030";
+  const fresh = { status: "fresh" as const, codeSha: "c".repeat(40), originMainSha: "c".repeat(40), advance: "none" as const };
+  const lifecycle = () => ({ merged: false, closed: false });
+  const sites: Record<string, (ledgerPath: string) => Promise<unknown>> = {
+    "postReviewPending's outbox replay": async (ledgerPath) => {
+      // A prior run's terminal post failed and was outboxed (the W1-T135 exhaustion path); this run's claim replays it.
+      const outboxed = await postReviewStatusGuarded({ owner: "acme", repo: "remudero", sha, state: "failure", description: "fail",
+        taskId: "W1-T15030", runId: "review-PR15030-prior", ledgerPath, prUrl, reviewInputDigest: digest, evidence: "executed",
+        reviewerCodeFreshness: fresh, fetchLifecycle: lifecycle,
+        post: async () => { throw Object.assign(new Error("gh failed"), { stderr: "gh: Not Found (HTTP 404)" }); } });
+      assert.equal(outboxed.posted, false);
+      return postReviewPending({ owner: "acme", repo: "remudero", sha, taskId: "W1-T15030", runId: "review-PR15030-claim", ledgerPath,
+        prUrl, reviewInputDigest: digest, fetchLifecycle: lifecycle, judgeReviewerCode: async () => fresh,
+        readReviewStatusHistory: async () => ({ kind: "readable" as const, failures: [] }), fetchStatus: () => ({ statuses: [] }) } as never);
+    },
+    "reviewCommand's unread hold": (ledgerPath) => postUnreadTaskHoldGuarded({ post: catalogReviewPoster("ops", postReviewStatus),
+      owner: "acme", repo: "remudero", sha, taskId: "W1-T15030", runId: "review-PR15030-hold", ledgerPath, prUrl,
+      reviewInputDigest: digest, fetchLifecycle: lifecycle, refusal: "the task's catalog is unread" }),
+  };
+  const observed: Record<string, unknown> = {};
+  for (const [site, publish] of Object.entries(sites)) {
+    const { root, app } = await withAppToken(t, site.replace(/\W+/g, "-"));
+    const ledgerPath = join(root, "ledger.ndjson");
+    const posts = await withGhShim([REFUSE_EVERY_POST, ...READS], async (shim) => {
+      await publish(ledgerPath);
+      return shim.calls().filter((call) => call.includes("-X POST")).length;
+    });
+    const rows = readLedgerLines(ledgerPath);
+    observed[site] = { posts, mints: app.exchanges.length - 1,
+      unrenewable: rows.filter((row) => row.step === "review.post_refused" && row.reason === "token_unrenewable").length,
+      posted: rows.some((row) => row.step === "review.posted") };
+  }
+  // One POST, one renewal and one retry across the whole stack; the second 401 is a named refusal; the status is unchanged.
+  const once = { posts: 2, mints: 1, unrenewable: 1, posted: false };
+  assert.deepEqual(observed, Object.fromEntries(Object.keys(sites).map((site) => [site, once])));
 });
 
 test("W1-T15030 criterion 2: an ops task's terminal post refused twice still lands its private findings", async (t) => {
