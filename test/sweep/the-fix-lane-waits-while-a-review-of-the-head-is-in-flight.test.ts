@@ -5,19 +5,23 @@
  * PR's current head, and dispatches as before once that review settles or its owner is proven dead.
  */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import * as sweep from "#src/lib/sweep.js";
-import { runReview } from "#src/cli/commands/review.js";
 import type { FixDispatchEnvelope, FixDispatchEvidence, OpenPrView, RollupCheckEntry } from "#src/lib/sweep.js";
 import type { Config } from "#src/lib/config.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { reviewCommand, runReview, type ReviewCommandDeps, type ReviewCommandHost } from "#src/cli/commands/review.js";
+import { postReviewPending } from "#src/lib/review.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { ghStubPath } from "#test/helpers/gh-stub.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const HEAD = "a".repeat(40);
 const OTHER = "c".repeat(40);
@@ -44,6 +48,7 @@ function liveReview(view: Pick<OpenPrView, "prNumber" | "taskId" | "reviewInputD
 function dispatcher(t: TestContext, ledger: Row[] | "unreadable", view: Partial<OpenPrView> = {}, live: boolean | string = true) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t15005-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  const head = view.headSha ?? HEAD;
   for (const dir of ["state/inflight", "repos/fixture", "tmp"]) mkdirSync(join(root, dir), { recursive: true });
   const ledgerPath = join(root, "state/ledger.ndjson");
   // A live ledger not yet written: the read fails with ENOENT.
@@ -65,11 +70,11 @@ function dispatcher(t: TestContext, ledger: Row[] | "unreadable", view: Partial<
     boundedWorktreeOwnerPathImpl: (path: string) => path,
     dispatchFixPreflightStandDownImpl: async () => undefined,
     fixBranchClaimKeyImpl: () => { seen.claimKeys++; return "t15005-claim"; },
-    createFixRungWorktreeImpl: () => undefined, captureWorktreeSnapshotImpl: () => ({ headSha: HEAD }),
+    createFixRungWorktreeImpl: () => undefined, captureWorktreeSnapshotImpl: () => ({ headSha: head }),
     buildFixRungDispatchArgsImpl: () => { seen.dispatched++; return {}; },
     openTaskIdsFromPlanImpl: () => new Set([task.id]), readPackageScriptsImpl: () => ({}), worktreeRemoveImpl: () => {},
-    ghJsonImpl: (args: string[]) => args[0] === "pr" ? { headRefName: BRANCH, headRefOid: HEAD, body: "", files: [] }
-      : { state: "open", head: { sha: HEAD }, mergeable_state: "clean" },
+    ghJsonImpl: (args: string[]) => args[0] === "pr" ? { headRefName: BRANCH, headRefOid: head, body: "", files: [] }
+      : { state: "open", head: { sha: head }, mergeable_state: "clean" },
     restRollupForImpl: async () => RED,
     readRequiredContextsImpl: () => ["ci"],
     fetchCiFailuresImpl: () => EVIDENCE.ciFailures,
@@ -78,10 +83,10 @@ function dispatcher(t: TestContext, ledger: Row[] | "unreadable", view: Partial<
   const pr = { prNumber: 15005, taskId: TASK, headSha: HEAD, headRefName: BRANCH, priorStrikes: 0, prUrl: PR_URL,
     checksState: "red", mergeState: "clean", reviewState: "pending", unmetCriteria: [], ...view } as unknown as OpenPrView;
   const dispatch = async () => {
-    const settle = live === false ? undefined : liveReview(pr, typeof live === "string" ? live : HEAD);
+    const settle = live === false ? undefined : liveReview(pr, typeof live === "string" ? live : head);
     try { return await effects.dispatchFix!(pr, EVIDENCE); } finally { settle?.(); }
   };
-  return { rows, seen, dispatch, effects, ledgerPath, pr };
+  return { rows, seen, dispatch, effects, ledgerPath, pr, root };
 }
 
 const claim = (run: string, head = HEAD, extra: Record<string, unknown> = {}): Row =>
@@ -120,6 +125,13 @@ test("W1-T15005 criterion 1: a fix round waits while a review of the current hea
   assert.deepEqual(hosted.envelopes, [], "THE CLAIM: no fix child is spawned while another process's review is live");
   assert.deepEqual(deferrals(hosted.sweepRows).map((row) => row.review_run), ["review-PR15005-op"]);
   assert.equal(swept.seen.claimKeys, 0);
+
+  // OBSERVED 2026-11-28 (review of 3c2e9e095b): the daemon's own task review (run-task-verb -> runReview, run child off)
+  // posted its pending claim under the daemon's pid and held nothing the sweep reads, so a real runSweep on red CI took
+  // the branch claim with 0 deferrals. Every path that posts a pending claim in the sweep's process is driven for real.
+  await daemonTaskReviewHoldsItsHead(t);
+  await reviewCommandHoldsItsHead(t);
+  await sweepReviewLaneHoldsItsHead(t);
 });
 
 test("W1-T15005 criterion 2: a fix round dispatches once the review ends or its owner dies", async (t) => {
@@ -421,50 +433,23 @@ test("W1-T15005 criterion 1: a daemon review's own live pending claim holds its 
   assert.equal(settled.seen.claimKeys, 1);
 });
 
-test("W1-T15005 criterion 1: runReview's pending claim defers the daemon fix until the review settles", async (t) => {
-  const d = dispatcher(t, [], {}, false);
-  let enteredPending!: () => void;
-  const pendingEntered = new Promise<void>((resolve) => { enteredPending = resolve; });
-  let releasePending!: () => void;
-  const pendingGate = new Promise<void>((resolve) => { releasePending = resolve; });
-  let enteredHistory!: () => void;
-  const historyEntered = new Promise<void>((resolve) => { enteredHistory = resolve; });
-  let releaseHistory!: () => void;
-  const historyGate = new Promise<void>((resolve) => { releaseHistory = resolve; });
-  t.after(() => { releasePending(); releaseHistory(); });
-  const review = runReview({ readHeadShaRest: () => HEAD } as never, {
-    owner: "o", repo: "fixture", prUrl: PR_URL,
-    task: { id: TASK, title: "repair", files: [], acceptance: [{ claim: "repair the defect", proof: "unit test: daemon review" }] },
-    report: "daemon review fixture", settingsFile: "unused", config: { root: process.cwd() } as Config,
-    log: () => {}, say: () => {}, account: (result: never) => result,
-    ledgerPath: d.ledgerPath, runId: "review-PR15005-daemon-integration", spawnReviewer: false,
-    postReviewPending: async (options) => {
-      appendFileSync(options.ledgerPath, `${JSON.stringify(claim(options.runId, HEAD, {
-        owner_pid: process.pid, owner_started_at: new Date().toISOString(), host: hostname(),
-      }))}\n`);
-      enteredPending();
-      await pendingGate;
-      return { posted: true };
-    },
-    readReviewStatusHistory: async () => {
-      enteredHistory();
-      await historyGate;
-      return { kind: "unreadable", reason: "fixture complete" };
-    },
-  } as never);
-  await pendingEntered;
-  const waiting = await d.dispatch();
-  assert.equal(waiting, false, "THE CLAIM: the sweep does not dispatch while runReview owns the pending head");
-  assert.deepEqual(deferrals(d.rows).map((row) => [row.pr_number, row.head, row.review_run]),
-    [[15005, HEAD, "review-PR15005-daemon-integration"]], "THE CLAIM: the sweep records the live review run");
+test("W1-T15005 criterion 1: a review's own head hold never releases another live holder of that head", async (t) => {
+  // In production the sweep's review lane holds the head in its review mutex while the `rmd review` it runs in this
+  // process takes its own hold, and that review's runReview another. When those reviews return, the lane's review is
+  // still settling: their releases must leave the lane's key, and each other, in place.
+  const d = dispatcher(t, [claim("review-PR15005-lane")], {}, false);
+  const settleLane = liveReview(d.pr);
+  t.after(settleLane);
+  const command = sweep.holdReviewOfHead(d.pr);
+  const nested = sweep.holdReviewOfHead(d.pr);
+  nested();
+  assert.equal(sweep.reviewOfHeadRunningHere(d.pr), true, "the enclosing review still holds the head");
+  command();
+  assert.equal(await d.dispatch(), false, "THE CLAIM: the lane's review still holds the round after its nested reviews return");
+  assert.deepEqual(deferrals(d.rows).map((row) => row.review_run), ["review-PR15005-lane"]);
   assert.equal(d.seen.claimKeys, 0);
-  releasePending();
-  await historyEntered;
-  releaseHistory();
-  await review;
-  await d.dispatch();
-  assert.equal(deferrals(d.rows).length, 1, "the prior deferral remains durable after runReview exits");
-  assert.equal(d.seen.claimKeys, 1);
+  settleLane();
+  assert.equal(sweep.reviewOfHeadRunningHere(d.pr), false, "positive control: once every holder settled, nothing holds the head");
 });
 
 test("W1-T15005: a claim another process owns is live only on an active owner assessment", () => {
@@ -553,3 +538,124 @@ test("W1-T15005 criterion 1: an owned conflicted head whose round waits on a rev
   const free = await pass([pending, { ...pending, step: "review.posted", state: "failure" }]);
   assert.equal(free.rounds.length, 1, "the worker round is recorded when no review is in flight");
 });
+
+/** The review module's host as the daemon's task review reaches it: the head read, and nothing else before the pause. */
+function daemonReviewHost(head: string): ReviewCommandHost {
+  const unexpected = (): never => { throw new Error("unexpected review host dependency in this fixture"); };
+  return {
+    GIT_UNTRACKED_FILES_ALL: "--untracked-files=all", JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
+    acceptedReviewAttemptId: (value) => typeof value === "string" ? value : undefined,
+    attributeWorkerStreamEvent: unexpected, ledgeredNonDispatchSpawn: unexpected, lintPlanForReview: unexpected,
+    liveWorkerRunIds: new Set<string>(), materializeReviewWorktree: unexpected, readHeadShaRest: () => head,
+    readMainPlanTreeSha: unexpected,
+    realDeps: () => ({ reviewWorktree: { fetch: unexpected } }) as unknown as ReturnType<ReviewCommandHost["realDeps"]>,
+    reviewPostedDescription: (verdict) => verdict.summary,
+    reviewWorkerLockId: (runId) => runId, reviewerClockBoundMs: unexpected, reviewSubjectGit: unexpected,
+  };
+}
+
+/** The daemon's task review: the real {@link runReview} in this process, posting its real pending claim under this pid.
+ *  The sweep dispatches while it runs (paused at its status-history read, after the claim), and again once it returned. */
+async function daemonTaskReviewHoldsItsHead(t: TestContext): Promise<void> {
+  const d = dispatcher(t, [], {}, false);
+  // `gh` as the real pending post reads and writes it for PR 15005: an open PR, no status yet, a post accepted.
+  const bin = ghStubPath(`#!/bin/sh
+case "$*" in
+  *"/commits/${HEAD}/status"*) echo '{"statuses":[]}' ;;
+  *"/pulls/15005"*) echo '{"number":15005,"state":"open","merged":false,"html_url":"${PR_URL}","body":"","head":{"sha":"${HEAD}","ref":"${BRANCH}"}}' ;;
+  *) echo '{}' ;;
+esac
+`);
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath ?? ""}`;
+  t.after(() => { process.env.PATH = oldPath; rmSync(dirname(bin), { recursive: true, force: true }); });
+  let during: unknown;
+  await withLiveWritesAllowed(async () => {
+    await runReview(daemonReviewHost(HEAD), {
+      owner: "o", repo: "fixture", prUrl: PR_URL, task: { id: TASK, acceptance: [] }, report: "", settingsFile: "",
+      config: { root: d.root } as Config, log: () => {}, say: () => {}, account: (result) => result,
+      spawnReviewer: false, disarm: () => "not-armed" as const, ledgerPath: d.ledgerPath, runId: "review-PR15005-task",
+      readReviewStatusHistory: async () => {
+        during = await d.dispatch();
+        return { kind: "unreadable", reason: "fixture: the review ends here" };
+      },
+    });
+  });
+  const claims = readLedgerLines(d.ledgerPath).filter((row) => row.step === "review.pending_posted");
+  assert.deepEqual(claims.map((row) => [row.run_id, row.owner_pid, row.head_sha, row.pr_url]),
+    [["review-PR15005-task", process.pid, HEAD, PR_URL]], "the real pending post wrote the daemon's claim under its own pid");
+  assert.equal(during, false, "THE CLAIM: the daemon's task review holds the round while it runs");
+  assert.deepEqual(deferrals(d.rows).map((row) => [row.pr_number, row.head, row.review_run]), [[15005, HEAD, "review-PR15005-task"]],
+    "THE CLAIM: one deferral row names the daemon's task review");
+  assert.equal(d.seen.claimKeys, 0, "no branch claim is taken while it runs");
+  // The claim row stands (this fixture's log writes no ending row), but the review returned: its hold is gone.
+  await d.dispatch();
+  assert.equal(deferrals(d.rows).length, 1, "a returned review holds nothing");
+  assert.equal(d.seen.claimKeys, 1, "the round then takes its branch claim as today");
+}
+
+/** `rmd review` in the daemon's process (runPrAction, a landing review): the real {@link reviewCommand}, its real pending
+ *  post, and the sweep dispatching during its worktree materialization and its review. */
+async function reviewCommandHoldsItsHead(t: TestContext): Promise<void> {
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+  const d = dispatcher(t, [], { headSha: head }, false);
+  const during: Record<string, unknown> = {};
+  const printed = console.log;
+  console.log = () => {};
+  t.after(() => { console.log = printed; });
+  const code = await withLiveWritesAllowed(() => reviewCommand(daemonReviewHost(head), "run-PR-pending-1795288835761",
+    ["--repo", "o/fixture"], {
+      resolveOwnerRepo: () => ({ owner: "o", repo: "fixture" }),
+      fetchView: () => ({ headRefOid: head, headRefName: "run-PR-pending-1795288835761", number: 15005, url: PR_URL,
+        body: "## Acceptance\n- the change works | grep: review in src/lib/review.ts\n\nRemudero-Task: PR-pending" }),
+      loadConfig: () => ({ root: d.root, installRoot: REPO_ROOT, claudeBin: "/bin/true" }) as Config,
+      executionMode: "semantic", fetchHead: () => {},
+      postReviewPending: (opts) => postReviewPending({ ...opts, fetchLifecycle: () => ({ merged: false, closed: false }),
+        fetchStatus: () => ({ statuses: [] }), post: () => {} }),
+      postStatus: async () => ({ posted: true }),
+      reviewerCodeFreshness: () => ({ status: "fresh", codeSha: head, originMainSha: head, advance: "none" }),
+      materialize: async () => {
+        during.materialize = await d.dispatch();
+        return { worktreePath: undefined, failure: { errorClass: "other", message: "fixture" } };
+      },
+      runReview: async () => {
+        during.review = await d.dispatch();
+        return { state: "success", headSha: head, reviewerOutcome: "success", criteria: [], testTheater: false,
+          summary: "fixture review complete", floorDegraded: false, capped: false, keywordOnly: false, planOnly: false };
+      },
+    } satisfies ReviewCommandDeps));
+  console.log = printed;
+  const claims = readLedgerLines(d.ledgerPath).filter((row) => row.step === "review.pending_posted");
+  assert.equal(claims.length, 1, "the real pending post wrote rmd review's claim");
+  assert.equal(claims[0]!.owner_pid, process.pid);
+  assert.deepEqual(during, { materialize: false, review: false }, `THE CLAIM: rmd review holds the round (exit ${code})`);
+  assert.deepEqual(deferrals(d.rows).map((row) => row.review_run), [claims[0]!.run_id, claims[0]!.run_id]);
+  assert.equal(d.seen.claimKeys, 0);
+}
+
+/** The sweep's own review lane: a real {@link sweep.runSweep} admits a review of the head, and while that review runs
+ *  (its claim posted by the real pending post under this pid) a fix round on the head waits. */
+async function sweepReviewLaneHoldsItsHead(t: TestContext): Promise<void> {
+  const d = dispatcher(t, [], {}, false);
+  const reviewable = { ...d.pr, checksState: "green", reviewState: "none", autoMergeArmed: false,
+    lastActivityAt: new Date(Date.now() - 60_000).toISOString() } as OpenPrView;
+  let during: unknown;
+  let reviews = 0;
+  const deps = {
+    ledgerPath: d.ledgerPath, runId: "SWEEP-T15005-review-lane", readLedger: () => [], appendLine: () => {},
+    readActiveWorkerCount: () => 0, arm: () => {}, close: () => {}, escalate: () => {},
+    dispatchFix: () => assert.fail("a green head is reviewed, not fixed"),
+    postReview: async () => {
+      reviews++;
+      await postReviewPending({ owner: "o", repo: "fixture", sha: HEAD, taskId: TASK, runId: "review-PR15005-lane",
+        ledgerPath: d.ledgerPath, prUrl: PR_URL, fetchLifecycle: () => ({ merged: false, closed: false }),
+        fetchStatus: () => ({ statuses: [] }), post: () => {} });
+      during = await d.dispatch();
+    },
+  } as unknown as sweep.SweepDeps;
+  await withLiveWritesAllowed(async () => { await sweep.runSweep([reviewable], deps); await sweep.drainDetachedSweepActions(); });
+  assert.equal(reviews, 1, "the sweep's review lane ran one review of the head");
+  assert.equal(during, false, "THE CLAIM: a fix round waits while the sweep's own review runs");
+  assert.deepEqual(deferrals(d.rows).map((row) => row.review_run), ["review-PR15005-lane"]);
+  assert.equal(d.seen.claimKeys, 0);
+}

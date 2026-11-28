@@ -7488,6 +7488,7 @@ export const REVIEW_HELD_PASS_STEPS: ReadonlySet<string> = new Set(["review.capp
  *  attempt settles, and a review run child from registerChildWork (or its boot adoption) until settleChildWork, so the
  *  key goes the moment the review ends by any exit: a verdict, a hold, an abort or a throw. No age, pid or row decides. */
 export function reviewOfHeadRunningHere(pr: Pick<OpenPrView, "prNumber" | "headSha" | "prUrl" | "taskId" | "reviewInputDigest">): boolean {
+  if (reviewOfHeadHolds.has(reviewOfHeadHoldKey(pr))) return true;
   const legacy = `${reviewOutcomeTaskIdFor(pr)}@${pr.headSha}`;
   for (const key of inFlightReviewKeys) {
     if (key === legacy) return true;
@@ -7498,18 +7499,27 @@ export function reviewOfHeadRunningHere(pr: Pick<OpenPrView, "prNumber" | "headS
   return false;
 }
 
-/** W1-T15005: let a reviewCommand running in this process share the sweep's existing review mutex.
- *  The owner pid in its pending row is intentionally not considered: this key is its positive liveness proof. */
-export function holdReviewOfHead(
-  pr: Pick<OpenPrView, "prNumber" | "headSha" | "prUrl" | "taskId" | "reviewInputDigest">,
-): () => void {
-  const key = reviewOutcomeKeyForPr(pr as OpenPrView);
-  inFlightReviewKeys.add(key);
+/** W1-T15005: the heads a review running in this process holds outside the sweep's review lane, counted per PR url and
+ *  head. Every review that posts a pending claim in this process takes one before its claim and releases it on its exit:
+ *  runReview (the daemon's task review, a fix rung's re-review, and the review inside every `rmd review`) and
+ *  reviewCommand (from before its claim through materialization). Counted, so a review nested in another, or two of one
+ *  head, release independently. Kept apart from the sweep's review mutex ({@link inFlightReviewKeys}), which dedups the
+ *  sweep's own review starts and is released by its own claim. */
+const reviewOfHeadHolds = new Map<string, number>();
+const reviewOfHeadHoldKey = (pr: Pick<OpenPrView, "prUrl" | "headSha">): string => `${pr.prUrl}\u0000${pr.headSha}`;
+
+/** W1-T15005: hold `pr`'s head for a review running in this process; the returned release is idempotent.
+ *  The owner pid in its pending row is intentionally not considered: this hold is its positive liveness proof. */
+export function holdReviewOfHead(pr: Pick<OpenPrView, "headSha" | "prUrl">): () => void {
+  const key = reviewOfHeadHoldKey(pr);
+  reviewOfHeadHolds.set(key, (reviewOfHeadHolds.get(key) ?? 0) + 1);
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    inFlightReviewKeys.delete(key);
+    const left = (reviewOfHeadHolds.get(key) ?? 1) - 1;
+    if (left > 0) reviewOfHeadHolds.set(key, left);
+    else reviewOfHeadHolds.delete(key);
   };
 }
 
