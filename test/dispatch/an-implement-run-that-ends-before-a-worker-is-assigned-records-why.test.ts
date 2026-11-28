@@ -343,3 +343,26 @@ test("W1-T12154 criterion 3: a checkpoint written before the assigned runs were 
   assert.equal(seriesPoint(after, "runs.completed").value, 0);
   assert.equal(seriesPoint(after, "runs.completed").note, "1 ended before a worker was assigned; not counted as completed");
 });
+
+test("W1-T12154 criterion 4: an assigned run's orphan verdict counts as one pass counts it after two resumes of an older checkpoint", async (t) => {
+  // An older checkpoint (no assigned runs kept) holds the run's start and its worker.assignment. Resume 1 folds an
+  // unrelated row and writes its own checkpoint; resume 2 folds the run's unstamped boot-sweep orphan verdict.
+  const corpus = ledgerDir(t, [{ ts: "2026-11-10T02:00:00.000Z", run_id: "W1-T1-17", task_id: "W1-T1", step: "run.start" },
+    { ts: "2026-11-10T02:01:00.000Z", run_id: "W1-T1-17", task_id: "W1-T1", step: "worker.assignment", worker_assignment: ASSIGNMENT }]);
+  const older = JSON.parse(JSON.stringify((await scan(corpus.dir)).checkpoint)) as AnalyticsCheckpoint;
+  delete older.state.history.assigned;
+  corpus.append([{ ts: "2026-11-10T02:30:00.000Z", run_id: "W1-T1-18", task_id: "W1-T1", step: "run.phase", waiting_on: "recon" }]);
+  const first = await scan(corpus.dir, older);
+  assert.equal(first.scan?.mode, "resume", "resume 1 resumed from the older checkpoint");
+  corpus.append([{ ts: "2026-11-10T03:00:00.000Z", run_id: "W1-T1-17", task_id: "W1-T1", step: "verdict",
+    verdict: "handed_off", reason: "orphaned-by-restart", surface: "boot-sweep" }]);
+  const second = await scan(corpus.dir, JSON.parse(JSON.stringify(first.checkpoint)) as AnalyticsCheckpoint);
+  assert.equal(second.scan?.mode, "resume", "resume 2 resumed from resume 1's checkpoint");
+  const onePass = await scan(corpus.dir);
+  assert.equal(onePass.scan?.mode, "full");
+  assert.equal(seriesPoint(onePass, "runs.completed").value, 1, "positive control: one pass counts the assigned run as completed");
+  assert.equal(seriesPoint(onePass, "duration.p50.ms").value, 60 * 60_000);
+  for (const id of ["runs.completed", "duration.p50.ms"]) assert.deepEqual(seriesPoint(second, id), seriesPoint(onePass, id), id);
+  // A scan that starts from zero has seen every assignment, so its checkpoint is complete again.
+  assert.equal(onePass.checkpoint.state.history.assignedIncomplete, undefined);
+});

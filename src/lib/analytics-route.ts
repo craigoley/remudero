@@ -694,8 +694,8 @@ type CheckpointHistoryState = {
   starts: Map<string, number>;
   /** W1-T12154: the runs whose `worker.assignment` this fold has seen. */
   assigned: Set<string>;
-  /** FALSE once restored from a checkpoint written before W1-T12154: a run absent from `assigned` is then unseen,
-   *  not unassigned. */
+  /** FALSE once restored from a checkpoint written before W1-T12154, or from one a fold so restored wrote: a run
+   *  absent from `assigned` is then unseen, not unassigned. */
   assignedFromStart: boolean;
 };
 
@@ -790,6 +790,9 @@ type AnalyticsCheckpointState = {
     starts: Array<[string, number]>;
     /** W1-T12154: optional because checkpoints written before it carry no assigned runs. */
     assigned?: string[];
+    /** W1-T12154: TRUE on a fold that began from a checkpoint without `assigned`, so its set misses runs assigned
+     *  before it; kept on every later checkpoint until a scan starts from zero. */
+    assignedIncomplete?: true;
   };
   usage?: UsageTelemetryState;
   breakdowns: {
@@ -2106,6 +2109,7 @@ function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpoin
       days: [...acc.checkpointHistory.days.entries()].map(([day, bucket]) => [day, { ...bucket, durationsMs: [...bucket.durationsMs] }]),
       starts: [...acc.checkpointHistory.starts.entries()],
       assigned: [...acc.checkpointHistory.assigned],
+      ...(acc.checkpointHistory.assignedFromStart ? {} : { assignedIncomplete: true as const }),
     },
     usage: JSON.parse(JSON.stringify(acc.usage)) as UsageTelemetryState,
     breakdowns: {
@@ -2166,7 +2170,7 @@ function hydrateCheckpointState(state: AnalyticsCheckpointState): AnalyticsAccum
   acc.checkpointHistory.days = new Map(state.history.days.map(([day, bucket]) => [day, { ...bucket, durationsMs: [...bucket.durationsMs] }]));
   acc.checkpointHistory.starts = new Map(state.history.starts);
   acc.checkpointHistory.assigned = new Set(state.history.assigned ?? []);
-  acc.checkpointHistory.assignedFromStart = state.history.assigned !== undefined;
+  acc.checkpointHistory.assignedFromStart = state.history.assigned !== undefined && state.history.assignedIncomplete !== true;
   acc.usage = JSON.parse(JSON.stringify(state.usage ?? usageTelemetryState())) as UsageTelemetryState;
   acc.checkpointBreakdowns.starts = new Set(state.breakdowns.starts);
   acc.checkpointBreakdowns.terminals = new Map(state.breakdowns.terminals.map(([key, value]) => [key, { ...value }]));
