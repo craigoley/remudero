@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { age, fixture, git, run, type Fixture } from "#test/helpers/host-cleanup-fixture.js";
@@ -138,6 +138,17 @@ exec /usr/bin/stat "$@"
   assert.deepEqual(copies(r, wt), []);
 });
 
+test("W1-T14891 a file bind mount does not make the state-disk root unreadable", () => {
+  const r = rig();
+  const { wt } = shadowedTree(r, "run-W1-T9010-1");
+  const accountFile = join(r.fx.root, "account-file");
+  writeFileSync(accountFile, "fixture account data\n");
+  const out = pass(r, { RMD_CLEANUP_DOCKER: container(r, [[accountFile, "/etc/account-file"]]) });
+  assert.match(out, new RegExp(`REMOVE ${wt}: under shadowed worktree root ${r.root}; idle 7 days, preserved then retired`));
+  assert.equal(existsSync(wt), false, out);
+  assert.ok(copies(r, wt)[0], out);
+});
+
 test("W1-T14891 a container-form gitdir is translated before preserving and retiring", () => {
   const r = rig();
   const hostState2 = join(r.state, "state2");
@@ -157,12 +168,14 @@ test("W1-T14891 a container-form gitdir is translated before preserving and reti
   const hostGitdir = readFileSync(gitfile, "utf8").trim().slice("gitdir: ".length);
   const backfile = join(hostGitdir, "gitdir");
   const hostBackpointer = readFileSync(backfile, "utf8").trim();
+  const stateAlias = join(r.fx.root, "state2-bind-alias");
+  symlinkSync(hostState2, stateAlias);
   writeFileSync(gitfile, "gitdir: /home/node/Remudero/remudero/.git/worktrees/run-W1-T9008-1\n");
   writeFileSync(backfile, "/home/node/Remudero/worktrees/run-W1-T9008-1/.git\n");
 
   const scratchWorktrees = join(r.fx.root, "container-scratch-worktrees");
   mkdirSync(scratchWorktrees, { recursive: true });
-  const docker = container(r, [[hostState2, "/home/node/Remudero"], [scratchWorktrees, "/home/node/Remudero/worktrees"]]);
+  const docker = container(r, [[stateAlias, "/home/node/Remudero"], [scratchWorktrees, "/home/node/Remudero/worktrees"]]);
   const out = pass(r, { RMD_CLEANUP_DOCKER: docker });
   assert.match(out, new RegExp(`REMOVE ${wt}: under shadowed worktree root ${r.root}; idle 7 days, preserved then retired`));
   assert.equal(existsSync(wt), false, out);
@@ -174,6 +187,31 @@ test("W1-T14891 a container-form gitdir is translated before preserving and reti
   assert.equal(existsSync(savedTar), true);
   assert.match(execFileSync("tar", ["-tzf", savedTar], { encoding: "utf8" }), /loose\.txt/);
   assert.equal(hostBackpointer, `${wt}/.git`);
+});
+
+test("W1-T14891 a dry run reads translated container Git metadata without rewriting its pointers", () => {
+  const r = rig();
+  const hostState2 = join(r.state, "state2");
+  const clone = join(hostState2, "remudero");
+  mkdirSync(hostState2, { recursive: true });
+  git(r.fx.root, "clone", "-q", join(r.fx.root, "origin.git"), clone);
+  const wt = join(r.root, "run-W1-T9011-1");
+  git(clone, "worktree", "add", "-q", "-b", "run/dry-run-container-form", wt, "main");
+  age(wt, 10 * DAY_HOURS);
+  const gitfile = join(wt, ".git");
+  const hostGitdir = readFileSync(gitfile, "utf8").trim().slice("gitdir: ".length);
+  const backfile = join(hostGitdir, "gitdir");
+  const originalGitfile = "gitdir: /home/node/Remudero/remudero/.git/worktrees/run-W1-T9011-1\n";
+  const originalBackpointer = "/home/node/Remudero/worktrees/run-W1-T9011-1/.git\n";
+  writeFileSync(gitfile, originalGitfile);
+  writeFileSync(backfile, originalBackpointer);
+  const scratch = join(r.fx.root, "scratch");
+  mkdirSync(scratch, { recursive: true });
+  const docker = container(r, [[hostState2, "/home/node/Remudero"], [scratch, "/home/node/Remudero/worktrees"]]);
+  const out = pass(r, { DRY_RUN: "1", RMD_CLEANUP_DOCKER: docker });
+  assert.match(out, new RegExp(`DRYRUN would: preserve then retire ${wt}`));
+  assert.equal(readFileSync(gitfile, "utf8"), originalGitfile);
+  assert.equal(readFileSync(backfile, "utf8"), originalBackpointer);
 });
 
 test("W1-T14891 a shadowed state-disk worktree is preserve-retired: the state folder is mounted and a deeper mount covers its worktrees", () => {

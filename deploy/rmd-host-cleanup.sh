@@ -612,6 +612,10 @@ bare_repository_scan() {
 # THIS repo's physical top (what Git compares against), never '*'. These calls only read the repo
 # (status runs with GIT_OPTIONAL_LOCKS=0) or remove it, so root creates no files inside it.
 rgit() {
+  if [ -n "${SHADOWED_GITDIR:-}" ] && [ "${1:-}" = "${SHADOWED_GITWORKTREE:-}" ]; then
+    GIT_DIR="$SHADOWED_GITDIR" GIT_WORK_TREE="$SHADOWED_GITWORKTREE" rmd_retirement_git "$@"
+    return $?
+  fi
   rmd_retirement_git "$@"
 }
 worktree_clean() {
@@ -1066,7 +1070,9 @@ retire_orphan_home_tree() {
 # W1-T14891: container_reaches_root <root>: 0 when a running container can reach the root, 1 when none can, 2 when
 # Docker cannot be read. A container reaches it through a mount whose source is the root, holds it, or sits inside it,
 # unless the root's place in that container is covered by a deeper mount (the daemon mounts the scratch copy over its
-# worktrees folder, inside the mount of the state directory). Sources are compared by their physical paths.
+# worktrees folder, inside the mount of the state directory). Directory sources are resolved physically; source
+# identity is also compared against the root's ancestors so a bind alias still reaches the same tree. File sources
+# are normalized through their parent directory instead of being passed to `cd`.
 container_reaches_root() {
   local root="$1" rp ids id lines line i j src dst ps cpath shadowed cursor identity root_identity root_prefix suffix
   local -a srcs=() dsts=()
@@ -1081,7 +1087,15 @@ container_reaches_root() {
       srcs+=("$src"); dsts+=("${dst%/}")
     done <<< "$lines"
     for i in "${!srcs[@]}"; do
-      ps="$(cd -P -- "${srcs[$i]}" 2>/dev/null && pwd -P)" || return 2
+      # Docker may bind-mount a file (for example an account file). Resolve its parent
+      # physically and retain its basename; `cd` on the file itself fails.
+      if [ -d "${srcs[$i]}" ]; then
+        ps="$(cd -P -- "${srcs[$i]}" 2>/dev/null && pwd -P)" || return 2
+      elif [ -e "${srcs[$i]}" ]; then
+        ps="$(cd -P -- "${srcs[$i]%/*}" 2>/dev/null && pwd -P)/${srcs[$i]##*/}" || return 2
+      else
+        return 2
+      fi
       # A bind mount can expose the same directory through another host path. Compare the
       # mount source with every existing ancestor of the root by device/inode as well as name.
       cpath=""; cursor="$rp"
@@ -1164,9 +1178,13 @@ translate_shadowed_worktree_gitdir() {
     done <<< "$mounts"
   done <<< "$ids"
   [ "$host_back" = "$wt/.git" ] || return 1
-  printf '%s\n%s\n' "$raw" "$backraw"
-  printf 'gitdir: %s\n' "$host_gitdir" > "$gitfile" || return 1
-  printf '%s\n' "$host_back" > "$backfile" || { printf 'gitdir: %s\n' "$raw" > "$gitfile"; return 1; }
+  printf '%s\n%s\n%s\n%s\n' "$raw" "$backraw" "$host_gitdir" "$host_back"
+  # A dry run must not rewrite either side of Git's linked-worktree pointer. The
+  # caller can read through GIT_DIR instead while simulating the retirement.
+  if [ "$DRY_RUN" != 1 ]; then
+    printf 'gitdir: %s\n' "$host_gitdir" > "$gitfile" || return 1
+    printf '%s\n' "$host_back" > "$backfile" || { printf 'gitdir: %s\n' "$raw" > "$gitfile"; return 1; }
+  fi
   return 0
 }
 # W1-T14891: a worktree under a state-disk root that no running container reaches is preserved (MANIFEST, verified
@@ -1174,6 +1192,8 @@ translate_shadowed_worktree_gitdir() {
 # a container reaches, or one Docker cannot prove unreached, is left alone. A tree whose Git metadata the host cannot
 # read (a container path) is kept and reported.
 SHADOWED_UNREACHED=""
+SHADOWED_GITDIR=""
+SHADOWED_GITWORKTREE=""
 sweep_shadowed_worktree_roots() {
   local root wt status translated original_gitfile original_backfile mapped_gitdir
   while IFS= read -r root; do
@@ -1198,18 +1218,27 @@ sweep_shadowed_worktree_roots() {
         }
         mapped_gitdir="$(sed -n '1s/^gitdir: //p' -- "$wt/.git" 2>/dev/null)"
         original_backfile="$(printf '%s\n' "$translated" | sed -n '2p')"
+        mapped_gitdir="$(printf '%s\n' "$translated" | sed -n '3p')"
+        if [ "$DRY_RUN" = 1 ]; then
+          SHADOWED_GITDIR="$mapped_gitdir"; SHADOWED_GITWORKTREE="$wt"
+        fi
         if ! rgit "$wt" rev-parse --absolute-git-dir >/dev/null 2>&1; then
-          printf '%s\n' "$original_gitfile" > "$wt/.git"
-          printf '%s\n' "$original_backfile" > "$mapped_gitdir/gitdir"
+          if [ "$DRY_RUN" != 1 ]; then
+            printf '%s\n' "$original_gitfile" > "$wt/.git"
+            printf '%s\n' "$original_backfile" > "$mapped_gitdir/gitdir"
+          fi
           log "KEEP $wt: translated Git metadata could not be read"; continue
         fi
       fi
       SHADOWED_UNREACHED="$root"; HOME_LINKED_TREE="$wt"
       retire_held_worktree "$wt" "under shadowed worktree root $root"
       if [ -n "$translated" ] && [ -d "$wt" ]; then
-        printf '%s\n' "$original_gitfile" > "$wt/.git"
-        printf '%s\n' "$original_backfile" > "$mapped_gitdir/gitdir"
+        if [ "$DRY_RUN" != 1 ]; then
+          printf '%s\n' "$original_gitfile" > "$wt/.git"
+          printf '%s\n' "$original_backfile" > "$mapped_gitdir/gitdir"
+        fi
       fi
+      SHADOWED_GITDIR=""; SHADOWED_GITWORKTREE=""
       HOME_LINKED_TREE=""; SHADOWED_UNREACHED=""
     done
   done < <(printf '%s\n' "$SHADOWED_WORKTREE_ROOTS" | tr ':' '\n' | awk 'NF && !seen[$0]++')
