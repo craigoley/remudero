@@ -2388,7 +2388,8 @@ draft repaired clean is cached as a lint-clean draft is. The in-spawn evaluation
 cash answer clean or not clean makes the same repair first.
 
 To turn the repair off, create `state/DRAFT_AUTOFIX_OFF`. The rung then lints each draft as the
-model wrote it, and every blocking violation spends a redraft as before.
+model wrote it, and every blocking violation spends a redraft as before. `rmd inbox-bakeoff`
+reads the same file, so a bake-off replays the rung as production runs it.
 
 ### An inbox redraft carries a cited depends_on index
 
@@ -2401,7 +2402,7 @@ before. Each `inbox.draft_synthesized` row of a redraft has `retry_index: "cited
 its `plan_index_chars` counts the index that prompt actually carried.
 
 To send the full index on every redraft again, create `state/DRAFT_RETRY_FULL_INDEX`. The next
-draft batch reads it; delete the file to return to the cited index.
+draft batch reads it, and so does `rmd inbox-bakeoff`; delete the file to return to the cited index.
 
 ### One fleet cash cap across core, site, and console
 
