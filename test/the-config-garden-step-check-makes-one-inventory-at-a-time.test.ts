@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import * as gardener from "#src/lib/config-gardener.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
-import { corpus, fixture, NOW_MS, sources, WEIGHTS } from "#test/helpers/the-config-gardener-reads-only-the-ledger-steps-it-prices.js";
+import { at, corpus, fixture, NOW_MS, sources, WEIGHTS } from "#test/helpers/the-config-gardener-reads-only-the-ledger-steps-it-prices.js";
 
 type Fixture = ReturnType<typeof fixture>;
 type Rows = Array<Record<string, unknown>>;
@@ -27,6 +27,19 @@ const steps = (): readonly string[] => gardener.CONFIG_GARDEN_LEDGER_STEPS;
  *  47 steps) to 4,397 MB (#19180's head, 52 steps) with every inventory at once. 1,536 MB is about 3 times the
  *  one-at-a-time value, so coverage and a slower host fit, and it is below every concurrent value measured. */
 const STEP_CHECK_RSS_CEILING_MB = 1536;
+
+function stepCheckCorpus(): Rows {
+  const runId = "r800";
+  const taskId = "W1-T800";
+  const prUrl = "https://github.com/acme/remudero/pull/800";
+  // The settlement is the run's only link to the later merge credit.
+  return [
+    ...corpus(),
+    { step: "run.start", run_id: runId, task_id: taskId, type: "implement", risk: "low", task_class: "src", ts: at(800) },
+    { step: "dispatch.expedite_past_wip_settled", run_id: runId, task_id: taskId, pr_url: prUrl, ts: at(801) },
+    { step: "verdict.merged", run_id: "sweep-1", pr_url: prUrl, ts: at(802) },
+  ];
+}
 
 /** The inventory the measurement worker makes, made in this process: the same input configInventory gives the
  *  worker for `sources(rows)`, and the worker's own body, so no Worker starts. */
@@ -54,7 +67,7 @@ async function inertSteps(f: Fixture, rows: Rows, whole: gardener.ConfigInventor
 
 test("W1-T13541 criterion 1: every step in CONFIG_GARDEN_LEDGER_STEPS changes the inventory when its rows are dropped, one in-process inventory at a time", async (t) => {
   const f = fixture(t);
-  const rows = corpus();
+  const rows = stepCheckCorpus();
   const whole = await inventoryOf(f, rows);
   assert.deepEqual(await inventoryOf(f, rows.filter((r) => steps().includes(String(r.step)))), whole, "rows outside the set are inert");
   assert.ok(steps().length > 30, "positive control: the set is populated");
@@ -63,7 +76,7 @@ test("W1-T13541 criterion 1: every step in CONFIG_GARDEN_LEDGER_STEPS changes th
 
 test("W1-T13541 criterion 2: the in-process inventory is deepEqual to the measurement worker's inventory, and the step check's result is unchanged", async (t) => {
   const f = fixture(t);
-  const rows = corpus();
+  const rows = stepCheckCorpus();
   const cases: Array<[string, Rows]> = [["whole corpus", rows]];
   for (const step of ["run.start", "learnings.injected", "followup.filed"]) {
     const without = rows.filter((r) => r.step !== step);
