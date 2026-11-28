@@ -3245,6 +3245,7 @@ export function buildEscalationTriageRuntime(
     windowMs?: () => number;
     client?: () => Pick<DaemonClient, "submitFeedback" | "listFeedback">;
     judge?: (e: Escalation) => Promise<EscalationJudgeVerdict>;
+    spawnJudge?: typeof spawnWorker;
     amend?: (e: Escalation, deps: EscalateDeps<AsyncIssueGateway>) => Promise<string>;
     kick?: (e: Escalation) => void;
   } = {},
@@ -3331,8 +3332,17 @@ export function buildEscalationTriageRuntime(
             !!previousCause && !!e.cause && previousCause !== e.cause },
         };
       },
-      judge: io.judge ?? (async (e) => realEscalationJudge({ mounts: loadMounts(mountsPath(root)),
-        cwd: root, settingsFile: join(resolveInstallRoot(config), "settings", "worker.json") })(e)),
+      judge: io.judge ?? (async (e) => {
+        const spawn = io.spawnJudge ?? benchmarkNonDispatchSpawn("escalation-summary");
+        return realEscalationJudge({ mounts: loadMounts(mountsPath(root)),
+          cwd: root, settingsFile: join(resolveInstallRoot(config), "settings", "worker.json"),
+          spawn: async (args) => {
+            const result = await spawn(args);
+            if (result.notStarted !== undefined) throw new WorkerNotStartedError(result.notStarted);
+            return result;
+          },
+        })(e);
+      }),
       execute: {
         feedback_reply: async (e) => {
           const id = feedbackId(e);

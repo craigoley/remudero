@@ -7,7 +7,7 @@ import { CI_JUDGE_HEADS_FILE, judgeCiEscalation, productionCiJudgePorts, withCiJ
 import { clockFromMillisFn } from "#src/lib/clock.js";
 import { EventEmitter } from "node:events";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
 import { spawnRunChild } from "#src/lib/run-child.js";
@@ -20,6 +20,7 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { installDetachedWorkHost, type DetachedWorkHost, type OpenPrView } from "#src/lib/sweep.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { appendLedger } from "#src/lib/ledger.js";
+import { ESCALATION_TRIAGED_STEP, FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, type AsyncIssueGateway, type Escalation } from "#src/lib/escalate.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { answerThread, realThreadDecider, type InboxThreadItem } from "#src/lib/inbox-responder.js";
@@ -39,9 +40,9 @@ import { proofDebtPopulationPermit, readInboxGardenerStore, stampMechanicalAsk, 
 import { fixedClock } from "#src/lib/clock.js";
 
 // The shared run-task test helper, not a direct src/run-task.ts import (the affected-suite reach ratchet bounds direct importers).
-import { buildSweepEffects, codeScanningJudgeDeps, fleetLaneSamenessJudge, dispatchAlertFixRun, dispatchMainRepairFixRun, handedOffHeadRiskJudge, mainRepairLaneFor, runFixRung, runReview, type AlertFixDispatchDeps } from "#test/helpers/run-task-test.js";
+import { buildEscalationTriageRuntime, buildSweepEffects, codeScanningJudgeDeps, fleetLaneSamenessJudge, dispatchAlertFixRun, dispatchMainRepairFixRun, handedOffHeadRiskJudge, mainRepairLaneFor, runFixRung, runReview, sweepEscalationTriage, type AlertFixDispatchDeps } from "#test/helpers/run-task-test.js";
 import { readFleetLaneStore, triageFleetLaneAsync, writeClassificationSnapshot } from "#src/lib/fleet-lane.js";
-import { awaitHandedOffHeadJudgments, CODE_SCANNING_FIX_STEP, handedOffHeadAwaitingJudgment, handedOffHeadJudgmentPool, runSweep,
+import { awaitHandedOffHeadJudgments, CODE_SCANNING_FIX_STEP, ESCALATION_REJUDGED_STEP, handedOffHeadAwaitingJudgment, handedOffHeadJudgmentPool, runSweep,
   type HandedOffHeadJudgmentPool, type SweepDeps } from "#test/helpers/sweep-test.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 
@@ -187,6 +188,87 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
     ["ci_judge_kick", "light_pass_admission"]);
   late.settlePage();
   await lateExit;
+
+  await t.test("an in-flight sweep leaves a withheld re-judge due for the successor", async (t) => {
+    const root = ownedFixtureDir(t, "retired-escalation-rejudge").dir;
+    mkdirSync(join(root, ".remudero"));
+    copyFileSync(mountsPath(REPO_ROOT), mountsPath(root));
+    const ledgerPath = join(root, "ledger.ndjson");
+    const context = { root, config: { root, installRoot: REPO_ROOT, claudeBin: "/unused", dailyCapUsd: 25 },
+      owner: "acme", repo: "remudero", ledgerPath, runId: "SWEEP-retired-rejudge" };
+    const subject: Escalation = { class: "BLOCKED", taskId: "W1-REJUDGE", summary: "The open PR needs a ruling",
+      detail: "The owning repair is under way", options: [{ label: "wait", detail: "Wait for the owning repair" }], recommendation: "wait" };
+    const issue = { number: 41, url: "https://github.com/acme/remudero/issues/41", body: `**Task:** ${subject.taskId}\n` };
+    const pr = { taskId: subject.taskId, prNumber: 17, prUrl: "https://github.com/acme/remudero/pull/17",
+      headSha: "head-17", reviewState: "none", checksState: "green" } as OpenPrView;
+    appendLedger(ledgerPath, { ts: "2026-11-25T12:00:00.000Z", run_id: "issue-birth", task_id: subject.taskId,
+      step: "escalation.issue_opened", issue_url: issue.url, triage_subject: subject });
+    const clock = fixedClock(Date.parse("2026-11-26T12:00:00.000Z"));
+    let finishListing: () => void = () => {};
+    const canFinishListing = new Promise<void>((resolve) => { finishListing = resolve; });
+    let startListing: () => void = () => {};
+    const listingStarted = new Promise<void>((resolve) => { startListing = resolve; });
+    const comments: string[] = [];
+    const relabels: string[] = [];
+    const logs: Row[] = [];
+    const issues: AsyncIssueGateway = {
+      create: () => assert.fail("re-judging an open issue must not file another"),
+      listOpen: async (label) => {
+        if (label !== NEEDS_HUMAN_LABEL) return [];
+        startListing();
+        await canFinishListing;
+        return [issue];
+      },
+      comment: (_url, body) => { comments.push(body); },
+    };
+    const pass = (runId: string, spawnJudge: typeof spawnWorker) => {
+      const runtime = buildEscalationTriageRuntime(context, { spawnJudge,
+        readPolicy: () => ({ escalationTriage: { mode: "act" } }), readRows: () => [], seenAt: () => undefined,
+        windowMs: () => 1, clock });
+      return sweepEscalationTriage({ ...context, runId }, [pr], (step, extra) => { logs.push({ step, ...extra }); }, {
+        issues, runtime, rows: readLedgerLines(ledgerPath), clock, relabel: (_url, label) => { relabels.push(label); },
+      });
+    };
+
+    const daemon = retiringExit();
+    const starts: string[] = [];
+    const refusals: Array<Record<string, unknown>> = [];
+    const retiredPass = daemon.retirement.inSpawnScope(() => daemon.retirement.refuse("sweep", () =>
+      pass(context.runId, (args) => spawnWorker({ ...args, config: context.config,
+        admitWorkerMemory: async () => { starts.push("judge"); throw new Error("unexpected judge start"); },
+        logWorkerSpawnWithheld: (row) => refusals.push(row),
+      })))());
+    await listingStarted;
+    const exit = daemon.exit();
+    await turns(5);
+    assert.ok(daemon.lockReleased() && daemon.retirement.retired() && !daemon.pageDone());
+    finishListing();
+    await retiredPass;
+    assert.deepEqual(refusals.map((row) => [row.step, row.hold]), [
+      ["worker.spawn_withheld", "retired: drain lock released; the successor owns this work"],
+    ], "the in-flight sweep reached the real re-judge spawn and it was refused");
+    assert.deepEqual(starts, [], "the re-judge worker never starts");
+    const judgeRows = () => readLedgerLines(ledgerPath).filter((row) =>
+      row.step === ESCALATION_TRIAGED_STEP || row.step === ESCALATION_REJUDGED_STEP);
+    assert.deepEqual(judgeRows(), [], "the refused reply saves no triage or re-judge record");
+    assert.deepEqual([comments, relabels], [[], []], "the retired sweep leaves the issue unchanged");
+    assert.deepEqual(logs.map((row) => [row.step, row.rejudged]), [["sweep.escalation_rejudge.summary", 0]]);
+    daemon.settlePage();
+    await exit;
+
+    const successor = retiringExit();
+    let asks = 0;
+    await successor.retirement.inSpawnScope(() => successor.retirement.refuse("sweep", () => pass("SWEEP-successor", async (args) => {
+      asks++;
+      assert.match(String(args.prompt), /REFERENT STATE NOW:.*head-17/);
+      return { text: "ESCALATION_JUDGE_DECISION: demote\nESCALATION_JUDGE_REASON: the repair is already tracked" } as WorkerResult;
+    }))());
+    assert.equal(asks, 1, "the successor judges the same issue and referent state");
+    assert.deepEqual(comments, ["the repair is already tracked"]);
+    assert.deepEqual(relabels, [FLEET_NOTICE_LABEL]);
+    assert.deepEqual(judgeRows().map((row) => [row.run_id, row.step]),
+      [["SWEEP-successor", ESCALATION_TRIAGED_STEP], ["SWEEP-successor", ESCALATION_REJUDGED_STEP]]);
+  });
 
   // A review admitted before the release launches a detached run child, and its memory wait outlasts the release.
   const child = runChildStart(t);

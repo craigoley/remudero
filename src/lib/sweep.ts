@@ -34713,7 +34713,7 @@ export interface StaleEscalationRejudgeOptions {
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** dryRun leaves no trace (no demote call, no ledger line) — mirrors runEscalationReconcile. */
   dryRun?: boolean;
-  /** Bound on judge spawns this cycle; defaults to {@link MAX_ESCALATION_REJUDGES_PER_CYCLE}. */
+  /** Bound on candidates taken up for judgment this cycle; defaults to {@link MAX_ESCALATION_REJUDGES_PER_CYCLE}. */
   maxRejudges?: number;
   /** Dwell before an item is eligible; defaults to {@link STALE_ESCALATION_REJUDGE_DWELL_MS}. */
   dwellMs?: number;
@@ -34734,7 +34734,7 @@ export interface StaleEscalationRejudgeResult {
   issueUrl: string;
   taskId: string;
   stateKey: string;
-  outcome: "too-fresh" | "unchanged-state" | "deferred-cap" | "demoted" | "left-needs-human" | "demote-failed";
+  outcome: "too-fresh" | "unchanged-state" | "deferred-cap" | "not-started" | "demoted" | "left-needs-human" | "demote-failed";
   decision?: EscalationJudgeDecision;
   reason?: string;
 }
@@ -34742,8 +34742,7 @@ export interface StaleEscalationRejudgeResult {
 /** The whole re-judge pass's outcome. */
 export interface StaleEscalationRejudgeSummary {
   total: number;
-  /** How many candidates actually spawned a judge this pass (excludes too-fresh, unchanged-state
-   *  and deferred-cap — the three ways a candidate is skipped WITHOUT a spawn). */
+  /** How many candidates received a verdict this pass, including deterministic verdicts. */
   rejudged: number;
   demoted: number;
   results: StaleEscalationRejudgeResult[];
@@ -34799,7 +34798,7 @@ export async function runStaleEscalationRejudge(
 
   const results: StaleEscalationRejudgeResult[] = [];
   const judgedStateKeys: string[] = [];
-  let rejudged = 0;
+  let considered = 0;
   let demoted = 0;
 
   for (const c of candidates) {
@@ -34817,11 +34816,11 @@ export async function runStaleEscalationRejudge(
     }
     // BOUNDED PER CYCLE (design iv): the rest drain on the next sweep, never spend an unbounded
     // number of spawns in one pass.
-    if (rejudged >= maxRejudges) {
+    if (considered >= maxRejudges) {
       results.push({ issueUrl: c.issueUrl, taskId: c.escalation.taskId, stateKey: c.stateKey, outcome: "deferred-cap" });
       continue;
     }
-    rejudged++;
+    considered++;
 
     // EXEMPT AT BIRTH, EXEMPT ON RE-JUDGE: MANUAL/GRILL stay operator-owned by rule, mirroring
     // {@link judgeEscalation}'s own exemption check — never spend a spawn asking a question the
@@ -34848,6 +34847,11 @@ export async function runStaleEscalationRejudge(
         verdict = proposed && (proposed.decision === "deliver" || proposed.decision === "demote") && typeof proposed.reason === "string"
           ? proposed : { decision: "deliver", reason: "unreadable rejudge verdict" };
       } catch (err) {
+        if (err instanceof WorkerNotStartedError) {
+          results.push({ issueUrl: c.issueUrl, taskId: c.escalation.taskId, stateKey: c.stateKey,
+            outcome: "not-started", reason: err.message });
+          continue;
+        }
         // FAIL-OPEN (acceptance criterion 5): a spawn throw, a timeout or an unparseable verdict
         // all leave the item on needs-human, unchanged — the SAME polarity as the birth judge,
         // never risking a silently-hidden escalation because a spawn misbehaved.
@@ -34859,7 +34863,6 @@ export async function runStaleEscalationRejudge(
         };
       }
     }
-
     // Preserve the original producer receipt before shadow/act triage replaces the verdict.
     const judgeReceipt = escalationJudgeReceiptFields(verdict);
     const triaged = evidenceError !== undefined
@@ -34958,7 +34961,7 @@ export async function runStaleEscalationRejudge(
     }
   }
 
-  const summary: StaleEscalationRejudgeSummary = { total: candidates.length, rejudged, demoted, results, judgedStateKeys };
+  const summary: StaleEscalationRejudgeSummary = { total: candidates.length, rejudged: judgedStateKeys.length, demoted, results, judgedStateKeys };
   log("sweep.escalation_rejudge.summary", { total: summary.total, rejudged: summary.rejudged, demoted: summary.demoted });
   return summary;
 }
