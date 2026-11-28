@@ -153,3 +153,55 @@ test("W1-T14929 a home checkout and a live linked tree are kept: a detached or r
     }
   } finally { drop(r); }
 });
+
+test("W1-T14929 home clone PR lookup covers detached HEADs without holding base commits for unrelated refs", () => {
+  const r = homeRig();
+  try {
+    const atBase = join(r.clone, ".worktrees", "wt-at-base");
+    mkdirSync(join(r.clone, ".worktrees"), { recursive: true });
+    git(r.clone, "worktree", "add", "-q", "--detach", atBase, "main");
+    writeFileSync(join(atBase, "README"), "dirty work on base\n");
+
+    // An unrelated later origin branch contains main. It is not evidence of a PR for a tree
+    // whose HEAD is already in the default branch.
+    git(r.clone, "checkout", "-q", "-b", "unrelated-later");
+    writeFileSync(join(r.clone, "later.txt"), "unrelated later branch\n");
+    git(r.clone, "add", "later.txt");
+    git(r.clone, "commit", "-q", "-m", "unrelated later branch");
+    git(r.clone, "update-ref", "refs/remotes/origin/unrelated-later", "HEAD");
+    age(atBase, 10 * DAY_HOURS);
+
+    const detached = linkedTree(r, ".worktrees", "wt-pull-ref");
+    git(detached, "update-ref", "refs/pull/12/head", "HEAD");
+    git(detached, "checkout", "-q", "--detach");
+    age(detached, 10 * DAY_HOURS);
+
+    const out = pass(r, { GH_OPEN: "1" });
+    assert.match(out, new RegExp(`REMOVE ${atBase}: uncommitted changes; idle 7 days, preserved then retired`));
+    assert.equal(existsSync(atBase), false, out);
+    assert.equal(existsSync(detached), true, `detached open-PR HEAD stays:\n${out}`);
+    assert.match(out, new RegExp(`KEEP ${detached}: linked worktree of ${r.clone} has an open pull request`));
+    assert.deepEqual(copies(r, detached), []);
+  } finally { drop(r); }
+});
+
+test("W1-T14929 a recent clean home linked tree waits for the retain window after its PR is finished", () => {
+  const r = homeRig();
+  try {
+    const wt = join(r.clone, ".worktrees", "wt-recent-clean");
+    mkdirSync(join(r.clone, ".worktrees"), { recursive: true });
+    git(r.clone, "worktree", "add", "-q", "--detach", wt, "main");
+    age(wt, 10 * DAY_HOURS);
+    writeFileSync(join(wt, "README"), "published\n"); // Recent clean payload; Git's HEAD metadata stays old.
+    // Make the finished-PR fast path eligible, so the test distinguishes it from idle-window handling.
+    r.shim.addRoute({
+      when: '"\\(length) \\([.[] | select(.state == "closed")] | length)"',
+      stdout: "1 1",
+    });
+
+    const out = pass(r, { IDLE_MINUTES: "10080", GH_OPEN: "0" });
+    assert.equal(existsSync(wt), true, `recent tree waits for retention:\n${out}`);
+    assert.match(out, new RegExp(`KEEP ${wt}: written within 10080 min`));
+    assert.deepEqual(copies(r, wt), []);
+  } finally { drop(r); }
+});

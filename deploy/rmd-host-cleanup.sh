@@ -843,7 +843,7 @@ sweep_worktree() {
   if [ "$orphaned" = 0 ] && [ -f "$gitdir/locked" ]; then prune_held_worktree "$wt" "Git worktree is locked"; return; fi
   # A clean linked worktree whose HEAD GitHub holds and whose pull requests are all merged or closed
   # has no work in progress for the six hours to protect (W1-T12256). Every other test still holds.
-  if [ "$orphaned" = 0 ] && [ "$kind" = "linked worktree" ] && worktree_clean "$wt" && worktree_ignored_safe "$wt" &&
+  if [ -z "$HOME_LINKED_TREE" ] && [ "$orphaned" = 0 ] && [ "$kind" = "linked worktree" ] && worktree_clean "$wt" && worktree_ignored_safe "$wt" &&
      worktree_saved "$wt" && head="$(rgit "$wt" rev-parse --verify HEAD 2>/dev/null)" &&
      rmd_commit_pulls_finished "$wt" "$head"; then
     finished=1
@@ -938,17 +938,26 @@ sweep_worktree() {
 # ── W1-T14929: linked worktrees of home clones ──
 # home_tree_open_pr <worktree>: true when a pull request on GitHub is open for its HEAD or for any published branch
 # tip its HEAD contains, or when that cannot be established. The branch name, a detached HEAD or a missing
-# same-named origin ref does not matter: the candidates are every origin ref that holds HEAD and every origin ref
-# HEAD holds that the default branch does not. A non-GitHub origin has no pull requests.
+# same-named origin ref does not matter. If HEAD is outside the default branch, query HEAD itself and origin refs
+# that hold it or that it holds outside the default branch. A non-GitHub origin has no pull requests.
 HOME_PR_MAX_LOOKUPS="${RMD_CLEANUP_HOME_PR_MAX_LOOKUPS:-20}"
 home_tree_open_pr() {
-  local wt="$1" url base tips tip n count=0
+  local wt="$1" url base head tips tip n count=0 head_in_base=1
   url="$(rgit "$wt" config --get remote.origin.url 2>/dev/null)" || return 1
   case "$url" in https://github.com/*|git@github.com:*|ssh://git@github.com/*) ;; *) return 1 ;; esac
   base="$(rgit "$wt" rev-parse -q --verify refs/remotes/origin/HEAD 2>/dev/null)" ||
     base="$(rgit "$wt" rev-parse -q --verify refs/remotes/origin/main 2>/dev/null)" || return 0
-  tips="$( { rgit "$wt" for-each-ref --format='%(objectname)' --contains HEAD refs/remotes/origin &&
-             rgit "$wt" for-each-ref --format='%(objectname)' --merged HEAD --no-merged "$base" refs/remotes/origin; } 2>/dev/null)" || return 0
+  head="$(rgit "$wt" rev-parse -q --verify HEAD 2>/dev/null)" || return 0
+  if rgit "$wt" merge-base --is-ancestor "$head" "$base" 2>/dev/null; then
+    head_in_base=0
+  fi
+  tips="$( {
+    if [ "$head_in_base" = 1 ]; then
+      printf '%s\n' "$head"
+      rgit "$wt" for-each-ref --format='%(objectname)' --contains HEAD refs/remotes/origin
+      rgit "$wt" for-each-ref --format='%(objectname)' --merged HEAD --no-merged "$base" refs/remotes/origin
+    fi
+  } 2>/dev/null)" || return 0
   while IFS= read -r tip; do
     [ -n "$tip" ] || continue
     [ "$tip" = "$base" ] && continue
