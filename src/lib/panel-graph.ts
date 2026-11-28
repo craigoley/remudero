@@ -191,7 +191,7 @@ export interface PanelGraphDeps {
   statusGithub: GitHub;
   /** W1-T14114: the ok ops catalog's combined plan, for board referents and asks' ops tasks. */
   inboxReferentPlan?: (plan: Plan) => Plan | undefined;
-  /** W1-T15105: approve's catalog read when `inboxReferentPlan` is unwired. */
+  /** Catalog read for task referents when the Inbox plan is unwired. */
   readInboxCatalog?: (readPublic: () => Plan | undefined) => Promise<BoardCatalogContext | undefined>;
   /** config.root holds inbox state (W1-T110); `root` holds the checkout. See serve.ts's
    * `fleetControlRoot` and docs/forensics/panel-graph.md for the split's history. */
@@ -1997,7 +1997,7 @@ export interface ClassifiedInbox {
   classifications: InboxClassification[];
   ledgerLines: LedgerLines;
   projection: Map<string, StatusProjection>;
-  /** W1-T15105: the ops tasks' dependency flags this pass judged declines on, which a decline records. */
+  /** Ops dependency flags used for decline lapse checks. */
   opsDepsMerged?: OpsDepsMerged;
   attentionEvidence?: InboxAttentionEvidence;
   /** Every decline and restore receipt this pass read, when its archive read was complete: what the slow lane stores. */
@@ -2166,7 +2166,7 @@ function prepareInboxPass(
     const task = declinedTask ? plan.byId.get(declinedTask) : undefined;
     if (!receipt || receipt.step !== "panel.proposal_declined" || !task) return classified;
     const deps = task.depends_on ?? [];
-    // W1-T15105: an ops task's flag is the one its decline recorded (proposalVerdictResponse); unreadable never lapses.
+    // Ops declines lapse only when their recorded dependency flag changes.
     const depsAllMerged = opsDepsMerged.has(task.id) ? opsDepsMerged.get(task.id)
       : deps.every((d) => { const t = plan.byId.get(d); return t !== undefined && isMerged(t); });
     if (depsAllMerged === undefined) return classified;
@@ -2228,10 +2228,10 @@ export function projectInboxPlan(deps: Pick<PanelGraphDeps, "ledgerPath" | "stat
   return { projection, boardReferents, ...opsAskTasks(referentDeps, plan, projection, statusDeps, credited, readProposals) };
 }
 
-/** W1-T15105: per named ops task, whether every dependency landed; undefined when one is in no plan. */
+/** Whether named ops dependencies landed; undefined means one is absent. */
 export type OpsDepsMerged = ReadonlyMap<string, boolean | undefined>;
 
-/** W1-T15105: asks are judged on the ops tasks they name; the public plan and projection are kept. */
+/** Add only named ops tasks to the ask plan; retain the public projection. */
 function opsAskTasks(deps: Pick<PanelGraphDeps, "inboxReferentPlan">, plan: Plan, projection: Map<string, StatusProjection>,
   statusDeps: Parameters<typeof projectPlan>[1], credited: () => ReadonlySet<string>, readProposals?: () => readonly Proposal[]):
   { askPlan: Plan; askProjection: Map<string, StatusProjection>; opsDepsMerged: OpsDepsMerged } {
@@ -2249,8 +2249,7 @@ function opsAskTasks(deps: Pick<PanelGraphDeps, "inboxReferentPlan">, plan: Plan
   return { askPlan, askProjection, opsDepsMerged: opsTaskDepsMerged(tasks, (id) => full?.byId.get(id) ?? askPlan.byId.get(id), askProjection, credited) };
 }
 
-/** W1-T15105: an ops task's dependencies are read on the full ops plan the verify-human judge reads
- *  (parkedVerifyHumanCandidates in run-task.ts), never on the asks' plan, which lacks a dependency no ask names. */
+/** Read ops dependencies from the full plan used by the verify-human judge. */
 function opsTaskDepsMerged(tasks: readonly Task[], taskOf: (id: string) => Task | undefined, projection: Map<string, StatusProjection>,
   credited: () => ReadonlySet<string>): OpsDepsMerged {
   const out = new Map<string, boolean | undefined>();
@@ -2282,8 +2281,7 @@ function missingAskTasks(plan: Plan, proposals: readonly Proposal[]): Set<string
   return named;
 }
 
-/** W1-T15105: the public plan plus exactly the ops tasks the registry's asks name; an unnamed ops task never joins.
- *  `proposals` is the whole registry, so the Inbox and every approve compose the same set. */
+/** Compose the public plan with only ops tasks named in the full proposal registry. */
 export function askTaskPlan(plan: Plan, proposals: readonly Proposal[], readCombined: () => Plan | undefined): Plan {
   const named = missingAskTasks(plan, proposals);
   if (named.size === 0) return plan;
@@ -2305,8 +2303,7 @@ export function askTaskPlan(plan: Plan, proposals: readonly Proposal[], readComb
 // FragmentMemo keys parsed drafts by Plan identity. Keep the composed identity while every source input is stable.
 const askTaskPlanMemo = new WeakMap<Plan, WeakMap<Plan, Map<string, Plan>>>();
 
-/** W1-T15105: the terminal's {@link askTaskPlan}, read as serve's approve reads it: the catalog is read only when
- *  `judged` (the asks this verb classifies) names a task the public plan lacks. */
+/** Read the catalog only when a classified ask names a task absent from the public plan. */
 export async function readAskTaskPlan(plan: Plan, proposals: readonly Proposal[], stateDir: string,
   read: NonNullable<PanelGraphDeps["readInboxCatalog"]> = (pub) => readBoardCatalogs(pub, stateDir),
   judged: readonly Proposal[] = proposals): Promise<Plan> {
@@ -2427,7 +2424,7 @@ function projectionDigest(projection: Map<string, StatusProjection>, boardRefere
 }
 
 
-/** W1-T15105: the named ops tasks by content, so an ops-repo edit re-judges their asks; none keeps the public key. */
+/** Invalidate asks when named ops tasks or dependencies change. */
 function askTasksKey(plan: Plan, askPlan: Plan, opsDepsMerged: OpsDepsMerged): string[] {
   if (askPlan === plan) return [];
   return [createHash("sha256").update(JSON.stringify([askPlan.tasks.slice(plan.tasks.length), [...opsDepsMerged].map(([id, merged]) => [id, merged ?? null])])).digest("hex")];
@@ -4328,19 +4325,20 @@ function withDecisionKey(
   });
 }
 
-/** W1-T15105: an ops task's decline records the dependency flag the lift check re-reads (prepareInboxPass), not the
- *  judge's, so the two never disagree; any other decline records the state its summary was judged on. */
+/** Store the ops dependency flag used by the decline lift check. */
 function declineObservedState(judged: string | undefined, proposalId: string, opsDepsMerged: OpsDepsMerged | undefined): string | undefined {
   const taskId = /^verify-human:([A-Za-z0-9-]+)$/.exec(proposalId)?.[1];
   const merged = taskId === undefined ? undefined : opsDepsMerged?.get(taskId);
   return merged === undefined ? judged : currentDeclineState(judged, merged) ?? judged;
 }
 
-/** W1-T15105: a verify-human decline reads the catalog when its ask names a task the public plan lacks, as approve does. */
+/** Read the catalog for a decline naming a task absent from the public plan. */
 function declineCatalogDeps(deps: PanelGraphDeps, kind: ProposalVerdictKind, proposalId: string): Promise<PanelGraphDeps> | undefined {
   if (kind !== "decline" || deps.inboxReferentPlan || !proposalId.startsWith("verify-human:")) return undefined;
   const proposal = inboxProposalReader(deps)().find(p => p.id === proposalId);
-  const plan = proposal && (deps.readPlanSnapshot ?? loadPlan)(deps.planPath);
+  const last = inboxClassifyStates.get(deps)?.last;
+  const plan = proposal && last?.planKey !== undefined && last.planKey === inboxPlanKey(deps)
+    ? last.plan : proposal && (deps.readPlanSnapshot ?? loadPlan)(deps.planPath);
   return proposal && plan && missingAskTasks(plan, [proposal]).size > 0 ? askCatalogDeps(deps, plan, proposal) : undefined;
 }
 
@@ -4517,7 +4515,7 @@ function inboxRegistryHas(deps: PanelGraphDeps, proposalId: string): boolean {
   return parseProposalRegistry(readFileIfExists(inboxInputPaths(deps).registryPath)).some((p) => p.id === proposalId);
 }
 
-/** W1-T15105: approve judges an ops task's ask as the Inbox read did. */
+/** Give approve the same named-task plan as the Inbox. */
 async function askCatalogDeps(deps: PanelGraphDeps, publicPlan: Plan, proposal: Proposal): Promise<PanelGraphDeps> {
   if (deps.inboxReferentPlan || missingAskTasks(publicPlan, [proposal]).size === 0) return deps;
   const read = deps.readInboxCatalog ?? ((pub: () => Plan | undefined) => readBoardCatalogs(pub, dirname(deps.ledgerPath)));
