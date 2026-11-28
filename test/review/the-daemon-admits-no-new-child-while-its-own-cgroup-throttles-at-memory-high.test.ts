@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
 import { readLedgerLines } from "#src/lib/status.js";
+import { reviewAdmissionChargeMib } from "#src/lib/host-memory-admission.js";
 import { readDaemonCgroupMemory, reviewMemoryHighVerdict, type DaemonCgroupMemoryReading } from "#src/lib/review-capacity.js";
 import { inFlightFullReviewCount, productionReviewMemoryHighReaders, registerChildWork, settleChildWork, type ReviewMemoryHighReaders } from "#src/lib/sweep.js";
 import {
@@ -176,15 +177,30 @@ test("W1-T15116: child-hosted reviews stay charged after postReview returns", as
   assert.equal(inFlightFullReviewCount(), 0);
 });
 
-test("W1-T15116: an unrelated review tree's RSS cannot offset an admitted review charge", async () => {
-  // The unrelated tree's 1,500 MiB is already included in memory.current. Because no per-review identity connects
-  // that tree to this pass's admitted review, it cannot reduce the admitted review's learned 1,500 MiB charge.
-  // Correctly only one candidate fits: 11,500 + 1,500 + 1,500 would cross the 14,000 MiB high mark.
-  const h = harness(() => bounded(11_500, 14_000), 1_500, [1_500]);
+test("W1-T15116 criterion 1: visible review RSS replaces its learned peak charge", async () => {
+  assert.equal(reviewAdmissionChargeMib(1, 3_000, undefined), 3_000, "unseen review retains its learned estimate");
+  assert.equal(reviewAdmissionChargeMib(1, 3_000, [1_500]), 1_500, "visible RSS is already in memory.current");
+  assert.equal(reviewAdmissionChargeMib(2, 3_000, [1_500]), 4_500, "an unread second tree retains its estimate");
+
+  // Current includes the first review's 1,500 MiB RSS. Its remaining estimated growth is 1,500 MiB, so the next
+  // 3,000 MiB candidate fits exactly at memory.high; charging the first review at its full estimate would hold it.
+  const h = harness(() => bounded(9_500, 14_000), 3_000, [1_500]);
   const pass = runSweep(four(21970), h.deps, width(4));
   await settle();
-  assert.deepEqual(h.started, [21970], "unattributed review RSS does not erase the first admitted review's charge");
-  assert.ok(h.reads >= 2, "the second candidate is checked against the admitted review's running charge");
+  assert.deepEqual(h.started, [21970, 21971], "measured resident replaces the estimate before the next admission");
+  assert.ok(h.reads >= 3, "the second candidate is checked against the re-read cgroup and resident trees");
+  h.releaseAll();
+  await pass;
+  await settle();
+});
+
+test("W1-T15116: unrelated review RSS already in memory.current does not offset an admitted review", async () => {
+  // This 1,500 MiB is already part of the working set but is not returned as a resident of either admitted review.
+  // Without attribution, the two learned 1,500 MiB charges remain: only one candidate fits below memory.high.
+  const h = harness(() => bounded(11_500, 14_000), 1_500, []);
+  const pass = runSweep(four(22970), h.deps, width(4));
+  await settle();
+  assert.deepEqual(h.started, [22970], "unattributed RSS cannot erase an admitted review's learned charge");
   h.releaseAll();
   await pass;
   await settle();

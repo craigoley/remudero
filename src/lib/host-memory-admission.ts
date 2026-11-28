@@ -85,6 +85,20 @@ export const MEMORY_ADMISSION_HELD_GAP_MS = 20 * 60_000;
 /** Per class, since when its starts have been held, beside the ledger: the starvation clock's restart seed. */
 export const MEMORY_ADMISSION_HELD_FILE = "memory-admission-held.json";
 
+/** W1-T15116: charge a live review only for the part of its learned peak not already present in memory.current.
+ * Until a review tree is readable its full learned peak remains charged. The smallest resident trees are paired first,
+ * so an ambiguous ordering cannot credit a large resident to a review while leaving a smaller one charged whole. */
+export function reviewAdmissionChargeMib(
+  count: number,
+  estimateMib: number,
+  residents: readonly number[] | undefined,
+): number {
+  const trees = [...(residents ?? [])].sort((a, b) => a - b);
+  let charge = 0;
+  for (let i = 0; i < count; i += 1) charge += Math.max(0, estimateMib - (trees[i] ?? 0));
+  return charge;
+}
+
 /**
  * The reasons the starvation rung may admit past, each by the verdict's own semantics:
  *   - "swap-in": a host swap-in RATE, not a shortfall; 10-19 it was chronic (~2,290 pages/s averaged over 281 h).

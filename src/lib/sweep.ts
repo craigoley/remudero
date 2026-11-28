@@ -38,6 +38,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { hostname } from "node:os";
 import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
+import { reviewAdmissionChargeMib } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
@@ -30398,17 +30399,18 @@ async function runSweepPinned(
     admissionStopReason ??= reason;
   };
   // W1-T15116 — A RUNNING CHARGE, NOT ONE READING. Every full review still running here (this pass's, and any earlier
-  // pass's or light refill's) is charged its learned peak. The cgroup reader gives no per-review identity, so subtracting
-  // every live review tree's RSS could let an unrelated review erase this admission's charge. Re-read memory.high for
-  // each admission. startReview registers synchronously, so the review admitted just before the next one is charged.
+  // pass's or light refill's) is charged its learned peak until its tree is visible, then only the peak's unrealized
+  // part: memory.current already includes its RSS. Re-read memory.high and live residents for each admission.
+  // startReview registers synchronously, so the review admitted just before the next one is charged.
   const memoryHigh = deps.reviewMemoryHigh ?? productionReviewMemoryHighReaders(deps);
   const reviewMemoryHighHold = (): string | undefined => {
     if (memoryHigh === undefined) return undefined;
     const estimateMib = memoryHigh.estimateMib();
     const admitted = inFlightFullReviewCount();
+    const admittedChargeMib = reviewAdmissionChargeMib(admitted, estimateMib, memoryHigh.residents());
     const verdict = reviewMemoryHighVerdict(memoryHigh.read(), {
       admitted,
-      admittedChargeMib: admitted * estimateMib,
+      admittedChargeMib,
       candidateMib: estimateMib,
     });
     return verdict.admit ? undefined : verdict.reason;
