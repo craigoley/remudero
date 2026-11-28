@@ -267,6 +267,45 @@ test("W1-T15030 criterion 2: the guarded default poster leaves the single 401 re
     "the guarded default poster makes no independent App refresh or retry");
 });
 
+test("W1-T15030 criterion 2: runReview's poster cannot renew and retry inside the guarded retry", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t15030-run-poster-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const keyPath = join(root, "app.pem");
+  let clock = Date.now();
+  let minted = 0;
+  const app = fakeApp(t, () => clock + 60 * 60_000, () => `app-run-token-${++minted}`);
+  writeFileSync(keyPath, app.pem);
+  const previous = {
+    GH_TOKEN: process.env.GH_TOKEN,
+    GH_APP_ID: process.env.GH_APP_ID,
+    GH_APP_INSTALLATION_ID: process.env.GH_APP_INSTALLATION_ID,
+    GH_APP_PRIVATE_KEY_PATH: process.env.GH_APP_PRIVATE_KEY_PATH,
+    fetch: globalThis.fetch,
+  };
+  t.after(() => {
+    for (const key of ["GH_TOKEN", "GH_APP_ID", "GH_APP_INSTALLATION_ID", "GH_APP_PRIVATE_KEY_PATH"] as const) {
+      const value = previous[key];
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    globalThis.fetch = previous.fetch;
+  });
+  Object.assign(process.env, { GH_APP_ID: "42", GH_APP_INSTALLATION_ID: "7", GH_APP_PRIVATE_KEY_PATH: keyPath });
+  globalThis.fetch = app.fetchImpl;
+  assert.equal((await refreshReviewPublisherToken({ fetchImpl: app.fetchImpl, readKey: () => app.pem })).ok, true);
+  const initialToken = process.env.GH_TOKEN!;
+
+  // This drives runReview's own failureRecordingPoster. GitHub persistently rejects the status,
+  // while its guarded renewal seam deliberately cannot mint a replacement.
+  const run = await reviewFailing(t, { token: initialToken, refuse: true });
+  const refusals = run.rows.filter((row) => row.step === "review.post_refused" && row.reason === "token_unrenewable");
+  assert.equal(run.terminalPosts, 2, "one initial POST and one guarded retry");
+  assert.equal(run.renewals.filter((renewal) => renewal.force === true).length, 1);
+  assert.equal(app.exchanges.length, 1, "the poster itself did not mint a token or make a nested retry");
+  assert.equal(refusals.length, 1);
+  assert.equal(run.rows.some((row) => row.step === "review.posted" && row.state === "failure"), false,
+    "the second 401 leaves the status unchanged");
+});
+
 test("W1-T15030 criterion 2: an ops task's terminal post refused twice still lands its private findings", async (t) => {
   // W1-T15077 lands an outboxed terminal status's private findings at once; a token_unrenewable refusal leaves the same
   // outbox entry for a later drain, so it must land them too (review of #21071, 2026-11-27).

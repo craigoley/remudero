@@ -886,7 +886,9 @@ export function failureRecordingPoster(): { post: (o: Parameters<typeof postRevi
   return {
     post: async (o) => {
       try {
-        await postReviewStatus(o);
+        // The guarded publisher owns the one renewal and retry. A nested App-token retry here can
+        // publish after the guarded path has already decided that its retry was refused.
+        await postReviewStatus(o, { reauth: async () => false });
         published = true;
         // W1-T15030: a retry that published clears the failure an earlier attempt recorded.
         threw = false;
@@ -3867,7 +3869,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     // W1-T13380: a reviewer that never started leaves no review running, so this run replaces its own claim with the truth.
     if (claimPosted && startFailure !== undefined) {
       try {
-        await postStatusDep({ post: catalogReviewPoster(taskCatalog, postReviewStatus), owner, repo, sha: view.headRefOid,
+        await postStatusDep({ post: catalogReviewPoster(taskCatalog, failureRecordingPoster().post), owner, repo, sha: view.headRefOid,
           state: "pending", description: `pending (owned by run ${runId}) — no review running: the reviewer failed to start ` +
             `(${startFailure}); retry due`, taskId: reviewKey, evidence: "no_evidence", ledgerPath, runId, prUrl: view.url,
           reviewInputDigest: inputDigest, reviewEngineRevision: REVIEW_ENGINE_REVISION, fetchLifecycle: () => fetchPrLifecycleAsync(view.url),
