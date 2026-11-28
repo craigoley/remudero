@@ -56,6 +56,7 @@ import {
   bodyProofSetDivergence,
   parseWhitelistedProof,
   resolvePlanCriteriaAtHead,
+  resolveProofTestPath,
   resolveTestPath,
   verifyMoverRemovalPublic,
   wrappedGrepPattern,
@@ -750,11 +751,28 @@ export function evaluateGate({ body, authorLogin, headRefName, moverPublic, trai
  * carries no path at all (`kind !== "grep"`) and passes through untouched.
  *
  * REFUSE, DO NOT REPAIR: never guesses a renamed file's new name, only says the old one is gone.
+ *
+ * W1-T15278: a test is the one exception, as for every other reader (W1-T9860). An absent test/**.test.ts target
+ * whose basename names exactly one test outside test/fixtures/ at the root's HEAD is the file that shipped, where
+ * `rmd test-place` put it (#21209). review's own `resolveProofTestPath` (over `resolveTestPath`) decides it and fails
+ * closed: no match, two matches, a non-test path or a fixture is refused as before.
  * @param {readonly { claim: string, proof: string }[]} criteria
  * @param {string} root
  * @returns {{ ok: false, defect: "grep-proof-target-missing", message: string } | undefined}
  */
 export function bodyProofTargetMissing(criteria, root = REPO_ROOT) {
+  return bodyProofTargets(criteria, root).refusal;
+}
+
+/**
+ * {@link bodyProofTargetMissing}'s walk, also returning one note per target found by its basename so the gate's ok
+ * message names the move.
+ * @param {readonly { claim: string, proof: string }[]} criteria
+ * @param {string} root
+ * @returns {{ refusal?: { ok: false, defect: "grep-proof-target-missing", message: string }, notes: string[] }}
+ */
+function bodyProofTargets(criteria, root) {
+  const notes = [];
   for (let index = 0; index < criteria.length; index++) {
     const proof = (criteria[index]?.proof ?? "").trim();
     const whitelisted = parseWhitelistedProof(proof);
@@ -762,16 +780,29 @@ export function bodyProofTargetMissing(criteria, root = REPO_ROOT) {
     const target = whitelisted.args[whitelisted.args.length - 1];
     if (typeof target !== "string" || target.length === 0) continue;
     if (existsSync(join(root, target))) continue;
+    // The reviewer's own reader (W1-T9860): its note is set only when the basename fallback found one test.
+    const { note, resolution } = resolveProofTestPath(proof, root);
+    if (note !== undefined) {
+      notes.push(note);
+      continue;
+    }
+    const ambiguous =
+      resolution !== undefined && "unresolved" in resolution && resolution.unresolved === "ambiguous"
+        ? ` Its basename names ${resolution.candidates.length} tests (${resolution.candidates.join(", ")}), so it cannot be resolved by basename.`
+        : "";
     return {
-      ok: false,
-      defect: "grep-proof-target-missing",
-      message:
-        `criterion ${index + 1}'s grep proof names \`${target}\`, which does not exist at this head. ` +
-        "The path is absent, not the criterion failed — it is likely stale (renamed or removed since " +
-        "this body was written). Point the proof at the file's current path.",
+      notes,
+      refusal: {
+        ok: false,
+        defect: "grep-proof-target-missing",
+        message:
+          `criterion ${index + 1}'s grep proof names \`${target}\`, which does not exist at this head. ` +
+          "The path is absent, not the criterion failed — it is likely stale (renamed or removed since " +
+          `this body was written).${ambiguous} Point the proof at the file's current path.`,
+      },
     };
   }
-  return undefined;
+  return { notes };
 }
 
 /**
@@ -794,8 +825,9 @@ export function bodyProofTargetMissing(criteria, root = REPO_ROOT) {
 function authorTimeProofShapeRefusal(body, result, criteriaFromHeadPlan = false, root = REPO_ROOT) {
   if (criteriaFromHeadPlan) return result;
   const criteria = parseAcceptanceBlock(body);
-  const targetMissing = bodyProofTargetMissing(criteria, root);
-  if (targetMissing !== undefined) return targetMissing;
+  const targets = bodyProofTargets(criteria, root);
+  if (targets.refusal !== undefined) return targets.refusal;
+  if (targets.notes.length > 0) result = { ...result, message: `${result.message} (${targets.notes.join("; ")})` };
   const defects = [];
   criteria.forEach((criterion, index) => {
     const proof = criterion.proof ?? "";
