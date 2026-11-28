@@ -118,8 +118,8 @@ export interface RedesignSources {
   landingRefusal: (rel: string, text: string, pinnedBase?: string) => string | undefined;
   /** Signatures a landed PR carried, an open PR carries, or an operator's close declined: none is asked again. */
   settled: () => ReadonlySet<string>;
-  /** Signatures held by an in-flight or declined ops landing, read by the production task runner. */
-  opsSettled?: () => readonly string[];
+  /** Signatures held by an in-flight or declined ops landing, read by the task runner through the handed-in `ledger`. */
+  opsSettled?: (ledger: RedesignSources["ledger"]) => readonly string[];
   /** A repo file's text at the Architect's head, or undefined when it is absent; lets the edit guard read a grep proof's
    *  target. Without it only a pattern that opens with a comment opener is judged. */
   readTarget?: (rel: string) => string | undefined;
@@ -495,7 +495,7 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
       // keep their signatures and evidence keys out of the Architect queue while that ops landing is in flight or has
       // been declined; the public PR must never settle them on the ops catalog's behalf.
       return new Set([...(state.pending?.targets ?? []), ...(state.declinedTargets ?? [])].map((t) => t.target)
-        .concat(landed, sources.opsSettled?.() ?? []));
+        .concat(landed, sources.opsSettled?.(sources.ledger) ?? []));
     }),
   };
 }

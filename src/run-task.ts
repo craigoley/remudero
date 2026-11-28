@@ -29515,14 +29515,10 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       });
       const pass = gardenPass(redesignGardenSpec(redesignDeps, {
         judgeText: (prompt) => judge.judgeText(prompt, 0),
-        opsSettled: () => {
-          const read = readLedgerUnionRecordsSync(stateDir, {
-            step: [REDESIGN_OPS_LANDING_STEP, REDESIGN_OPS_LANDING_RESULT_STEP],
-            sinceTs: new Date(0).toISOString(), refuseIncomplete: true,
-          });
-          if (!read.ok) throw new Error(`redesign: incomplete ops landing ledger union: ${read.unread.join(", ")}`);
-          const submissions = read.rows.filter((row) => row.step === REDESIGN_OPS_LANDING_STEP);
-          const failedAttempts = new Set(read.rows.filter((row) => row.step === REDESIGN_OPS_LANDING_RESULT_STEP &&
+        opsSettled: (ledger) => {
+          const rows = ledger([REDESIGN_OPS_LANDING_STEP, REDESIGN_OPS_LANDING_RESULT_STEP], new Date(0).toISOString());
+          const submissions = rows.filter((row) => row.step === REDESIGN_OPS_LANDING_STEP);
+          const failedAttempts = new Set(rows.filter((row) => row.step === REDESIGN_OPS_LANDING_RESULT_STEP &&
             row.failure === true && typeof row.attempt_id === "string").map((row) => String(row.attempt_id)));
           return submissions.filter((row) => typeof row.attempt_id !== "string" || !failedAttempts.has(String(row.attempt_id)))
             .flatMap((row) => [

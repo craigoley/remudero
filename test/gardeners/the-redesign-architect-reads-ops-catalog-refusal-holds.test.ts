@@ -59,8 +59,9 @@ function fixture(t: TestContext, response = amend) {
   const overrides: Partial<RedesignSources> = {
     judgeText: async () => response,
     ledger: (steps, since) => rows.filter((r) => steps.includes(String(r.step)) && String(r.ts) >= since),
-    opsSettled: () => {
-      const opsRows = rows.filter((row) => row.step === REDESIGN_OPS_LANDING_STEP || row.step === REDESIGN_OPS_LANDING_RESULT_STEP);
+    // Read through the gardener's handed-in ledger reader, as run-task.ts's wiring does.
+    opsSettled: (ledger) => {
+      const opsRows = ledger([REDESIGN_OPS_LANDING_STEP, REDESIGN_OPS_LANDING_RESULT_STEP], new Date(0).toISOString());
       const failedAttempts = new Set(opsRows.filter((row) => row.step === REDESIGN_OPS_LANDING_RESULT_STEP &&
         row.failure === true && typeof row.attempt_id === "string").map((row) => String(row.attempt_id)));
       return opsRows.filter((row) => row.step === REDESIGN_OPS_LANDING_STEP &&
