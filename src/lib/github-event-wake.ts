@@ -75,13 +75,26 @@ export function isAllowlistedGithubEvent(event: string, action: string | undefin
   }
 }
 
-/** Only the OWNER's new, non-bot comment on a `needs-human` issue wakes the sweep (W1-T4471's reply). */
-export function isOwnerEscalationReply(event: string, action: string | undefined, body: unknown): boolean {
+/** Only the operator's new, non-bot comment on a `needs-human` issue wakes the sweep (W1-T4471's reply). The operator
+ *  is the escalation reader's own (escalation-answers.ts operatorRefusal): a configured `operatorLogins` list, matched
+ *  case-insensitively, wins; without one, the `OWNER` association. An organization's owner comments as `MEMBER`, so
+ *  only the list can name them here (the reader's W1-T13223 admin read is a GitHub call this route never makes). */
+export function isOwnerEscalationReply(
+  event: string,
+  action: string | undefined,
+  body: unknown,
+  operatorLogins?: readonly string[],
+): boolean {
   if (event !== "issue_comment" || action !== "created") return false;
   if (typeof body !== "object" || body === null) return false;
   const { comment, issue } = body as { comment?: Record<string, unknown>; issue?: Record<string, unknown> };
-  const user = comment?.user as { type?: unknown } | undefined;
-  if (comment?.author_association !== "OWNER" || user?.type === "Bot") return false;
+  const user = comment?.user as { type?: unknown; login?: unknown } | undefined;
+  if (typeof user?.type === "string" && user.type.toLowerCase() === "bot") return false;
+  const login = typeof user?.login === "string" ? user.login.toLowerCase() : undefined;
+  const operator = operatorLogins !== undefined
+    ? login !== undefined && operatorLogins.some((l) => l.toLowerCase() === login)
+    : comment?.author_association === "OWNER";
+  if (!operator) return false;
   const labels = Array.isArray(issue?.labels) ? (issue!.labels as Array<{ name?: unknown }>) : [];
   return labels.some((l) => l?.name === "needs-human");
 }
@@ -680,6 +693,8 @@ export interface GithubEventWakeOptions {
   repository: string;
   semanticCheckMode?: GithubEventWakeSemanticMode;
   aggregateCheckNames?: readonly string[];
+  /** config.json's operatorGithubLogins: whose escalation reply wakes ({@link isOwnerEscalationReply}). */
+  operatorGithubLogins?: readonly string[];
   /** Where {@link writeSweepWakeMarkerAtomic} persists the coalesced wake; see {@link sweepWakeMarkerPath}. */
   markerPath: string;
   /**
@@ -714,7 +729,7 @@ export interface GithubEventWakeOptions {
  * Why: docs/forensics/github-event-wake.md#creategithubeventwakehandler (design i, ii, iii, vii). */
 export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Route {
   const log = opts.log ?? (() => {});
-  const checks = githubDeliveryChecks(opts.aggregateCheckNames, opts.semanticCheckMode);
+  const checks = githubDeliveryChecks(opts.aggregateCheckNames, opts.semanticCheckMode, opts.operatorGithubLogins);
   const counters = opts.counters;
   const deps: Omit<GithubDeliveryContext, "secret"> = {
     repository: opts.repository,
@@ -757,6 +772,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
 export function githubDeliveryChecks(
   aggregateCheckNamesOption?: readonly string[],
   semanticCheckModeOption?: GithubEventWakeSemanticMode,
+  operatorLogins?: readonly string[],
 ): GithubDeliveryChecks {
   const semanticCheckMode = semanticCheckModeOption ?? DEFAULT_GITHUB_EVENT_WAKE_SEMANTIC_MODE;
   const aggregateCheckNames = aggregateCheckNamesOption ?? DEFAULT_GITHUB_EVENT_WAKE_AGGREGATE_CHECK_NAMES;
@@ -801,7 +817,7 @@ export function githubDeliveryChecks(
     verifySignature: verifyGithubSignature,
     repositoryOf: extractRepositoryFullName,
     actionOf: extractAction,
-    wakes: (event, action, body) => isAllowlistedGithubEvent(event, action) || isOwnerEscalationReply(event, action, body),
+    wakes: (event, action, body) => isAllowlistedGithubEvent(event, action) || isOwnerEscalationReply(event, action, body, operatorLogins),
     classify: (event, action, body) => {
       const classification = classifyGithubEventWake(event, action, body, aggregateCheckNames);
       recordClassification(classification, body);

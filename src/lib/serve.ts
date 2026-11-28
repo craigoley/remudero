@@ -377,6 +377,7 @@ export function githubHookConfigOf(deps: Pick<ServeDeps, "githubEventWake" | "fl
     dedupCapacity: wake.dedupCapacity ?? DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY,
     semanticCheckMode: wake.semanticCheckMode ?? DEFAULT_GITHUB_EVENT_WAKE_SEMANTIC_MODE,
     aggregateCheckNames: [...(wake.aggregateCheckNames ?? DEFAULT_GITHUB_EVENT_WAKE_AGGREGATE_CHECK_NAMES)],
+    ...(wake.operatorGithubLogins ? { operatorGithubLogins: [...wake.operatorGithubLogins] } : {}),
   };
 }
 
@@ -614,6 +615,8 @@ export interface ServeDeps {
     dedupCapacity?: number;
     semanticCheckMode?: GithubEventWakeSemanticMode;
     aggregateCheckNames?: readonly string[];
+    /** config.json's operatorGithubLogins, so the operator's escalation reply wakes the sweep (isOwnerEscalationReply). */
+    operatorGithubLogins?: readonly string[];
     counters?: WakeCounters;
   };
   /** W1-T4391: CI-flake producer seams; each defaults to the real job-log read, "main" and the system clock. */
@@ -3659,6 +3662,7 @@ function assembleServeRoutes(
       ),
       semanticCheckMode: deps.githubEventWake?.semanticCheckMode,
       aggregateCheckNames: deps.githubEventWake?.aggregateCheckNames,
+      operatorGithubLogins: deps.githubEventWake?.operatorGithubLogins,
       counters: deps.githubEventWake?.counters,
       log: deps.log,
       onCheckRunCompleted,

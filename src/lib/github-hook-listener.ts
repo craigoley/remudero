@@ -90,9 +90,11 @@ export function createGithubHookServer(opts: GithubHookServerOptions): { server:
   const configure = (config: GithubHookConfig): void => {
     const sameDedup = held && held.config.dedupPath === config.dedupPath && held.config.dedupCapacity === config.dedupCapacity;
     const sameChecks = held && held.config.semanticCheckMode === config.semanticCheckMode
-      && JSON.stringify(held.config.aggregateCheckNames) === JSON.stringify(config.aggregateCheckNames);
+      && JSON.stringify(held.config.aggregateCheckNames) === JSON.stringify(config.aggregateCheckNames)
+      && JSON.stringify(held.config.operatorGithubLogins) === JSON.stringify(config.operatorGithubLogins);
     const dedup = sameDedup ? held!.dedup : createPersistentDeliveryDedupStore(config.dedupPath, config.dedupCapacity);
-    const checks = sameChecks ? held!.checks : githubDeliveryChecks(config.aggregateCheckNames, config.semanticCheckMode);
+    const checks = sameChecks ? held!.checks
+      : githubDeliveryChecks(config.aggregateCheckNames, config.semanticCheckMode, config.operatorGithubLogins);
     held = { config, dedup, checks };
     const markers = config.markerPaths;
     deps = {
