@@ -17,7 +17,7 @@ import {
   MEMORY_SHED_HELD_STEP, MEMORY_SHED_STEP,
   type ContainerShedEndOutcome, type ContainerShedEntry, type ContainerShedReading,
 } from "#src/lib/daemon-memory-policy.js";
-import { containerShedInventory, createContainerShedRung, endRunChildForShed } from "#src/lib/daemon.js";
+import { containerShedInventory, createContainerShedRung, endRunChildForShed, shedTeardownMs } from "#src/lib/daemon.js";
 import { SWAP_STALL_HISTORY_MS, SWAP_STALL_MIN_SAMPLES, SWAP_STALL_WINDOW_MS } from "#src/lib/host-memory-shadow.js";
 import {
   adoptChildWork, childWorkCount, childWorkHoldsReviewKey, fixRoundTally, resetChildWork, restartDrainInventory,
@@ -333,6 +333,23 @@ test("W1-T15181 criterion 5: the daemon ends a child through abortRunChild on it
     const outcome = await endRunChildForShed(stateDir, "run-gone", (step, fields) => rows.push({ step, fields: fields ?? {} }));
     assert.equal(outcome.signalled, false);
     assert.match((outcome as { reason: string }).reason, /run directory/);
+  });
+});
+
+test("W1-T15181 criterion 5: a shed child's SIGKILL waits the restart's learned teardown, and never comes when that history is unread", async () => {
+  const now = Date.now();
+  const at = (ms: number) => new Date(now - ms).toISOString();
+  // One freshness yield the next run picked up 90 s later: the yield cost run-task.ts gives a build run's abort.
+  const yieldRows = [
+    { ts: at(600_000), run_id: "run-1", task_id: "W1-T1", step: "verdict", reason: "freshness_yield" },
+    { ts: at(510_000), run_id: "run-2", task_id: "W1-T1", step: "run.start" },
+  ].map((row) => JSON.stringify(row)).join("\n") + "\n";
+  await withTempDir("w1-t15181-teardown-", async (stateDir) => {
+    writeFileSync(join(stateDir, "ledger.ndjson"), yieldRows);
+    assert.equal(shedTeardownMs(stateDir, { now: () => now }), 90_000);
+    // The same live rows beside an archive that cannot be read: the history is incomplete, so the teardown is unknown.
+    writeFileSync(join(stateDir, `ledger.${new Date(now - 60 * MIN).toISOString().replace(/[:.]/g, "-")}.ndjson.gz`), "not gzip");
+    assert.equal(shedTeardownMs(stateDir, { now: () => now }), undefined);
   });
 });
 

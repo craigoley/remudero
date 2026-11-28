@@ -2949,6 +2949,7 @@ export function createContainerShedRung(ports: ContainerShedPorts): ContainerShe
       try {
         inventory = ports.inventory();
       } catch (error) {
+        // Reason: an unread inventory is carried as `unread` into the decision, which then holds and names it.
         inventory = { unread: String((error as Error)?.message ?? error).slice(0, 160) };
       }
       const decision = decideContainerShed(reading, { readings, episode }, inventory);
@@ -2977,21 +2978,21 @@ export function createContainerShedRung(ports: ContainerShedPorts): ContainerShe
   };
 }
 
-/** W1-T15181: end a run child the rung shed through abortRunChild on its run directory, with the restart's learned
- *  teardown before SIGKILL. An unreadable restart history leaves the teardown unknown: SIGTERM only, never a kill. */
+/** W1-T15181: the learned teardown a shed child gets before SIGKILL: the restart's yield cost, as run-task.ts gives a
+ *  build run's abort. An unreadable restart history, or none, leaves it unknown (`undefined`): SIGTERM only, never a kill. */
+export function shedTeardownMs(stateDir: string, clock: Pick<Clock, "now">): number | undefined {
+  try {
+    return restartWorkHistory(readRestartHistoryLines(stateDir, clock.now()), clock.now()).yieldCost.ms;
+  } catch {
+    return undefined; // Reason: an unread history is an unknown teardown: abortRunChild then never SIGKILLs, it waits.
+  }
+}
+
+/** W1-T15181: end a run child the rung shed through abortRunChild on its run directory, with {@link shedTeardownMs}. */
 export function endRunChildForShed(
   stateDir: string, runId: string, log: (step: string, extra?: Record<string, unknown>) => void,
 ): Promise<ContainerShedEndOutcome> {
-  return abortRunChild(join(stateDir, "runs", runId), {
-    log,
-    teardownMs: () => {
-      try {
-        return restartWorkHistory(readRestartHistoryLines(stateDir), systemClock.now()).yieldCost.ms;
-      } catch {
-        return undefined; // Reason: an unread history is an unknown teardown: abortRunChild then never SIGKILLs, it waits.
-      }
-    },
-  });
+  return abortRunChild(join(stateDir, "runs", runId), { log, teardownMs: () => shedTeardownMs(stateDir, systemClock) });
 }
 
 /** W1-T15181: the sweep's inventory with its run children, each given an end under `stateDir`; with no state directory
