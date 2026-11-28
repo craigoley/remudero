@@ -1198,7 +1198,8 @@ export function judgeCashCandidate(inv: ConfigInventory, repoRoot: string): Conf
       class: "move-judge-to-cash",
       target: s.role,
       scope: `judge:${s.role}`,
-      reason: `the cash shadow of the ${s.role} agreed on ${(s.agreeShare! * 100).toFixed(1)}% of ${s.paired} paired calls in 14 days, and ${(s.noAnswerShare! * 100).toFixed(1)}% of its calls gave no usable answer; median cost $${s.shadowMedianCostUsd ?? "?"} against $${s.primaryMedianCostUsd ?? "?"}.`,
+      reason: `the cash shadow of the ${s.role} agreed on ${(s.agreeShare! * 100).toFixed(1)}% of ${s.paired} paired calls in 14 days, and ${(s.noAnswerShare! * 100).toFixed(1)}% of its calls gave no usable answer` +
+        `${(s.primaryUnanswered ?? 0) > 0 ? `; ${s.primaryUnanswered} calls whose primary gave no answer are counted apart` : ""}; median cost $${s.shadowMedianCostUsd ?? "?"} against $${s.primaryMedianCostUsd ?? "?"}.`,
       edits: [{ path, from, to }],
       cohort,
       candidate: `${key} on ${row.model}/${row.effort} with provider cash`,

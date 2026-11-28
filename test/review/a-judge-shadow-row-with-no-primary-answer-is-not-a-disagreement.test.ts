@@ -9,10 +9,10 @@ import { test } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import type { Config } from "#src/lib/config.js";
 import {
-  judgeShadowPrimaryUnanswered, judgeShadowSwitchCandidate, judgeShadowThresholds, judgeShadowTypedAnswers, JUDGE_SWITCH_BAR, type ConfigInventory,
+  judgeCashCandidate, judgeShadowPrimaryUnanswered, judgeShadowSwitchCandidate, judgeShadowThresholds, judgeShadowTypedAnswers, JUDGE_SWITCH_BAR, type ConfigInventory,
 } from "#src/lib/config-gardener.js";
 import type { askDecisionModel, DecisionAnsweredRow } from "#src/lib/decision-model.js";
-import { shadowJudgeCall, type ShadowJudgeCall } from "#src/lib/judge-shadow.js";
+import { judgeShadowSummary, shadowJudgeCall, type ShadowJudgeCall } from "#src/lib/judge-shadow.js";
 import { loadMounts, mountsPath, type DecisionCandidate, type JudgeMount } from "#src/lib/mounts.js";
 import { scoreTypedAnswers } from "#src/lib/typed-answer-scores.js";
 import type { SpawnWorkerArgs } from "#src/lib/worker.js";
@@ -106,6 +106,15 @@ test("W1-T15164 criterion 2: judgeShadowThresholds and the switch-bar count leav
   }
   // Outside the window nothing is counted.
   assert.deepEqual(judgeShadowPrimaryUnanswered(decided(0, 3, "new"), NOW + 1), []);
+
+  // The role-level cash bar must not treat usable shadow answers with no primary answer as paired calls.
+  for (const form of ["new", "old"] as const) {
+    const cashRows = decided(1, 199, form).map((row) => ({ ...row, role: "feedback_summary" }));
+    const summary = judgeShadowSummary(cashRows, WINDOW);
+    assert.deepEqual(summary, [{ role: "feedback_summary", paired: 1, primaryUnanswered: 199, agreeShare: 1,
+      noAnswerShare: 0, refused: 0, primaryMedianCostUsd: null, shadowMedianCostUsd: null }], form);
+    assert.equal(judgeCashCandidate({ ...inventory(cashRows), judgeShadows: summary }, REPO_ROOT), undefined, form);
+  }
 });
 
 test("W1-T15164 criterion 3: invariant:answered-pairs-unchanged — a row where both answered keeps agreement equal to primary === shadow, and its count is unchanged", async () => {
