@@ -942,7 +942,7 @@ sweep_worktree() {
 # that hold it or that it holds outside the default branch. A non-GitHub origin has no pull requests.
 HOME_PR_MAX_LOOKUPS="${RMD_CLEANUP_HOME_PR_MAX_LOOKUPS:-20}"
 home_tree_open_pr() {
-  local wt="$1" url base head tips tip n count=0 head_in_base=1 head_result head_error gh slug
+  local wt="$1" url base head tips tip n count=0 head_in_base=1 head_result head_error gh slug branch upstream upstream_tip
   url="$(rgit "$wt" config --get remote.origin.url 2>/dev/null)" || return 1
   case "$url" in https://github.com/*|git@github.com:*|ssh://git@github.com/*) ;; *) return 1 ;; esac
   base="$(rgit "$wt" rev-parse -q --verify refs/remotes/origin/HEAD 2>/dev/null)" ||
@@ -956,6 +956,19 @@ home_tree_open_pr() {
       printf '%s\n' "$head"
       rgit "$wt" for-each-ref --format='%(objectname)' --contains HEAD refs/remotes/origin
       rgit "$wt" for-each-ref --format='%(objectname)' --merged HEAD --no-merged "$base" refs/remotes/origin
+    fi
+    # A local branch can be amended or rebased after its published PR tip. That remote tip
+    # is then neither an ancestor of HEAD nor a ref containing HEAD, but its PR still keeps
+    # this worktree. Check the configured upstream and the conventional same-named origin ref.
+    branch="$(rgit "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null)" || branch=""
+    if [ -n "$branch" ]; then
+      upstream="$(rgit "$wt" rev-parse --symbolic-full-name '@{upstream}' 2>/dev/null)" || upstream=""
+      if [ -n "$upstream" ] && upstream_tip="$(rgit "$wt" rev-parse -q --verify "$upstream" 2>/dev/null)"; then
+        printf '%s\n' "$upstream_tip"
+      fi
+      if upstream_tip="$(rgit "$wt" rev-parse -q --verify "refs/remotes/origin/$branch" 2>/dev/null)"; then
+        printf '%s\n' "$upstream_tip"
+      fi
     fi
   } 2>/dev/null)" || return 0
   while IFS= read -r tip; do

@@ -32,6 +32,8 @@ function homeRig(): HomeRig {
   git(clone, "add", ".");
   git(clone, "commit", "-q", "-m", "base");
   git(clone, "push", "-q", "origin", "HEAD:main");
+  git(clone, "update-ref", "refs/remotes/origin/main", "HEAD");
+  git(clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
   git(clone, "remote", "set-url", "origin", GITHUB);
   git(clone, "config", `url.file://${origin}.insteadOf`, GITHUB);
   return { fx, shim, clone, origin };
@@ -67,12 +69,21 @@ function copies(r: HomeRig, wt: string): string[] {
   return readdirSync(root).filter(n => n.startsWith(stem)).map(n => join(root, n));
 }
 
+function stubUnpublishedHead(r: HomeRig, head: string): void {
+  r.shim.addRoute({
+    when: `api repos/craigoley/remudero/commits/${head}/pulls`,
+    stderr: `gh: No commit found for SHA: ${head} (HTTP 422)\n{"message":"No commit found for SHA: ${head}","documentation_url":"https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit"}`,
+    exit: 1,
+  });
+}
+
 const drop = (r: HomeRig) => { rmSync(r.fx.root, { recursive: true, force: true }); rmSync(r.shim.dir, { recursive: true, force: true }); };
 
 test("W1-T14929 an idle linked worktree of a home clone is preserve-retired", () => {
   const r = homeRig();
   try {
     const wt = linkedTree(r, ".claude/worktrees", "wt-idle");
+    stubUnpublishedHead(r, git(wt, "rev-parse", "HEAD").trim());
     age(wt, 10 * DAY_HOURS);
     const out = pass(r);
     assert.match(out, new RegExp(`REMOVE ${wt}: uncommitted changes; idle 7 days, preserved then retired`));
@@ -90,11 +101,7 @@ test("W1-T14929 an unpublished home-tree HEAD with GitHub 422 is not treated as 
   try {
     const wt = linkedTree(r, ".worktrees", "wt-unpublished-head");
     const head = git(wt, "rev-parse", "HEAD").trim();
-    r.shim.addRoute({
-      when: `api repos/craigoley/remudero/commits/${head}/pulls`,
-      stderr: `gh: No commit found for SHA: ${head} (HTTP 422)\n{"message":"No commit found for SHA: ${head}","documentation_url":"https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit"}`,
-      exit: 1,
-    });
+    stubUnpublishedHead(r, head);
     age(wt, 10 * DAY_HOURS);
 
     const out = pass(r);
@@ -117,17 +124,32 @@ test("W1-T14929 an unpublished HEAD still checks related published PR tips", () 
     git(wt, "add", "followup.txt");
     git(wt, "commit", "-q", "-m", "local commit after the published tip");
     const head = git(wt, "rev-parse", "HEAD").trim();
-    r.shim.addRoute({
-      when: `api repos/craigoley/remudero/commits/${head}/pulls`,
-      stderr: `gh: No commit found for SHA: ${head} (HTTP 422)\n{"message":"No commit found for SHA: ${head}","documentation_url":"https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit"}`,
-      exit: 1,
-    });
+    stubUnpublishedHead(r, head);
     age(wt, 10 * DAY_HOURS);
 
     const out = pass(r, { GH_OPEN: "1" });
     assert.equal(existsSync(wt), true, `related published PR tip keeps the tree:\n${out}`);
     assert.match(out, new RegExp(`KEEP ${wt}: linked worktree of ${r.clone} has an open pull request`));
     assert.ok(r.shim.calls().some(call => call.includes(publishedTip)), `the related published tip is checked: ${r.shim.calls().join(" | ")}\n${out}`);
+  } finally { drop(r); }
+});
+
+test("W1-T14929 a diverged same-named origin tip with an open PR keeps the home tree", () => {
+  const r = homeRig();
+  try {
+    const wt = linkedTree(r, ".worktrees", "wt-diverged-pr-tip");
+    git(wt, "push", "-q", r.origin, "HEAD:refs/heads/hand/wt-diverged-pr-tip");
+    git(wt, "update-ref", "refs/remotes/origin/hand/wt-diverged-pr-tip", "HEAD");
+    const publishedTip = git(wt, "rev-parse", "HEAD").trim();
+    git(wt, "commit", "--amend", "--no-edit", "-q", "-m", "rebased unpublished head");
+    const amendedHead = git(wt, "rev-parse", "HEAD").trim();
+    assert.notEqual(amendedHead, publishedTip, "the local branch diverges from its published PR tip");
+    age(wt, 10 * DAY_HOURS);
+
+    const out = pass(r, { GH_OPEN: "1" });
+    assert.equal(existsSync(wt), true, `published branch PR tip keeps the tree:\n${out}`);
+    assert.match(out, new RegExp(`KEEP ${wt}: linked worktree of ${r.clone} has an open pull request`));
+    assert.ok(r.shim.calls().some(call => call.includes(publishedTip)), `published tip is checked: ${r.shim.calls().join(" | ")}\n${out}`);
   } finally { drop(r); }
 });
 
