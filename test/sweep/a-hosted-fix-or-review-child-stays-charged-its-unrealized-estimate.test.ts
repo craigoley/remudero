@@ -201,6 +201,37 @@ test("W1-T15115 criterion 2: a fix handed to the host at its spawn stays charged
   assert.equal(injectedRows.at(-1)!.fix_admissions_available, 1);
 });
 
+test("W1-T15115 criterion 2: two fixes handed off together each stay charged until their own child's entry is visible", () => {
+  // The 2026-11-28 00:22Z boot shape: one light pass admits and hands off fixes back to back, before any child exists.
+  // Room for exactly two: 2 x 2,076 + 50 MiB.
+  const box = container();
+  const rows: Row[] = [];
+  const c = controller({ rows, headroomMib: 2 * FIX_MIB + 50, residents: () => box.residents() });
+  const a = c.claim(pr);
+  const b = c.claim(pr);
+  assert.equal(a.admitted && b.admitted, true, "two fit");
+  if (!a.admitted || !b.admitted) return;
+  a.handOff?.();
+  b.handOff?.();
+  assert.equal(c.claim(pr).admitted, false, "both handed off, no child visible: no third");
+
+  // A's child appears; it is A's, and B is still waiting for its own.
+  box.live.push({ id: "fix-a", workerClass: "fix", pid: 61, mib: 100 });
+  assert.equal(c.claim(pr).admitted, false, "A's child visible: still no third");
+  assert.equal(c.claim(pr).admitted, false, "the next refresh must not pair B with A's entry");
+  const waiting = rows.at(-1)!;
+  assert.equal(waiting.pending_reservations, 1, "B is still held");
+  assert.equal(waiting.fix_charge_mib, FIX_MIB, "B is charged whole until its own child is visible");
+
+  // B's child appears: both hand-offs are complete, each entry carrying its own charge.
+  box.live.push({ id: "fix-b", workerClass: "fix", pid: 62, mib: 100 });
+  assert.equal(c.claim(pr).admitted, false, "both children visible: still room for two only");
+  const done = rows.at(-1)!;
+  assert.equal(done.pending_reservations, 0);
+  assert.equal(done.live_child_count, 2);
+  assert.equal(done.live_child_charge_mib, 2 * (FIX_MIB - 100));
+});
+
 test("W1-T15115 criterion 3: a round waiting on CI, and an entry whose occupancy is released, hold no unrealized charge", (t) => {
   const { dir: root } = ownedFixtureDir(t, "w1-t15115-ci-wait");
   const locks = join(root, "state", "fix-admission");

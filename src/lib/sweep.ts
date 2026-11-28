@@ -22946,6 +22946,10 @@ export function createSweepFixAdmissionController(input: {
   // since (pair by count, in claim order); once matched, the entry carries its charge through the live term.
   type HeldReservation = { baseline?: ReadonlySet<string>; matched?: string; handed: boolean };
   const held: HeldReservation[] = [];
+  // Every entry a reservation was ever matched to on this controller. A matched hand-off leaves `held`, but its entry
+  // stays its child's: a later reservation that saw no entries at its claim must wait for its own child, never take one
+  // already paired (two fixes handed off in one light pass, the first child visible first).
+  const paired = new Set<string>();
   let liveFixChargeMib = 0;
   const liveFixIds = (): ReadonlySet<string> | undefined => reading?.live === undefined ? undefined
     : new Set(reading.live.filter((child) => child.workerClass === "fix").map((child) => child.id));
@@ -22953,13 +22957,12 @@ export function createSweepFixAdmissionController(input: {
   const matchLiveEntries = (): void => {
     const ids = liveFixIds();
     if (ids === undefined) return;
-    const taken = new Set(held.flatMap((r) => r.matched === undefined ? [] : [r.matched]));
     for (const r of held) {
       if (r.matched !== undefined || r.baseline === undefined) continue;
-      const id = [...ids].find((candidate) => !r.baseline!.has(candidate) && !taken.has(candidate));
+      const id = [...ids].find((candidate) => !r.baseline!.has(candidate) && !paired.has(candidate));
       if (id === undefined) continue;
       r.matched = id;
-      taken.add(id);
+      paired.add(id);
     }
     for (let i = held.length - 1; i >= 0; i--) if (held[i]!.handed && held[i]!.matched !== undefined) held.splice(i, 1);
     reservations = held.length;
