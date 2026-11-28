@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { parse as parseYaml } from "yaml";
 
 // @ts-expect-error -- plain .mjs script, no type declarations
 import { emitCiReport, formatReport, isBlocked, proveNearCrossings, refusePopulationDrop } from "#scripts/expiring-fixture-census.mjs";
@@ -58,14 +59,30 @@ function censusLog(reported: ReturnType<typeof crossing>[], drops: Record<string
   return { blocked, report, log: lines.join("\n") };
 }
 
-/** The census step's job log as GitHub serves it: a step group, the report on stdout, the runner's multi-line
- *  rendering of the `::error` annotation, the exit line, every line stamped with its time. */
-const jobLog = (report: string) => stamped(["##[group]Run set -o pipefail", "  set -o pipefail",
-  '  mkdir -p "$RUNNER_TEMP/gate-reports"',
-  '  if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then git update-ref refs/remotes/origin/main "$GATE_BASE"; fi',
-  "  node scripts/expiring-fixture-census.mjs 2>&1 | tee \"$RUNNER_TEMP/gate-reports/expiring-fixture-census.log\"",
-  "##[endgroup]", report,
-  `##[error]${report}`, "##[error]Process completed with exit code 1."].join("\n"));
+/** A ci.yml step's `run:` script, line by line, read from this repo's workflow by the step's id. */
+function workflowStep(id: string): { script: string[] } {
+  const workflow = parseYaml(readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8")) as
+    { jobs: Record<string, { steps?: Array<{ id?: string; run?: string }> }> };
+  const step = Object.values(workflow.jobs).flatMap((job) => job.steps ?? []).find((candidate) => candidate.id === id);
+  assert.ok(step?.run, `ci.yml has a ${id} step with a run script`);
+  return { script: step.run.replace(/\n$/, "").split("\n") };
+}
+
+/** The census step's job log in the shape actions/runner really writes it, as captured in this repo's other job-log
+ *  fixtures (test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts): the group header names the
+ *  script's first line, the runner echoes every script line wrapped in `ESC[36;1m … ESC[0m`, then its `shell:` and
+ *  `env:` lines. The script lines are read from ci.yml's expiring-fixture-census step itself. */
+const CENSUS_STEP_SCRIPT = workflowStep("expiring-fixture-census").script;
+const runnerGroup = (script: readonly string[], env: readonly string[] = []) => [`##[group]Run ${script[0]}`,
+  ...script.map((line) => `\u001b[36;1m${line}\u001b[0m`), "shell: /usr/bin/bash -e {0}",
+  ...(env.length > 0 ? ["env:", ...env] : []), "##[endgroup]"];
+const runnerStamped = (lines: readonly string[]) => lines.flatMap((line) => line.split("\n"))
+  .map((line, i) => `2026-11-27T00:00:01.${String(841136 + i).padStart(7, "0")}Z ${line}`).join("\n");
+const runnerJobLog = (report: string, after: readonly string[] = []) => runnerStamped([
+  ...runnerGroup(CENSUS_STEP_SCRIPT, ["  RMD_CI_REPORT: 1"]), ...report.split("\n"),
+  `##[error]${report}`, "##[error]Process completed with exit code 1.", ...after]);
+/** The census step's job log as GitHub serves it, in the runner's real shape. */
+const jobLog = (report: string) => runnerJobLog(report);
 const crossingLines = (log: string) => log.split("\n").filter((line) => / goes red /.test(line)).length;
 
 /** The same log as the Actions job log reads it back: every line stamped with its time. */
@@ -207,6 +224,32 @@ test("W1-T15064 criterion 1: an all-inherited red step dispatches no source edit
   assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: inheritedLog },
     { name: "unit", logTail: "✖ inbox released asks" }]).inherited, false);
   assert.equal(baseInheritedRedSteps([]).inherited, false);
+
+  // The census step's real job log: actions/runner prints each Run-group script line in cyan, so the census command
+  // reads `ESC[36;1mnode scripts/expiring-fixture-census.mjs ...ESC[0m`. The census is still the only failed step.
+  const census = censusLog([crossing("test/a.test.ts", 0.4, true), crossing("test/b.test.ts", 0.6, true)], {}, 82);
+  const real = jobLog(census.report);
+  assert.match(real, /\u001b\[36;1mnode scripts\/expiring-fixture-census\.mjs 2>&1 \| tee /, "the runner's own colouring");
+  assert.equal(baseInheritedRedSteps([{ name: "comment-load-ratchet", logTail: real }]).inherited, true, real.slice(0, 600));
+  const rollup = [{ name: "comment-load-ratchet", conclusion: "FAILURE", detailsUrl: "https://github.com/acme/remudero/actions/runs/1/job/779" }];
+  const [cut] = await fetchCiFailuresAsync("acme", "remudero", rollup, 60, { fetchAnnotations: async () => [], fetchJobLog: async () => real });
+  const stood = await round([cut!], loosenAndRewrite, { readCiJobLog: async () => real });
+  t.after(() => stood.repo.cleanup());
+  assert.equal(stood.spawns, 0, "read from the real job log, the all-inherited red dispatches no source edit");
+  assert.equal(stood.pushes, 0);
+  assert.deepEqual(stood.rows.find((row) => row.step === "fix.stood_down" && row.reason === "base_inherited")?.steps, ["comment-load-ratchet"]);
+  // The only-failed-step rule still reads the coloured log: another step's failed exit in the job, or the one failed
+  // exit landing under another step, is not explained by the inherited census.
+  const census2 = [...runnerGroup(CENSUS_STEP_SCRIPT, ["  RMD_CI_REPORT: 1"]), census.report, `##[error]${census.report}`];
+  const exit = "##[error]Process completed with exit code 1.";
+  for (const [shape, lines] of [["two failed steps", [...census2, exit, ...runnerGroup(workflowStep("console-parity").script), exit]],
+    ["the exit is another step's", [...census2, ...runnerGroup(workflowStep("console-parity").script), exit]]] as const) {
+    assert.equal(baseInheritedRedSteps([{ name: "comment-load-ratchet", logTail: runnerStamped(lines) }]).inherited, false, shape);
+  }
+  const otherOwns = await round([cut!], (dir) => writeFileSync(join(dir, SOURCE), `${GUARDED}// repaired\n`),
+    { readCiJobLog: async () => runnerStamped([...census2, ...runnerGroup(workflowStep("console-parity").script), exit]) });
+  t.after(() => otherOwns.repo.cleanup());
+  assert.equal(otherOwns.spawns, 1, "a red another step owns still dispatches");
 });
 
 test("W1-T15064 criterion 1: a red step this diff owns still dispatches its source edit", async (t) => {
@@ -217,6 +260,77 @@ test("W1-T15064 criterion 1: a red step this diff owns still dispatches its sour
   assert.equal(result.pushes, 1);
   assert.equal(result.rows.some((row) => row.reason === "base_inherited"), false);
 });
+
+const REFUSAL = "the round changed a test expectation the answered finding does not name";
+const refusalOf = (rows: Array<{ step: string } & Record<string, unknown>>) =>
+  rows.find((row) => row.step === "fix.commit_refused" && row.reason === REFUSAL);
+const CONFLICT = "conflict.txt";
+const PR_OWN_FILE = `${EXPECT}assert.equal(prOwn(), false);\n`;
+
+/** A harness merge round in real git, the shape run-task.ts startShellLessMergeConflictMerge starts: main holds
+ *  test/inbox.test.ts, the PR branch added `assert.equal(prOwn(), false)` to it, main advanced with a conflicting
+ *  edit elsewhere, and the round's worker resolves the conflict. `resolve` is what the worker writes. */
+async function harnessMergeRound(resolve: (dir: string) => void) {
+  const origin = gitRepo({ kind: "w1-t15064-merge-origin", bare: true });
+  const author = gitRepo({ kind: "w1-t15064-merge-author" });
+  mkdirSync(join(author.dir, "test"));
+  writeFileSync(join(author.dir, TEST), EXPECT);
+  writeFileSync(join(author.dir, CONFLICT), "base\n");
+  author.git("add", "-A");
+  author.git("commit", "-qm", "main");
+  author.git("remote", "add", "origin", origin.dir);
+  author.git("push", "-q", "origin", "HEAD:main");
+  const wt = gitRepo({ kind: "w1-t15064-merge-wt", cloneFrom: origin.dir });
+  wt.git("config", "user.name", "fixture");
+  wt.git("config", "user.email", "fixture@example.invalid");
+  wt.git("checkout", "-qb", "run-W1-T15064X-1");
+  writeFileSync(join(wt.dir, TEST), PR_OWN_FILE);
+  writeFileSync(join(wt.dir, CONFLICT), "base\nours\n");
+  wt.git("commit", "-qam", "the PR adds its own assertion");
+  const before = wt.git("rev-parse", "HEAD");
+  writeFileSync(join(author.dir, CONFLICT), "base\ntheirs\n");
+  author.git("commit", "-qam", "main: a conflicting change");
+  author.git("push", "-q", "origin", "HEAD:main");
+  const rows: Array<{ step: string } & Record<string, unknown>> = [];
+  const pushes: Array<string | undefined> = [];
+  let spawns = 0;
+  const review: ReviewVerdict & { headSha: string; reviewerOutcome: string } = { state: "failure", criteria: [],
+    summary: "dirty", testTheater: false, floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
+    headSha: before, reviewerOutcome: "success" };
+  const outcome = await runFixRungWithHost({
+    taskId: "W1-T15064X", runId: "W1-T15064X-run",
+    task: { id: "W1-T15064X", title: "inbox released asks", files: [CONFLICT, TEST], catalog: "ops" as const },
+    prUrl: "https://github.com/acme/remudero/pull/21035", branch: "run-W1-T15064X-1",
+    worktreePath: wt.dir, initialSessionId: "initial", mount, settingsFile: join(wt.dir, "settings.json"),
+    config: { root: wt.dir, workerProviders: { harnessCommitsFix: true } } as Config,
+    budgetUsd: 10, strikeCap: 1, initialReview: review,
+    mergeConflict: { files: [{ path: CONFLICT, oursDeleted: 1, theirsDeleted: 1 }], oursLog: "ours", theirsLog: "theirs" },
+    reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: wt.dir, reviewerMount: mount },
+    escalationJudge: async () => ({ decision: "deliver", reason: "fixture delivers" }),
+    deps: {
+      spawn: async () => {
+        spawns++;
+        resolve(wt.dir);
+        return { sessionId: "fix-session", costUsd: 0, numTurns: 1, provider: "codex",
+          text: "FIX_OUTCOME: FIXED\nCOMMIT_MESSAGE: fix(merge): merge origin/main into the branch",
+          blocks: [], stderr: "", subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
+          model: "sonnet", effort: "medium", tokens: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 },
+          modelUsage: {}, compactionEvents: [], qualitySuspect: false } satisfies WorkerResult;
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => ({ ...review, state: "success", headSha: wt.git("rev-parse", "HEAD") }),
+      fetchPrBody: async () => "Remudero-Task: W1-T15064X",
+      push: (_worktree: string, _branch: string, sha?: string) => { pushes.push(sha); },
+      issues: { create: () => "https://github.com/acme/remudero/issues/1", listOpen: () => [], comment: () => {} },
+      ledgerPath: join(wt.dir, "ledger.ndjson"),
+      ledgerLines: () => rows,
+      log: (step: string, extra?: Record<string, unknown>) => { rows.push({ step, ...extra }); }, say: () => {},
+      account: (result: WorkerResult) => result,
+    },
+  } as Parameters<typeof runFixRungWithHost>[0], fixCommandHost());
+  const cleanup = () => { wt.cleanup(); author.cleanup(); origin.cleanup(); };
+  return { wt, before, outcome, rows, pushes, spawns: () => spawns, cleanup };
+}
 
 test("W1-T15064 criterion 2: a changed test expectation is refused unless its finding names the test", async (t) => {
   // The finding names the source only: the rewritten assertion in test/inbox.test.ts is refused and nothing is pushed.
@@ -257,11 +371,36 @@ test("W1-T15064 criterion 2: a changed test expectation is refused unless its fi
   ]);
   // A finding for a longer, similarly named file does not name this test.
   assert.deepEqual(unaskedExpectationRewrites(multi, "test/fix-rung-inbox.test.ts"), multi);
+  // A failing check's log names the test even when its reporter coloured the file name.
+  const coloured = { ciFailures: [{ name: "unit", logTail: `\u001b[31m✖ inbox guard\u001b[39m\n    at (test/\u001b[36minbox.test.ts\u001b[39m:2:8)`,
+    annotations: [{ message: `\u001b[31minbox.test.ts\u001b[39m failed` }] }] };
+  assert.deepEqual(unaskedExpectationRewrites(multi, answeredFindingText(coloured)), []);
+  assert.deepEqual(unaskedExpectationRewrites(multi, answeredFindingText({ ciFailures: [{ name: "unit", logTail: "",
+    annotations: [{ message: `\u001b[31minbox.test.ts\u001b[39m failed` }] }] })), [], "an annotation alone names it too");
+
+  // A harness merge round: resolving the conflict, the worker also flips the PR's own assertion, which main never had.
+  // The finding names only the conflicted file, so the round pushes nothing.
+  const flipped = await harnessMergeRound((dir) => {
+    writeFileSync(join(dir, CONFLICT), "base\nours\ntheirs\n");
+    writeFileSync(join(dir, TEST), PR_OWN_FILE.replace("prOwn(), false", "prOwn(), true"));
+  });
+  t.after(flipped.cleanup);
+  assert.equal(flipped.spawns(), 1);
+  assert.ok(flipped.rows.some((row) => row.step === "fix.merge_started"), "the harness started the merge");
+  const mergeHead = flipped.wt.git("rev-parse", "HEAD");
+  assert.equal(flipped.wt.git("log", "-1", "--format=%P", mergeHead).split(" ").length, 2, "a real two-parent merge");
+  assert.equal(flipped.wt.git("ls-tree", "--name-only", "origin/main", "--", TEST), TEST, "the test file is also on main");
+  assert.deepEqual(flipped.pushes, [], "the merge that rewrote the PR's own expectation does not push");
+  assert.notEqual(flipped.outcome.outcome, "fixed");
+  assert.deepEqual(refusalOf(flipped.rows)?.tests, [TEST]);
+  assert.deepEqual(refusalOf(flipped.rows)?.changed_assertions, ["assert.equal(prOwn(), false)"]);
+  // The control: the same merge, the PR's assertion left alone, is pushed.
+  const resolved = await harnessMergeRound((dir) => writeFileSync(join(dir, CONFLICT), "base\nours\ntheirs\n"));
+  t.after(resolved.cleanup);
+  assert.equal(resolved.pushes.length, 1, "a merge that rewrites no expectation pushes");
+  assert.equal(refusalOf(resolved.rows), undefined);
 });
 
-const REFUSAL = "the round changed a test expectation the answered finding does not name";
-const refusalOf = (rows: Array<{ step: string } & Record<string, unknown>>) =>
-  rows.find((row) => row.step === "fix.commit_refused" && row.reason === REFUSAL);
 const UNMET = { claim: "released asks the reference", proof: "unit test: released asks the reference" };
 /** The source criterion is unmet; the one criterion that names the test passed, so the round is not asked about it. */
 const reviewed: ReviewVerdict["criteria"] = [
@@ -343,6 +482,44 @@ test("W1-T15064 criterion 2: a merge round is charged only for what it changed b
   repo.git("commit", "-qam", "the round rewrites what main kept");
   assert.deepEqual(await readExpectationRewrites(git, roundStart, repo.git("rev-parse", "HEAD")),
     [{ path: TEST, changed: ["assert.equal(released(() => true), true)"] }]);
+});
+
+test("W1-T15064 criterion 2: a merge round is charged for the PR's own assertion and for main's, read three ways", async (t) => {
+  // main changes one expectation and a constant; the PR added two assertions main never had, one reading that
+  // constant. The harness merges main with --no-commit, the worker edits, the harness commits a two-parent merge.
+  const ORIGIN = `${EXPECT}assert.equal(released(() => true), true);\nconst want = 1;\nassert.equal(stable(), 0);\nassert.equal(steady(), 0);\n`;
+  const PR_HEAD = `${ORIGIN}assert.equal(prOwn(), false);\nassert.equal(prTwo(), want);\n`;
+  const MAIN = ORIGIN.replace("released(undefined), false", "released(undefined), true").replace("want = 1", "want = 2");
+  const cases: Array<[string, (text: string) => string, string[]]> = [
+    ["the merge alone", (text) => text, []],
+    ["the round flips the PR's own assertion", (text) => text.replace("prOwn(), false", "prOwn(), true"), ["assert.equal(prOwn(), false)"]],
+    ["the round writes neither side's version of main's change", (text) => text.replace("released(undefined), true", "released(undefined), 0"),
+      ["assert.equal(released(undefined), true)"]],
+    ["the round changes main's constant again", (text) => text.replace("want = 2", "want = 3"), ["assert.equal(prTwo(), want) (reads changed want)"]],
+  ];
+  for (const [name, edit, charged] of cases) {
+    const { repo, git } = history();
+    t.after(() => repo.cleanup());
+    writeFileSync(join(repo.dir, TEST), ORIGIN);
+    repo.git("commit", "-qam", "main adds the constant");
+    repo.git("checkout", "-qb", "run-W1-T15064X-1");
+    writeFileSync(join(repo.dir, TEST), PR_HEAD);
+    repo.git("commit", "-qam", "the PR adds its own assertions");
+    const roundStart = repo.git("rev-parse", "HEAD");
+    repo.git("checkout", "-q", "main");
+    writeFileSync(join(repo.dir, TEST), MAIN);
+    repo.git("commit", "-qam", "main changes an expectation and the constant");
+    repo.git("checkout", "-q", "run-W1-T15064X-1");
+    repo.git("merge", "-q", "--no-commit", "--no-ff", "main");
+    assert.equal(readFileSync(join(repo.dir, TEST), "utf8"), `${MAIN}assert.equal(prOwn(), false);\nassert.equal(prTwo(), want);\n`, name);
+    writeFileSync(join(repo.dir, TEST), edit(readFileSync(join(repo.dir, TEST), "utf8")));
+    repo.git("add", TEST);
+    repo.git("commit", "-qm", "merge main");
+    const merged = repo.git("rev-parse", "HEAD");
+    assert.equal(repo.git("log", "-1", "--format=%P", merged).split(" ").length, 2, name);
+    const expected = charged.length > 0 ? [{ path: TEST, changed: charged }] : [];
+    assert.deepEqual(await readExpectationRewrites(git, roundStart, merged), expected, name);
+  }
 });
 
 test("W1-T15064 criterion 2: a renamed test is compared with its old path", async (t) => {
@@ -449,24 +626,6 @@ test("W1-T15064 criterion 1: a cut report whose lost lines hold a crossing this 
   assert.equal((await baseInheritedRedStepsFromJobLogs([failure!], async () => { throw new Error("403"); })).inherited, false);
 });
 
-/** The census step's job log in the shape actions/runner really writes it, as captured in this repo's other job-log
- *  fixtures (test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts): the group header names the
- *  script's first line, the runner echoes every script line wrapped in `ESC[36;1m … ESC[0m`, then its `shell:` and
- *  `env:` lines. The script lines are ci.yml's expiring-fixture-census step (ci.yml:1571-1574), verbatim. */
-const CENSUS_STEP_SCRIPT = [
-  "set -o pipefail",
-  'mkdir -p "$RUNNER_TEMP/gate-reports"',
-  'if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then git update-ref refs/remotes/origin/main "$GATE_BASE"; fi # W1-T5522: no base flag',
-  'node scripts/expiring-fixture-census.mjs 2>&1 | tee "$RUNNER_TEMP/gate-reports/expiring-fixture-census.log"',
-];
-const runnerGroup = (script: readonly string[], env: readonly string[] = []) => [`##[group]Run ${script[0]}`,
-  ...script.map((line) => `\u001b[36;1m${line}\u001b[0m`), "shell: /usr/bin/bash -e {0}",
-  ...(env.length > 0 ? ["env:", ...env] : []), "##[endgroup]"];
-const runnerStamped = (lines: readonly string[]) => lines.flatMap((line) => line.split("\n"))
-  .map((line, i) => `2026-11-27T00:00:01.${String(841136 + i).padStart(7, "0")}Z ${line}`).join("\n");
-const runnerJobLog = (report: string, after: readonly string[] = []) => runnerStamped([
-  ...runnerGroup(CENSUS_STEP_SCRIPT, ["  RMD_CI_REPORT: 1"]), ...report.split("\n"),
-  `##[error]${report}`, "##[error]Process completed with exit code 1.", ...after]);
 
 test("W1-T15064 criterion 1: an all-inherited census red read from a real runner job log, colour codes and all, stands down", async (t) => {
   const census = censusLog([crossing("test/a.test.ts", 0.4, true), crossing("test/b.test.ts", 0.6, true)], {}, 82);

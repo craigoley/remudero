@@ -183,6 +183,8 @@ const ERROR_ANNOTATION = /^(?:##\[error\]|::error(?: [^:]*)?::)(.*)$/;
 const decodeAnnotation = (text: string) => text.replace(/%0D/g, "\r").replace(/%0A/g, "\n").replace(/%25/g, "%");
 /** An ANSI escape sequence: actions/runner echoes each Run-group script line as `ESC[36;1m<line>ESC[0m`. */
 const ANSI_ESCAPE = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+/** A log as plain text: the runner's colour codes, and any a tool wrote around its own output, stripped. */
+const plainLog = (text: string) => text.replace(ANSI_ESCAPE, "");
 
 /** A failing check's log as report lines, colour codes stripped; each error annotation is decoded, and its first line
  *  is kept apart. */
@@ -192,7 +194,7 @@ function reportLines(logTail: string): { lines: string[]; annotationHeads: strin
   let currentScript: string[] = [];
   let inRunGroup = false;
   for (const raw of logTail.split(/\r?\n/)) {
-    const line = raw.replace(ANSI_ESCAPE, "").replace(LOG_PREFIX, "");
+    const line = plainLog(raw).replace(LOG_PREFIX, "");
     const run = /^##\[group\]Run\s+(.+)$/.exec(line);
     if (run) { currentStep = run[1]!; currentScript = [run[1]!]; inRunGroup = true; }
     else if (line === "##[endgroup]") {
@@ -249,7 +251,7 @@ export async function baseInheritedRedStepsFromJobLogs(failures: ReadonlyArray<{
   const logs: Array<{ name: string; logTail: string }> = [];
   for (const failure of failures) {
     let logTail = failure.logTail;
-    if (failure.jobId !== undefined && failure.logTail.includes("expiring-fixture-census:")) {
+    if (failure.jobId !== undefined && plainLog(failure.logTail).includes("expiring-fixture-census:")) {
       try {
         logTail = await readJobLog(failure.jobId);
       } catch (error) {
@@ -397,9 +399,6 @@ function assertionsOf(text: string, tokens = sourceTokens(text)): Array<{ call: 
   return found;
 }
 
-/** An assertion's own text, without the note naming the declarations it reads. */
-const assertionKey = (changed: string) => changed.replace(/ \(reads changed [^)]*\)$/, "");
-
 /** A line break after one of these continues the statement. */
 const CONTINUES = /^(?:=|,|\?|:|\+|-|\*|\/|%|&&|\|\||\?\?|=>|\.|===|!==|==|!=|<|>|<=|>=|\||&|in|of|instanceof)$/;
 
@@ -440,24 +439,51 @@ function changedDeclarations(base: Map<string, string[]>, head: Map<string, stri
   return changed;
 }
 
+/** A test file read once: its assertions and its declarations. */
+interface TestSource { assertions: Array<{ call: string; reads: Set<string> }>; declarations: Map<string, string[]> }
+const testSource = (text: string): TestSource => {
+  const tokens = sourceTokens(text);
+  return { assertions: assertionsOf(text, tokens), declarations: bindingDeclarationsOf(text, tokens) };
+};
+
+/** One changed expectation: the assertion, and the changed declarations it reads (none when the assertion went). */
+interface ExpectationChange { call: string; reads: string[] }
+const describeChange = ({ call, reads }: ExpectationChange) => reads.length > 0 ? `${call} (reads changed ${reads.join(", ")})` : call;
+
+function expectationChanges(base: TestSource, head: TestSource): ExpectationChange[] {
+  const moved = changedDeclarations(base.declarations, head.declarations);
+  const left = new Map<string, number>();
+  for (const { call } of head.assertions) left.set(call, (left.get(call) ?? 0) + 1);
+  return base.assertions.flatMap(({ call, reads }) => {
+    const n = left.get(call) ?? 0;
+    if (n > 0) left.set(call, n - 1);
+    if (n === 0) return [{ call, reads: [] }];
+    const read = [...reads].filter((name) => moved.has(name)).sort();
+    return read.length > 0 ? [{ call, reads: read }] : [];
+  });
+}
+
 /** W1-T15064: the assertions of an existing test file the round's diff removed or changed, per file. An assertion
  *  also counts as changed when a declaration its arguments read changed, such as `const expected = false`. */
 export function rewrittenTestExpectations(changes: ReadonlyArray<{ path: string; base: string; head: string }>):
   Array<{ path: string; changed: string[] }> {
   return changes.flatMap(({ path, base, head }) => {
-    const baseTokens = sourceTokens(base), headTokens = sourceTokens(head);
-    const moved = changedDeclarations(bindingDeclarationsOf(base, baseTokens), bindingDeclarationsOf(head, headTokens));
-    const left = new Map<string, number>();
-    for (const { call } of assertionsOf(head, headTokens)) left.set(call, (left.get(call) ?? 0) + 1);
-    const changed = assertionsOf(base, baseTokens).flatMap(({ call, reads }) => {
-      const n = left.get(call) ?? 0;
-      if (n > 0) left.set(call, n - 1);
-      if (n === 0) return [call];
-      const read = [...reads].filter((name) => moved.has(name)).sort();
-      return read.length > 0 ? [`${call} (reads changed ${read.join(", ")})`] : [];
-    });
+    const changed = expectationChanges(testSource(base), testSource(head)).map(describeChange);
     return changed.length > 0 ? [{ path, changed }] : [];
   });
+}
+
+/** True when one side of a merge made `change` itself, in its own commits since the merge base `origin`, and the
+ *  round's `result` kept that side's text: it dropped an assertion both sides started with, or it changed every
+ *  declaration the assertion reads and the result holds that side's declaration. An assertion the side never had
+ *  (one the other side added) is never the side's change. */
+function sideMadeChange(change: ExpectationChange, origin: TestSource, side: TestSource, result: TestSource): boolean {
+  if (change.reads.length === 0) {
+    return origin.assertions.some(({ call }) => call === change.call) && !side.assertions.some(({ call }) => call === change.call);
+  }
+  const sideMoved = changedDeclarations(origin.declarations, side.declarations);
+  const resultMoved = changedDeclarations(side.declarations, result.declarations);
+  return change.reads.every((name) => sideMoved.has(name) && !resultMoved.has(name));
 }
 
 /** W1-T15064: the evidence a round answers. Met criteria, the review summary and the merge logs are not asked of it. */
@@ -478,8 +504,8 @@ export function answeredFindingText(evidence: AnsweredEvidence): string {
   return JSON.stringify([
     (evidence.review?.unmetCriteria ?? []).map(({ claim, proof, reason }) => [claim, proof, reason]),
     evidence.review?.findings ?? [],
-    (evidence.ciFailures ?? []).map(({ name, logTail, title, annotations }) => [name, title, logTail,
-      (annotations ?? []).map((annotation) => annotation.message)]),
+    (evidence.ciFailures ?? []).map(({ name, logTail, title, annotations }) => [name, title, plainLog(logTail),
+      (annotations ?? []).map((annotation) => plainLog(annotation.message))]),
     evidence.planGateFindings ?? [], evidence.actionableGateFailures ?? [],
     (evidence.mergeConflict?.files ?? []).map((file) => file.path),
   ]);
@@ -488,9 +514,11 @@ export function answeredFindingText(evidence: AnsweredEvidence): string {
 const TEST_FILE = /\.test\.[cm]?[jt]s$/;
 
 /** W1-T15064: the expectations the commits `base..head` rewrote in existing test files, read through `git`. A renamed
- *  test is compared with its old path. An assertion the merged branch itself changed since the merge's fork point came
- *  from that branch, not from the round. One the merged branch never had, such as an assertion this PR added, stays
- *  the round's: the parent lacking it does not mean the parent changed it. */
+ *  test is compared with its old path. A merge the round made is read three ways, against the fork point of its own
+ *  side and each parent it merged: a change to the PR's text is the merged branch's only when that branch made it
+ *  itself and the result kept it, and a change to the merged branch's text is the round's unless the PR had already
+ *  made it. An assertion the PR added, which the merged branch never had, is the PR's own: rewriting it is the
+ *  round's, though the parent lacks it. */
 export async function readExpectationRewrites(git: (args: string[]) => Promise<string>, base: string, head: string):
   Promise<Array<{ path: string; changed: string[] }>> {
   const changedTests = async (rev: string) => {
@@ -508,6 +536,8 @@ export async function readExpectationRewrites(git: (args: string[]) => Promise<s
   const merges = (await git(["rev-list", "--merges", "--first-parent", "--parents", `${base}..${head}`]))
     .split("\n").filter((line) => line.trim() !== "").map((line) => line.trim().split(" ").slice(1))
     .flatMap(([ours, ...merged]) => merged.map((parent) => ({ ours: ours!, parent })));
+  const forks = new Map<string, string>();
+  for (const { ours, parent } of merges) forks.set(`${ours} ${parent}`, (await git(["merge-base", ours, parent])).trim());
   // A test file the head leaves differing from a merged parent is read too: a resolution that drops what main added
   // can leave the file exactly as it was at `base`.
   const pairs = new Map<string, string>();
@@ -522,30 +552,25 @@ export async function readExpectationRewrites(git: (args: string[]) => Promise<s
   };
   const rewrites: Array<{ path: string; changed: string[] }> = [];
   for (const [path, from] of pairs) {
-    const headText = await git(["show", `${head}:${path}`]);
-    const baseText = await fileAt(base, [...new Set([from, path])]);
-    const [rewrite] = baseText === undefined ? [] : rewrittenTestExpectations([{ path, base: baseText, head: headText }]);
     const candidates = [...new Set([path, from])];
-    const theirs = new Set<string>();
-    const sides: Array<{ forkCalls: Set<string>; parentText: string }> = [];
-    for (const { ours, parent } of merges) {
-      const fork = (await git(["merge-base", ours, parent])).trim();
-      const [forkText, parentText] = [await fileAt(fork, candidates), await fileAt(parent, candidates)];
-      if (parentText === undefined) continue;
-      sides.push({ forkCalls: new Set(forkText === undefined ? [] : assertionsOf(forkText).map(({ call }) => call)), parentText });
-      if (forkText === undefined) continue;
-      const [merged] = rewrittenTestExpectations([{ path, base: forkText, head: parentText }]);
-      for (const call of merged?.changed ?? []) theirs.add(assertionKey(call));
+    const result = testSource(await git(["show", `${head}:${path}`]));
+    // The PR's own text at round start; a file only a merged parent has starts empty on the PR's side.
+    const ours = testSource(await fileAt(base, [...new Set([from, path])]) ?? "");
+    const sides: Array<{ origin: TestSource; theirs: TestSource }> = [];
+    for (const { ours: side, parent } of merges) {
+      const theirs = await fileAt(parent, candidates);
+      if (theirs === undefined) continue;
+      sides.push({ origin: testSource(await fileAt(forks.get(`${side} ${parent}`)!, candidates) ?? ""), theirs: testSource(theirs) });
     }
-    const changed = (rewrite?.changed ?? []).filter((call) => !theirs.has(assertionKey(call)));
-    // An assertion the merged branch added, whose text the round then changed or dropped, is the round's rewrite too.
-    for (const { forkCalls, parentText } of sides) {
-      const [dropped] = rewrittenTestExpectations([{ path, base: parentText, head: headText }]);
-      for (const call of dropped?.changed ?? []) {
-        if (call === assertionKey(call) && !forkCalls.has(call) && !theirs.has(call)
-          && !changed.some((seen) => assertionKey(seen) === call)) changed.push(call);
-      }
+    const changes = expectationChanges(ours, result)
+      .filter((change) => !sides.some(({ origin, theirs }) => sideMadeChange(change, origin, theirs, result)));
+    for (const { origin, theirs } of sides) {
+      changes.push(...expectationChanges(theirs, result).filter((change) => !sideMadeChange(change, origin, ours, result)));
     }
+    // One assertion both readings charge is named once, as the PR's text reads it.
+    const byCall = new Map<string, ExpectationChange>();
+    for (const change of changes) if (!byCall.has(change.call)) byCall.set(change.call, change);
+    const changed = [...byCall.values()].map(describeChange);
     if (changed.length > 0) rewrites.push({ path, changed });
   }
   return rewrites;
