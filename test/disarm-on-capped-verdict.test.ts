@@ -150,7 +150,8 @@ test("a ledgered operator override keeps a capped PR armed — the escape hatch 
 // ── 8: ORDERING — the withdrawal must precede the status post ───────────────────────
 test("ORDERING: runReview withdraws the arm BEFORE it posts the status — a later disarm would race GitHub", () => {
   const src = readFileSync(new URL("../src/cli/commands/review.ts", import.meta.url), "utf8");
-  const withdrawAt = src.indexOf("  withdrawArmIfVerdictRefuses(");
+  // W1-T15030: pin the main pre-publish disarm by name, not the first call site in the file.
+  const withdrawAt = src.indexOf("  const disarmedAtPost = await withdrawArmIfVerdictRefusesAsync(");
   const postAt = src.indexOf("  const posted = await postReviewStatusGuarded({");
 
   assert.ok(withdrawAt > 0, "the withdrawal call site exists in runReview");

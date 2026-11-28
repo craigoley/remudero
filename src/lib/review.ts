@@ -3,7 +3,7 @@ import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import { execFileRouted } from "./spawn-helper.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
-import { refreshInstallationToken, type RefreshOptions } from "./github-app.js";
+import { ensureHeldTokenFresh, HELD_TOKEN_READ_MARGIN_MS, refreshInstallationToken, type RefreshOptions } from "./github-app.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps, type HarvestableFollowUp, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
@@ -23,6 +23,7 @@ import { boardPlanOnlyFiling, freshPullRowRead, readPullRequestNamedTaskHold, ta
 export { publicTaskHoldDescription, taskHoldReading, taskHoldRefusal, type TaskHoldReading } from "./task-dispatch-hold.js";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
+import { sameHost } from "./host-identity.js";
 import { isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { observeProofFileInside, type ProofFileObservation } from "./proof-file-read.js";
 import { appendLedger } from "./ledger.js";
@@ -8200,6 +8201,74 @@ export async function refreshReviewPublisherToken(opts: RefreshOptions = {}): Re
   return result;
 }
 
+/** W1-T15030: what a review run's token renewal before it publishes found. `not_held`: no App token this process minted
+ *  is the one it presents (an operator token, say), so nothing is renewed. */
+export type ReviewTokenRenewal = "fresh" | "renewed" | "not_held" | "token_unrenewable";
+
+export interface RenewReviewTokenOpts {
+  /** Renew even when the token has time left: GitHub refused it (HTTP 401). */
+  force?: boolean;
+  env?: NodeJS.ProcessEnv;
+  clock?: Clock;
+  /** The refresh loop's renewal, when one is armed in this process. Default {@link ensureHeldTokenFresh}. */
+  ensureHeld?: typeof ensureHeldTokenFresh;
+  /** This process's own mint. Default {@link refreshReviewPublisherToken}. */
+  refresh?: (opts: RefreshOptions) => Promise<{ ok: boolean }>;
+  log?: RefreshOptions["log"];
+}
+
+/** W1-T15030: before a review run publishes, renew the App token it minted at start when it has under
+ *  {@link HELD_TOKEN_READ_MARGIN_MS} left (or, `force`, at all). A long reviewer outlives the 1 hour token, and only
+ *  daemons arm a refresh loop. The renewed token is written to `GH_TOKEN`, which the status post and disarm present. */
+export async function renewReviewPublisherToken(opts: RenewReviewTokenOpts = {}): Promise<ReviewTokenRenewal> {
+  const env = opts.env ?? process.env;
+  const now = (opts.clock ?? systemClock).now();
+  // W1-T15030: a forced renewal mints in the armed loop too; its timer not being due proves nothing about a refused token.
+  const armed = await (opts.ensureHeld ?? ensureHeldTokenFresh)(HELD_TOKEN_READ_MARGIN_MS, opts.force === true ? { force: true } : undefined);
+  if (armed !== "not_armed") return armed === "token_expired" ? "token_unrenewable" : armed;
+  const held = nativeReviewPublisher;
+  if (held === undefined || !env.GH_TOKEN || held.tokenDigest !== publisherTokenDigest(env.GH_TOKEN)) return "not_held";
+  if (opts.force !== true && held.expiresAtMs - now > HELD_TOKEN_READ_MARGIN_MS) return "fresh";
+  const result = await (opts.refresh ?? refreshReviewPublisherToken)({ env, ...(opts.log ? { log: opts.log } : {}) });
+  if (result.ok) return "renewed";
+  return opts.force !== true && held.expiresAtMs > now ? "fresh" : "token_unrenewable";
+}
+
+/** W1-T15030: set while {@link postRenewingOnce} owns a status post's single 401 renewal and retry. */
+const guardedRenewalScope = new AsyncLocalStorage<true>();
+
+/** W1-T15030: posts `status`, and on a 401 renews the token once and retries once. Undefined once a post lands; the
+ *  second 401's message when GitHub refused the renewed token too. Any other failure is thrown, as before. */
+async function postRenewingOnce<S>(post: (status: S) => Promise<void> | void, status: S,
+  renewToken: (() => Promise<ReviewTokenRenewal>) | undefined): Promise<string | undefined> {
+  // W1-T15030: this is the stack's one renew-and-retry. Whatever poster wraps a raw postReviewStatus (the outbox replay,
+  // catalogReviewPoster, failureRecordingPoster), its own W1-T15038 re-mint stays off while it runs in here.
+  const postOwned = () => guardedRenewalScope.run(true, async () => post(status));
+  try {
+    await postOwned();
+    return undefined;
+  } catch (first) {
+    if (!ghUnauthorizedError(first)) throw first;
+  }
+  await (renewToken ?? (() => renewReviewPublisherToken({ force: true })))();
+  try {
+    await postOwned();
+    return undefined;
+  } catch (second) {
+    if (!ghUnauthorizedError(second)) throw second;
+    return second instanceof Error ? second.message : String(second);
+  }
+}
+
+/** W1-T15030: GitHub refused the token a `gh` call presented. Read from stderr only, where gh writes its own
+ *  "gh: <message> (HTTP <code>)": the Error's message echoes the command, including `-f description=`, and stdout
+ *  carries the response body, so a 422 or 502 whose description names HTTP 401 is not a 401. */
+export function ghUnauthorizedError(error: unknown): boolean {
+  const stderr = (error as { stderr?: string | Buffer | null } | null | undefined)?.stderr;
+  const text = typeof stderr === "string" ? stderr : (stderr?.toString("utf8") ?? "");
+  return /\bHTTP 401\b|Bad credentials/i.test(text);
+}
+
 async function replayPublisher(
   opts: ReviewPublisherReaders,
   lifecycle: Pick<PrLifecycleState, "baseRef">,
@@ -12847,7 +12916,8 @@ export async function postReviewStatus(
   const backoffMs = retryOpts.backoffMs ?? ((failedAttempt) => POST_REVIEW_STATUS_BASE_DELAY_MS * 2 ** (failedAttempt - 1));
   const sleep = retryOpts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const exec = retryOpts.exec ?? execGhStatusPostAsync;
-  const reauth = retryOpts.reauth ?? (reviewerToken || !process.env.GH_APP_ID
+  // W1-T15030: inside the guarded publisher's one renew-and-retry this post makes no re-mint of its own.
+  const reauth = retryOpts.reauth ?? (reviewerToken || !process.env.GH_APP_ID || guardedRenewalScope.getStore() === true
     ? undefined : async () => (await refreshReviewPublisherToken()).ok);
   let reauthed = false;
 
@@ -12864,6 +12934,10 @@ export async function postReviewStatus(
           continue;
         }
       }
+      // W1-T15030: inside the guarded renewal scope a stderr-confirmed 401 goes straight to postRenewingOnce, which
+      // renews once and retries once. The Error's message echoes the description, so a transient signature named
+      // there must not spend this loop's backoff retries on a refused token, before the renewal or after it.
+      if (guardedRenewalScope.getStore() === true && ghUnauthorizedError(e)) throw e;
       const transient = classifyFailure({ text: ghErrorText(e) }) === "transient";
       if (!transient || attempt >= maxAttempts) throw e; // permanent, or transient-but-exhausted: surface once
       await sleep(backoffMs(attempt));
@@ -12981,6 +13055,71 @@ function pendingReviewStatusRecord(line: Record<string, unknown>): PendingReview
     ...(typeof line.host === "string" && line.host.length > 0 ? { ownerHost: line.host } : {}),
     ...(typeof line.owner_started_at === "string" ? { ownerStartedAt: line.owner_started_at } : {}),
   };
+}
+
+/** W1-T15030: how long a pending owner with no live process may write no ledger row before it owns nothing. */
+export const ORPHANED_REVIEW_OWNER_SILENCE_MS = 30 * 60_000;
+
+/** W1-T15030: the review runs alive in this process. A run in the daemon claims under the daemon's own live pid, so its
+ *  pid alone cannot show that the run died. */
+const reviewRunsLiveHere = new Map<string, number>();
+
+/** Holds `runId` as live in this process until the returned release is called. Holds nest (reviewCommand holds the
+ *  run, and runReview inside it holds it again): the run stays live until its last hold is released. */
+export function holdReviewRunLive(runId: string): () => void {
+  reviewRunsLiveHere.set(runId, (reviewRunsLiveHere.get(runId) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const left = (reviewRunsLiveHere.get(runId) ?? 1) - 1;
+    if (left > 0) reviewRunsLiveHere.set(runId, left); else reviewRunsLiveHere.delete(runId);
+  };
+}
+
+export interface ReviewOwnerOrphanedOpts {
+  now?: number;
+  pid?: number;
+  hostname?: () => string;
+  isPidAlive?: (pid: number) => boolean;
+  runLiveHere?: (runId: string) => boolean;
+}
+
+/** W1-T15030: run `runId`'s pending claim at `headSha` is orphaned — no ledger row from the run for
+ *  {@link ORPHANED_REVIEW_OWNER_SILENCE_MS} and no live process. Proving "no live process" needs the claim's own owner
+ *  identity on this host: this process with the run not live in it, or a pid that is not alive. A claim written on
+ *  another host, or with no identity, is never orphaned here. */
+export function reviewOwnerOrphaned(
+  runId: string, headSha: string, lines: ReadonlyArray<Record<string, unknown>>, opts: ReviewOwnerOrphanedOpts = {},
+): boolean {
+  let claim: PendingReviewStatusRecord | undefined;
+  let newestMs = Number.NEGATIVE_INFINITY;
+  for (const line of lines) {
+    if (line.run_id !== runId) continue;
+    const at = Date.parse(typeof line.ts === "string" ? line.ts : "");
+    if (Number.isFinite(at) && at > newestMs) newestMs = at;
+    if (line.step === "review.pending_posted" && line.head_sha === headSha) claim = pendingReviewStatusRecord(line);
+  }
+  if (claim?.ownerPid === undefined || claim.ownerHost === undefined || !Number.isFinite(newestMs)) return false;
+  if ((opts.now ?? systemClock.now()) - newestMs < ORPHANED_REVIEW_OWNER_SILENCE_MS) return false;
+  if (!sameHost(claim.ownerHost, (opts.hostname ?? hostname)())) return false;
+  if (claim.ownerPid === (opts.pid ?? process.pid)) return !(opts.runLiveHere ?? ((id) => reviewRunsLiveHere.has(id)))(runId);
+  return !(opts.isPidAlive ?? defaultIsPidAlive)(claim.ownerPid);
+}
+
+/** W1-T15030: the run that took `runId`'s claim at `headSha` over after that run's own newest claim, or undefined while
+ *  `runId` still holds it. */
+export function reviewClaimTakenOverBy(
+  lines: ReadonlyArray<Record<string, unknown>>, runId: string, headSha: string, prUrl?: string,
+): string | undefined {
+  let taker: string | undefined;
+  for (const line of lines) {
+    if (line.step !== "review.pending_posted" || line.head_sha !== headSha) continue;
+    if (prUrl !== undefined && line.pr_url !== undefined && line.pr_url !== prUrl) continue;
+    if (line.run_id === runId) taker = undefined;
+    else if (line.took_over_run_id === runId && typeof line.run_id === "string") taker = line.run_id;
+  }
+  return taker;
 }
 
 export function lastPendingReviewStatusFromLedger(
@@ -13546,13 +13685,19 @@ export interface PostReviewStatusGuardedOpts {
   /** Files the one cannot-evaluate escalation per head and returns its issue URL. Injected because escalate.ts's graph
    *  reaches this module; every terminal-posting caller binds tryEscalate to its own ledger, run and gateway. `issues`
    *  is this call's injected transport, when it has one. Unwired, no escalation is filed and the pending status stands. */
-  cannotEvaluateEscalation?: (escalation: CannotEvaluateEscalation, issues: ReviewIssueGateway | undefined) => string | null;
+  cannotEvaluateEscalation?: (escalation: CannotEvaluateEscalation, issues: ReviewIssueGateway | undefined) => string | null | Promise<string | null>;
   lockOpts?: AcquireReviewStatusLockOpts;
+  /** W1-T15030: renews the token after a post GitHub answered with HTTP 401, before its one retry. Default
+   *  {@link renewReviewPublisherToken} with `force`. */
+  renewToken?: () => Promise<ReviewTokenRenewal>;
   /** W1-T14235 (invariant no-semantic-no-code-pass): the semantic judgement behind a success. Supplied, a success it
    *  does not certify ({@link semanticJudgementRefusal}) is never published: it posts pending naming the reason, or
    *  leaves a standing failure standing. Absent, the post is unchecked — only the out-of-scope dependency review
    *  (`decideDepReview`, which has no reviewer by design) omits it. */
   semanticJudgement?: SemanticJudgementFact;
+  /** W1-T15030: the run that took this run's claim over, re-read inside the review-status lock before the post. A
+   *  named taker refuses the post (`review.post_refused` reason `claim_lost`): nothing is posted or escalated. */
+  claimLost?: () => Promise<string | undefined>;
 }
 
 type ReviewerCodeFreshness =
@@ -13575,6 +13720,8 @@ export interface PostReviewStatusGuardedResult {
   cappedHold?: string;
   /** W1-T14902: set when a success was held as pending because the named task carries (or may carry) dispatch_hold. */
   taskHold?: string;
+  /** W1-T15030: the run that took this run's claim over; set when the post was refused `claim_lost`. */
+  claimLost?: string;
   /** Present only when `posted` is false — either {@link decideReviewStatusPost} refused the write (see
    * `review.post_refused`), or the post itself failed after retries or as a permanent error (`review.post_failed`). */
   reason?: string;
@@ -13697,13 +13844,26 @@ async function decidePlanLintRetryPublication(
  * {@link decideReviewStatusPost} posts or refuses. Ledger every attempt, including `review.post_refused`.
  * W1-T135: catch exhausted transient or permanent {@link postReviewStatus} errors here, ledger `review.post_failed`
  * with the unposted verdict, and return `{posted:false}` like a refusal. */
+/** W1-T15030: the post refused because another run took this run's claim over, or undefined while it still holds it. */
+async function claimLostRefusal(opts: PostReviewStatusGuardedOpts): Promise<PostReviewStatusGuardedResult | undefined> {
+  const taker = await opts.claimLost?.();
+  if (taker === undefined) return undefined;
+  appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: opts.taskId, step: "review.post_refused", head_sha: opts.sha,
+    pr_url: opts.prUrl, attempted_state: opts.state, reason: "claim_lost", taken_over_by_run_id: taker });
+  return { posted: false, reason: "claim_lost", claimLost: taker };
+}
+
 export async function postReviewStatusGuarded(
   opts: PostReviewStatusGuardedOpts,
 ): Promise<PostReviewStatusGuardedResult> {
-  if (reviewerCodePublicationRefusal(opts.state, opts.reviewerCodeFreshness) !== undefined) return publishReviewStatusLocked(opts);
+  // W1-T15030: even the freshness refusal's early return first refuses a run that lost its claim.
+  if (reviewerCodePublicationRefusal(opts.state, opts.reviewerCodeFreshness) !== undefined) return (await claimLostRefusal(opts)) ?? publishReviewStatusLocked(opts);
   const lockPath = join(dirname(opts.ledgerPath), "review-status-locks", `${opts.taskId}.lock`);
   const handle = await acquireReviewStatusLock(lockPath, opts.lockOpts);
   try {
+    // W1-T15030: a takeover that landed while this run awaited its freshness read is seen here, under the lock.
+    const lost = await claimLostRefusal(opts);
+    if (lost !== undefined) return lost;
     let effectiveVerdict = opts.verdict;
     let historyApplied = false;
     if (opts.state === "success") {
@@ -13911,6 +14071,7 @@ async function publishCappedHold(opts: PostReviewStatusGuardedOpts, verdict: Rev
 }
 
 async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts, heldRetry?: HeldLintRetry): Promise<PostReviewStatusGuardedResult> {
+  // W1-T15030: postRenewingOnce below owns the single 401 renewal; inside it this raw poster makes no re-mint of its own.
   const post = opts.post ?? postReviewStatus;
   const freshnessRefusal = reviewerCodePublicationRefusal(opts.state, opts.reviewerCodeFreshness);
   if (freshnessRefusal !== undefined) {
@@ -14032,7 +14193,8 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts, held
           attempted_evaluator: opts.evaluatorProvenance ?? null,
         });
         try {
-          await post({
+          // W1-T15030: the conflict hold renews a refused token and retries once, as every other post does.
+          const unrenewable = await postRenewingOnce(post, {
             owner: opts.owner,
             repo: opts.repo,
             sha: opts.sha,
@@ -14044,7 +14206,16 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts, held
                     opts.reviewerCodeFreshness.codeSha,
                   )
                 : "remudero-review: conflicting verdicts for identical decision input — operator adjudication required",
-          });
+          }, opts.renewToken);
+          if (unrenewable !== undefined) {
+            appendLedger(opts.ledgerPath, {
+              run_id: opts.runId, task_id: opts.taskId, step: "review.post_refused", head_sha: opts.sha, attempted_state: "failure",
+              evidence: opts.evidence, reason: "token_unrenewable", error: unrenewable, review_decision_digest: opts.reviewDecisionDigest,
+              ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
+              ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
+            });
+            return { posted: false, conflict: true, effectiveState: "failure", reason: `token_unrenewable: ${unrenewable}` };
+          }
           return { posted: true, conflict: true, effectiveState: "failure", reason };
         } catch (error) {
           appendLedger(opts.ledgerPath, {
@@ -14089,7 +14260,19 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts, held
       writeReviewOutboxEntry(opts, statusDescription, true);
     }
     try {
-      await post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, state: opts.state, description: statusDescription });
+      const status = { owner: opts.owner, repo: opts.repo, sha: opts.sha, state: opts.state, description: statusDescription };
+      {
+        const message = await postRenewingOnce(post, status, opts.renewToken);
+        if (message !== undefined) {
+          appendLedger(opts.ledgerPath, {
+            run_id: opts.runId, task_id: opts.taskId, step: "review.post_refused", head_sha: opts.sha,
+            attempted_state: opts.state, evidence: opts.evidence, reason: "token_unrenewable", error: message,
+            ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
+            ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
+          });
+          return { posted: false, reason: `token_unrenewable: GitHub refused the renewed token too (${message})` };
+        }
+      }
     } catch (e) {
       // W1-T135 exhaustion path: ledger-and-continue, never crash the run.
       const message = e instanceof Error ? e.message : String(e);
@@ -14123,7 +14306,8 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts, held
       // (which already imports escalate.ts) rather than loaded here: a computed import() is a runtime-relative
       // specifier no child-entry bundle carries. Unwired, the escalation is skipped and the pending status stands.
       const escalate = opts.cannotEvaluateEscalation;
-      const issueUrl = escalate && escalate({
+      // W1-T15030: awaited, so an escalation that renews a refused token lands before this post returns.
+      const issueUrl = escalate && await escalate({
         class: "MANUAL",
         taskId: opts.taskId,
         runId: opts.runId,
@@ -14485,6 +14669,8 @@ export interface PostReviewPendingOpts {
   fetchStatus?: GhApiFetcher;
   /** Injected raw poster (tests) — forwarded to {@link postReviewStatusGuarded} unchanged. */
   post?: PostReviewStatusGuardedOpts["post"];
+  /** W1-T15030: renews the token after the claim post is refused with HTTP 401, before its one retry. */
+  renewToken?: PostReviewStatusGuardedOpts["renewToken"];
   readReviewStatusHistory?: ReviewStatusHistoryReader;
   commentDeps?: PostReviewCommentDeps;
   lockOpts?: AcquireReviewStatusLockOpts;
@@ -14579,6 +14765,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
   // claim holds unless its owner is proven dead; an unreadable age always holds.
   let takenOverFrom: PendingReviewStatusRecord | undefined;
   let ownerProvenDead = false;
+  let ownerOrphaned = false;
   let liveStatus: { state?: string; description?: string } = {};
   const assessOwner = opts.assessPendingOwner ??
     ((record: PendingReviewStatusRecord) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }));
@@ -14589,7 +14776,10 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     // treated exactly like a FRESH, live claim — never like a stale one — because the alternative
     // is two reviewers judging the same head and posting conflicting verdicts.
     ownerProvenDead = ageMs !== undefined && ageMs < REVIEW_LOCK_TTL_MS && assessOwner(priorPending) === "dead";
-    if (ageMs === undefined || (ageMs < REVIEW_LOCK_TTL_MS && !ownerProvenDead)) {
+    // W1-T15030: a young claim whose run is orphaned holds nothing either.
+    ownerOrphaned = ageMs !== undefined && ageMs < REVIEW_LOCK_TTL_MS && !ownerProvenDead && priorPending.runId !== opts.runId &&
+      reviewOwnerOrphaned(priorPending.runId, opts.sha, lines, { now: (opts.clock ?? systemClock).now() });
+    if (ageMs === undefined || (ageMs < REVIEW_LOCK_TTL_MS && !ownerProvenDead && !ownerOrphaned)) {
       return {
         posted: false,
         reason:
@@ -14626,7 +14816,9 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
         const foreignPending = foreignLine && pendingReviewStatusRecord(foreignLine);
         ownerProvenDead = Number.isFinite(ageMs) && ageMs < REVIEW_LOCK_TTL_MS &&
           foreignPending !== undefined && assessOwner(foreignPending) === "dead";
-        if (!Number.isFinite(ageMs) || (ageMs < REVIEW_LOCK_TTL_MS && !ownerProvenDead)) {
+        ownerOrphaned = Number.isFinite(ageMs) && ageMs < REVIEW_LOCK_TTL_MS && !ownerProvenDead &&
+          reviewOwnerOrphaned(foreignRun, opts.sha, lines, { now: (opts.clock ?? systemClock).now() });
+        if (!Number.isFinite(ageMs) || (ageMs < REVIEW_LOCK_TTL_MS && !ownerProvenDead && !ownerOrphaned)) {
           return {
             posted: false,
             reason: `remudero-review is already pending (owned by run ${foreignRun}) — host-independent claim; no-op`,
@@ -14652,6 +14844,8 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
   const description = (
     takenOverFrom && ownerProvenDead
       ? `pending (owned by run ${opts.runId}) — took over run ${takenOverFrom.runId}: owner proven dead`
+      : takenOverFrom && ownerOrphaned
+      ? `pending (owned by run ${opts.runId}) — took over run ${takenOverFrom.runId}: owner orphaned`
       : takenOverFrom
       ? `remudero-review: review in progress (owned by run ${opts.runId}) — took over a stale claim ` +
         `(>= ${Math.round(REVIEW_LOCK_TTL_MS / 60_000)}m old) from run ${takenOverFrom.runId} (W1-T3647)`
@@ -14677,6 +14871,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     reviewEngineRevision: opts.reviewEngineRevision,
     fetchLifecycle: opts.fetchLifecycle,
     post: opts.post,
+    ...(opts.renewToken === undefined ? {} : { renewToken: opts.renewToken }),
     lockOpts: opts.lockOpts,
   });
   if (result.posted) {

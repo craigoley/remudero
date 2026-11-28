@@ -270,6 +270,7 @@ import {
 } from "./review.js";
 import { withTempDir } from "./tmp.js";
 import { fetchPrDiff, prDiffSourceAsync } from "./pr-diff.js";
+import { ORPHANED_REVIEW_OWNER_SILENCE_MS, reviewOwnerOrphaned, type ReviewOwnerOrphanedOpts } from "./review.js";
 import type {
   ArmDecision,
   AutomergeHold,
@@ -9182,7 +9183,8 @@ export interface OpenPrView {
    *  dead, which keep {@link reviewPendingIsStale}'s timeout behaviour. Only the real gateway sets
    *  this, from the durable pending ledger row. */
   reviewPendingOwnerDead?: boolean;
-  reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete" | "inconclusive-load" | "sandbox-start-failed" | "start-failed";
+  reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete" | "inconclusive-load" |
+    "sandbox-start-failed" | "start-failed" | "owner-orphaned";
   reviewPendingOwnerGoneReason?: string;
   /** W1-T14035 — the `run_id` of the current head's `review.pending_posted` row the producer judged. Evidence only. */
   reviewPendingOwnerRunId?: string;
@@ -14861,6 +14863,10 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           if (pr.reviewPendingOwnerGone === "promise-harvest-incomplete") {
             return `checks green, its promise harvest did not complete — re-running the review lane on #${pr.prNumber}`;
           }
+          if (pr.reviewPendingOwnerGone === "owner-orphaned") {
+            return `checks green, the pending review's run ${pr.reviewPendingOwnerGoneReason ?? "(unnamed)"} has no live process and ` +
+              `no ledger row for ${ORPHANED_REVIEW_OWNER_SILENCE_MS / 60_000}m — re-running the review lane on #${pr.prNumber}`;
+          }
           const withheldLadder = withheldLadderOf(pr);
           if (withheldLadder?.rung === 2) {
             return `checks green, remudero-review owner proven dead and ${withheldLadder.reason} —re-running the review lane on #${pr.prNumber}`;
@@ -18807,11 +18813,17 @@ function reviewOutcomeKeyForPr(pr: OpenPrView): string {
   return reviewOutcomeKey(taskId, pr.prUrl, pr.headSha, pr.reviewInputDigest);
 }
 
+/** A claim-lost refusal says nothing about the review outcome: another run owns the claim and this run published no
+ *  verdict. Keep it out of readers that select the latest outcome for a pending review. */
+function isReviewOutcomeLedgerRow(row: Record<string, unknown>): boolean {
+  return row.step === "review.posted" || row.step === "review.pending_posted" ||
+    (row.step === "review.post_refused" && row.reason !== "claim_lost");
+}
+
 function incompletePromiseHarvestFromLedger(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): boolean {
   if (pr.reviewState !== "pending") return false;
   const row = lines.findLast(row => row.task_id === reviewOutcomeTaskIdFor(pr) && row.pr_url === pr.prUrl &&
-    row.head_sha === pr.headSha &&
-    (row.step === "review.posted" || row.step === "review.pending_posted" || row.step === "review.post_refused"));
+    row.head_sha === pr.headSha && isReviewOutcomeLedgerRow(row));
   if (row?.step !== "review.posted" || row.state !== "pending") return false;
   if (row.review_input_digest !== undefined && pr.reviewInputDigest !== undefined && row.review_input_digest !== pr.reviewInputDigest) return false;
   if (pr.reviewPendingSince && typeof row.ts === "string" && Date.parse(pr.reviewPendingSince) > Date.parse(row.ts)) return false;
@@ -18831,7 +18843,7 @@ export function reviewerUnavailableProvidersForReadmission(
   if (pr.reviewState !== "pending") return undefined;
   const taskId = reviewOutcomeTaskIdFor(pr);
   const pending = lines.findLast((row) => row.task_id === taskId && row.pr_url === pr.prUrl && row.head_sha === pr.headSha &&
-    (row.step === "review.posted" || row.step === "review.pending_posted" || row.step === "review.post_refused"));
+    isReviewOutcomeLedgerRow(row));
   if (pending?.step !== "review.posted" || pending.state !== "pending") return undefined;
   if (pending.review_input_digest !== undefined && pr.reviewInputDigest !== undefined &&
       pending.review_input_digest !== pr.reviewInputDigest) return undefined;
@@ -18943,7 +18955,7 @@ function inconclusiveLoadLoweredRow(
   if (pr.reviewState !== "pending") return false;
   const taskId = reviewOutcomeTaskIdFor(pr);
   const rows = lines.filter(row => row.task_id === taskId && row.pr_url === pr.prUrl && row.head_sha === pr.headSha &&
-    (row.step === "review.posted" || row.step === "review.pending_posted" || row.step === "review.post_refused"));
+    isReviewOutcomeLedgerRow(row));
   const row = rows.at(-1);
   if (row?.step !== "review.posted" || row.state !== "pending") return false;
   if (row.review_input_digest !== undefined && pr.reviewInputDigest !== undefined && row.review_input_digest !== pr.reviewInputDigest) return false;
@@ -19043,8 +19055,22 @@ function reviewStartFailures(pr: SweepPrView, lines: ReadonlyArray<Record<string
   return { ...(standing !== undefined && ownerFailed ? { standing } : {}), ...(held === undefined ? {} : { held }) };
 }
 
+/** W1-T15030 — a pending status whose named run is orphaned ({@link reviewOwnerOrphaned}: no live process and no ledger
+ *  row for 30 minutes) owns nothing, so the sweep re-admits the PR at that head. The run is the live status's own writer
+ *  where the view names it, else the judged claim's run. */
+export function orphanedOwnerRetryView<T extends Pick<SweepPrView, "reviewState" | "headSha" | "reviewPendingOwnerDead" |
+  "reviewPendingOwnerGone" | "reviewPendingOwnerGoneReason" | "reviewPendingStatusRunId" | "reviewPendingOwnerRunId">>(
+  pr: T, lines: ReadonlyArray<Record<string, unknown>>, opts: ReviewOwnerOrphanedOpts = {},
+): T {
+  if (pr.reviewState !== "pending" || pr.reviewPendingOwnerDead === true) return pr;
+  const run = pr.reviewPendingStatusRunId ?? pr.reviewPendingOwnerRunId;
+  if (run === undefined || !reviewOwnerOrphaned(run, pr.headSha, lines, opts)) return pr;
+  return { ...pr, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "owner-orphaned", reviewPendingOwnerGoneReason: run };
+}
+
 function promiseHarvestRetryView(
   view: SweepPrView, lines: ReadonlyArray<Record<string, unknown>>, sample: () => HostLoadSample = sampleHostLoad,
+  now: number = systemClock.now(),
 ): SweepPrView {
   // W1-T13380: the sweep runs each review in process, so this process's code sha is the next review's (as W1-T13193's producer).
   const started = reviewStartFailures(view, lines, runningReviewerCodeSha());
@@ -19064,7 +19090,7 @@ function promiseHarvestRetryView(
       (pr.reviewPendingStatusRunId === undefined || pr.reviewPendingStatusRunId === pr.reviewPendingOwnerRunId)
     ? { ...pr, ...proven, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "start-failed", reviewPendingOwnerGoneReason: started.standing }
     : pr.reviewPendingOwnerDead === true && pr.reviewPendingOwnerGone === undefined
-      ? { ...pr, reviewPendingOwnerGone: "owner-pid-dead" } : pr;
+      ? { ...pr, reviewPendingOwnerGone: "owner-pid-dead" } : orphanedOwnerRetryView(pr, lines, { now });
   // W1-T13945: a pending status with no live owner and a repeated withheld verdict at this input climbs the ladder.
   const ladder = result.reviewState === "pending" ? reviewWithheldLadder(result, lines) : undefined;
   return ladder === undefined ? result : { ...result, reviewWithheld: ladder };
@@ -19174,8 +19200,18 @@ export async function postReviewPastPacerGaps(
 
 const RETRYABLE_REVIEW_THROW_PREFIX = "post-review attempt threw — standing down rather than retrying this head unbounded:";
 
+/** W1-T15030: review refusals that say nothing about the input, so the next pass simply reviews it again. GitHub
+ *  refused the run's token twice (`token_unrenewable`), or another run took this run's claim over (`claim_lost`: the
+ *  taker owns the input, and the pending-owner rules decide when it is re-admitted, so a taker that dies is): no count,
+ *  no backoff and no strike cap, as for a review.post_failed. */
+export function isUncountedRetryableReviewRefusal(reason: unknown): boolean {
+  return reason === "token_unrenewable" || reason === "claim_lost";
+}
+
+/** The one classification every reader of a review refusal shares (the sweep's fold, tick-read-worker's
+ *  reviewPostRefusedFor): a thrown post-review attempt, or (W1-T15030) an uncounted retryable refusal, is retried. */
 export function isRetryableReviewThrow(reason: unknown): boolean {
-  return typeof reason === "string" && reason.startsWith(RETRYABLE_REVIEW_THROW_PREFIX);
+  return isUncountedRetryableReviewRefusal(reason) || (typeof reason === "string" && reason.startsWith(RETRYABLE_REVIEW_THROW_PREFIX));
 }
 
 export function isPostReviewDiffCeilingRefusal(reason: unknown): boolean {
@@ -20196,6 +20232,9 @@ function priorActionsFromLedger(
         } else if (isPostReviewDiffCeilingRefusal(line.reason)) {
           reviewDiffCeilingRefused.add(key);
           reviewRefused.add(key);
+        } else if (isUncountedRetryableReviewRefusal(line.reason)) {
+          // W1-T15030: retryable by the shared classifier, and uncounted: it enters no strike count, backoff or durable
+          // set, so the next pass re-reviews it, as a review.post_failed is.
         } else if (isRetryableReviewThrow(line.reason)) {
           const parsed = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
           const existing = reviewRetryableThrows.get(key);
@@ -24651,7 +24690,7 @@ async function runSweepPinned(
   const progressWitness = (pr: OpenPrView): FixProgressWitness => ({ reviewInputDigest: pr.reviewInputDigest,
     contractRevision: pr.taskId === undefined || pr.taskId === "unfiled" || pr.taskId === `PR-${pr.prNumber}`
       ? null : readWitnessContractRevision(pr.taskId) });
-  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines, deps.sampleLoad));
+  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines, deps.sampleLoad, now));
   // W1-T9970: the running reviewer image, read at most once per pass and only when a blocked-fixable PR asks.
   let runningImage: { sha: string | undefined } | undefined;
   // W1-T9124: a body-only edit leaves the head-keyed status on the old verdict; queue one re-review of the new input.
@@ -26952,7 +26991,7 @@ async function runSweepPinned(
       ledgerLines, reviewOutcomeKeyForPr(pr));
     if (settledView !== undefined) pr = settledView.view;
     const hostGapRefusal = prior.reviewHostGapRefusals.get(reviewOutcomeKeyForPr(pr));
-    const dispositionView = promiseHarvestRetryView(completedRefusalRetryView(pr, prior), ledgerLines, deps.sampleLoad);
+    const dispositionView = promiseHarvestRetryView(completedRefusalRetryView(pr, prior), ledgerLines, deps.sampleLoad, now);
     pr = { ...pr, reviewPendingOwnerGone: dispositionView.reviewPendingOwnerGone,
       reviewPendingOwnerGoneReason: dispositionView.reviewPendingOwnerGoneReason };
     // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.
