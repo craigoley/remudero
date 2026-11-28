@@ -14,7 +14,9 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 
 const SHA = "2".repeat(40);
-const STAMP = "2026-11-14T16:41:24.000Z";
+// Relative to the wall clock, never a fixed date: the router closes a PR idle >= staleDays (14d) as
+// abandoned, so a literal 2026-11-14 stamp turned every case into that refusal on 2026-11-28.
+const STAMP = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 const PR = 18449;
 const PR_URL = `https://github.com/fixture/fix-task/pull/${PR}`;
 const UNRECOVERABLE = "criteria unrecoverable (no Remudero-Task: trailer to resolve them from)";
