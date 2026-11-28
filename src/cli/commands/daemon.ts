@@ -44,7 +44,7 @@ import {
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "../../lib/provider-routing-status.js";
 import { readOpsPrJobLog } from "../../lib/ops-pr-watch.js";
 import { readFileIfExists } from "../../lib/fs-race-safe.js";
-import { mergedInLastDayAsync } from "../../lib/fleet-lane.js";
+import { mergedInLastDayAsync, type FleetLaneDeps } from "../../lib/fleet-lane.js";
 import { startDaemonSreLane, isOpsPullRequestWatchRow, type LightPassScope, type RestartAdmission, type ReviewAdmissionGate, type SweepCycleOutcome } from "../../lib/daemon.js";
 import { REGISTERED_GARDEN_NAMES, createGardenFlightRegistry, gardenAndJudgeUnits, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "../../lib/garden-registry.js";
 import { gardenSchedule } from "../../lib/garden-registry.js";
@@ -3239,7 +3239,7 @@ export async function daemonCommand(
           summarize: inboxRecommendationWriter(config, log),
           readSeed: () => readFileIfExists(join(targetCheckoutRoot, RECOMMENDATION_SEED_PATH)),
         },
-        fleetLane: {
+        fleetLane: retiringFleetLane(retirement, {
           stateDir: join(config.root, "state"),
           ledgerPath,
           mergedLastDay: () => mergedInLastDayAsync(repoRoot),
@@ -3248,7 +3248,7 @@ export async function daemonCommand(
           handoffInFlight: (proposalId) => fleetRatify.inFlight(proposalId),
           sameFinding: fleetLaneSamenessJudge(config, log),
           originMainSha: async () => (await hostWorktreeGitAsync(repoRoot, ["rev-parse", "origin/main"])).trim(),
-        },
+        }),
         inboxResponder: createDaemonInboxResponder({ root: config.root, ledgerPath, scope: { repository: `${target.owner}/${target.repo}` },
           ratify: fleetRatify, decide: inboxThreadDecider(config, log), log }),
         runPrAction: async (request) => {
@@ -3662,6 +3662,21 @@ export function createDaemonRetirement(log: (step: string, extra?: Record<string
  *  the mark itself: a retired daemon spawns no CI judge worker. */
 export function retiringCiJudgeKick(retirement: Pick<DaemonRetirement, "allows">, kick: () => unknown): () => unknown {
   return () => (retirement.allows("ci_judge_kick") ? kick() : undefined);
+}
+
+/** W1-T14916: the fleet lane's filing ports. A pass running at the release reads its filing room after it, so a retired
+ *  pass finds none and decides nothing: the successor files each finding once. A hand-off asked after the release is
+ *  refused as well; the store's pending hand-off then reads unrecorded to the successor, which frees the finding. */
+export function retiringFleetLane(retirement: Pick<DaemonRetirement, "allows">,
+  deps: FleetLaneDeps<number | Promise<number>>): FleetLaneDeps<number | Promise<number>> {
+  return {
+    ...deps,
+    mergedLastDay: async () => {
+      const merged = await deps.mergedLastDay();
+      return retirement.allows("fleet_lane_file") ? merged : 0;
+    },
+    approve: (proposalId: string) => { if (retirement.allows("fleet_lane_file")) deps.approve(proposalId); },
+  };
 }
 
 /** The daemon sends the same atomic budget to its read worker in the existing worker input. */

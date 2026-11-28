@@ -2,7 +2,7 @@
 // the retired process then ran 14 sweep passes and started 18 workers over 34 minutes, beside its successor.
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { closeDaemonCleanup, createDaemonRetirement, inDaemonSpawnScope, retiringCiJudgeKick } from "#src/cli/commands/daemon.js";
+import { closeDaemonCleanup, createDaemonRetirement, inDaemonSpawnScope, retiringCiJudgeKick, retiringFleetLane } from "#src/cli/commands/daemon.js";
 import { CI_JUDGE_HEADS_FILE, judgeCiEscalation, productionCiJudgePorts, withCiJudgeAfterSweep } from "#src/lib/ci-escalation-judge.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
 import { EventEmitter } from "node:events";
@@ -845,4 +845,96 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   // Control: the successor's judge answers, and the same pair is judged and merged.
   const answered = { text: JSON.stringify({ answer: "same" }), blocks: [] } as unknown as WorkerResult;
   assert.deepEqual((await triageFleetLaneAsync(deps(judge(answered)))).merged, [proposals[0]!.id]);
+});
+
+/** Two rounds of one run on one PR restating one finding in other words: only the sameness judge can pair them. */
+function fleetLaneFixture(t: TestContext, name: string, followups: Array<{ ts: string; text: string }>) {
+  const root = ownedFixtureDir(t, name).dir;
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const run = "DAEMON-1790195083951";
+  const proposals = followups.map(({ ts, text }) => ({ id: `followup:${run}:${ts}:1`, evidenceAnchors: [],
+    summary: `follow-up harvest [task]: ${text} — from W1-T6000 (run ${run}, https://github.com/acme/remudero/pull/6874)` }));
+  writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals }));
+  writeFileSync(join(stateDir, "inbox-drafts.json"), JSON.stringify(Object.fromEntries(proposals.map(({ id }) =>
+    [id, { proposalId: id, fragmentYaml: "[]", stampLine: "", anchorFingerprint: "" }]))));
+  writeClassificationSnapshot(stateDir, proposals.map(({ id }) => ({ proposalId: id, state: "ready" })));
+  const ledgerPath = join(stateDir, "ledger.ndjson");
+  const ledger = (): Row[] => existsSync(ledgerPath)
+    ? readFileSync(ledgerPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Row) : [];
+  return { root, stateDir, ledgerPath, ids: proposals.map(({ id }) => id), ledger };
+}
+
+const RESTATED = [
+  { ts: "2026-09-23T20:44:02.312Z", text: "escalate the recurring runner-pool certificate failure to the operator" },
+  { ts: "2026-09-23T20:49:00.333Z", text: "raise a human ask: the runner pool keeps failing its TLS certificate check" },
+];
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and a fleet-lane pass running at the release, its real judge withheld, files neither drafted follow-up", async (t: TestContext) => {
+  const lane = fleetLaneFixture(t, "retired-fleet-lane-drafted", RESTATED);
+  const run = retiringExit();
+  const judgeRows: Row[] = [];
+  const config = { root: lane.root, claudeBin: "/unused", dailyCapUsd: 25, installRoot: REPO_ROOT };
+  const approved: string[] = [];
+  let released: () => void = () => {};
+  const afterRelease = new Promise<void>((resolve) => { released = resolve; });
+  // The pass is running when the lock is released; it reaches the real judge, and so spawnWorker, after the release.
+  const pass = run.retirement.inSpawnScope(() => {
+    const judge = fleetLaneSamenessJudge(config as never, (step, extra = {}) => { judgeRows.push({ step, ...extra }); }, spawnWorker)!;
+    return triageFleetLaneAsync(retiringFleetLane(run.retirement, { stateDir: lane.stateDir, ledgerPath: lane.ledgerPath,
+      mergedLastDay: () => 5, approve: (id) => void approved.push(id),
+      sameFinding: async (earlier: string, later: string) => { await afterRelease; return judge(earlier, later); } }));
+  });
+  const outcome = pass.then(() => "settled", (error: unknown) => error);
+  const exit = run.exit();
+  await turns(5);
+  assert.equal(run.retirement.retired(), true);
+  released();
+  await turns(20);
+  assert.ok(await outcome instanceof WorkerNotStartedError, "the pass ends at the withheld judge");
+  assert.deepEqual(approved, [] as string[], "the retired pass files and approves neither drafted follow-up");
+  assert.deepEqual(lane.ledger().filter((row) => row.step === "fleet_lane.decided"), [], "no file or merge decision is written");
+  assert.deepEqual(lane.ledger().filter((row) => row.step === "fleet_lane.sameness_unavailable"), [],
+    "a withheld judge is not recorded as an unavailable answer");
+  assert.deepEqual(judgeRows, [], "nor logged as a failed judge");
+  run.settlePage();
+  await exit;
+
+  // Control: the successor's pass asks its own judge, merges the earlier round into the later and files one finding.
+  const successor = await triageFleetLaneAsync({ stateDir: lane.stateDir, ledgerPath: lane.ledgerPath, mergedLastDay: () => 5,
+    approve: (id) => void approved.push(id), sameFinding: async () => "same" as const });
+  assert.deepEqual(successor.merged, [lane.ids[0]]);
+  assert.deepEqual(approved, [lane.ids[1]], "the successor files the later round once, and nothing else is filed");
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and a fleet-lane pass running at the release files nothing, even with no judge to ask", async (t: TestContext) => {
+  const lane = fleetLaneFixture(t, "retired-fleet-lane-file", RESTATED.slice(0, 1));
+  const run = retiringExit();
+  const approved: string[] = [];
+  let release: () => void = () => {};
+  const merges = new Promise<number>((resolve) => { release = () => resolve(5); });
+  const deps = retiringFleetLane(run.retirement, { stateDir: lane.stateDir, ledgerPath: lane.ledgerPath,
+    mergedLastDay: () => merges, approve: (id) => void approved.push(id) });
+  const pass = triageFleetLaneAsync(deps);
+  const exit = run.exit();
+  await turns(5);
+  release();
+  assert.deepEqual(await pass, { filed: [], merged: [], room: 0, classificationAgeMs: (await pass).classificationAgeMs });
+  assert.deepEqual(approved, [] as string[], "a pass whose filing room is read after the release files nothing");
+  assert.deepEqual(lane.ledger().filter((row) => row.step === "fleet_lane.decided"), [], "and decides nothing for its successor");
+  deps.approve(lane.ids[0]!);
+  assert.deepEqual(approved, [] as string[], "a hand-off asked after the release is refused too");
+  assert.deepEqual(run.rows.filter((row) => row.step === "daemon.retired_start_refused").map((row) => row.hook),
+    ["fleet_lane_file", "fleet_lane_file"]);
+  run.settlePage();
+  await exit;
+
+  // Control: the same deps before a release file the finding.
+  const active = retiringExit();
+  const before = await triageFleetLaneAsync(retiringFleetLane(active.retirement, { stateDir: lane.stateDir, ledgerPath: lane.ledgerPath,
+    mergedLastDay: () => 5, approve: (id) => void approved.push(id) }));
+  assert.deepEqual(before.filed, [lane.ids[0]]);
+  assert.deepEqual(approved, [lane.ids[0]]);
 });
