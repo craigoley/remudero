@@ -46,6 +46,10 @@ test("repairDraftedFragment strips a draft's own NEW-n placeholder from its titl
   assert.equal(titleWithoutOwnId("Ignore .env, the guard", "NEW-1"), "Ignore .env, the guard", "a title with no placeholder is left as written");
   assert.equal(titleWithoutOwnId("Guard the input [NEW-1].", "NEW-1"), "Guard the input.");
   assert.equal(titleWithoutOwnId("Guard the input, NEW-1, then parse", "NEW-1"), "Guard the input, then parse");
+  assert.equal(titleWithoutOwnId("Guard (NEW-1, NEW-2) the input", "NEW-1"), "Guard the input", "a bracket of placeholders goes whole");
+  assert.equal(titleWithoutOwnId("NEW-1: --dry-run prints nothing", "NEW-1"), "--dry-run prints nothing", "a flag keeps its dashes");
+  assert.equal(titleWithoutOwnId("Make NEW-1's guard strict", "NEW-1"), "Make NEW-1's guard strict", "a possessive has no clean removal");
+  assert.equal(titleWithoutOwnId("Guard the input - NEW-1", "NEW-1"), "Guard the input");
   const siblings = `${BASE}\n${BASE.replace("- id: NEW-1", "- id: NEW-2").replace('title: "Tighten the empty-input guard in parseTasksFromYaml"', 'title: "Return [] for .env in parseTasksFromYaml()"')}`;
   const both = repairDraftedFragment(siblings.replace('title: "Tighten the empty-input guard in parseTasksFromYaml"', 'title: "NEW-1: Tighten the empty-input guard in parseTasksFromYaml"'), checks("draft-placeholder-title"), facts);
   assert.equal((parseYaml(both.fragmentYaml) as Record<string, unknown>[])[1].title, "Return [] for .env in parseTasksFromYaml()", "another task's title is untouched");
@@ -104,6 +108,11 @@ test("repairDraftedFragment sets verify: human for a ruling or record-editing ta
     const workflow = repairDraftedFragment(withFile(dirty, ".github/workflows/ci.yml"), checks(check), facts);
     assert.deepEqual(workflow.repaired, ["verify:NEW-1"]);
     assert.equal(task(workflow.fragmentYaml).verify, "human");
+    // A sibling workflow-path task that raises neither check keeps verify: auto, so it is not parked from dispatch.
+    const sibling = withFile(BASE, ".github/workflows/ci.yml").replace("- id: NEW-1", "- id: NEW-2");
+    const pair = repairDraftedFragment(`${withFile(dirty, ".github/workflows/ci.yml")}\n${sibling}`, checks(check), facts);
+    assert.deepEqual(pair.repaired, ["verify:NEW-1"], `only the task that raises ${check} is repaired`);
+    assert.deepEqual((parseYaml(pair.fragmentYaml) as Record<string, unknown>[]).map((t) => t.verify), ["human", "auto"]);
   }
 });
 

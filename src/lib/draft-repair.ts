@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { isMap, isScalar, isSeq, parseDocument, type Scalar, type YAMLMap } from "yaml";
-import { isPlacedTestPath } from "./plan.js";
+import { isPlacedTestPath, type Task } from "./plan.js";
+import { rule15FilingViolation, rulingVerifyViolation } from "./task-linter.js";
 
 /** While `state/DRAFT_AUTOFIX_OFF` exists the draft rung lints a drafted fragment as it came from the model, so every
  *  blocking violation spends a redraft as it did before the repair existed. */
@@ -33,16 +34,19 @@ export const AUTOFIXABLE_DRAFT_CHECKS: ReadonlySet<string> = new Set([
 const NEW_TEST_PATH = /^test\/[\w./-]+\.test\.[mc]?[jt]s$/;
 const TITLE_ID_TOKEN = /\b(?:W\d+-T\d+|NEW-\d+)\b/g;
 
-const TITLE_SEPARATORS = "\\s:;,|/\u2013\u2014-";
-const SEPARATORS_BEFORE = new RegExp(`[${TITLE_SEPARATORS}]*$`);
-const SEPARATORS_AFTER = new RegExp(`^[${TITLE_SEPARATORS}]*`);
+/** Separators beside a removed token: whitespace, `: ; , | /`, en and em dashes, and a hyphen only where it stands
+ *  apart (` - `), so a flag such as `--dry-run` after the token keeps its dashes. */
+const SEPARATORS_BEFORE = /(?:[\s:;,|/\u2013\u2014]|(?<=\s)-)*$/;
+const SEPARATORS_AFTER = /^(?:[\s:;,|/\u2013\u2014]|-(?=\s))*/;
 
 /** The title with its own id and every NEW-n placeholder taken out. Only the text around each removed token is tidied:
  *  the brackets that wrapped it alone and the separators beside it. The rest of the title is left as the model wrote it,
- *  so `[]`, `()` and `.env` elsewhere survive. `undefined` when nothing is left, since an empty title is no repair. */
+ *  so `[]`, `()` and `.env` elsewhere survive. A token joined to a word by an apostrophe (`NEW-1's`) has no clean
+ *  removal, so the title comes back unchanged. `undefined` when nothing is left, since an empty title is no repair. */
 export function titleWithoutOwnId(title: string, taskId: string): string | undefined {
   const removed = [...title.matchAll(TITLE_ID_TOKEN)].filter((m) => m[0] === taskId || m[0].startsWith("NEW-"));
   if (removed.length === 0) return title;
+  if (removed.some((m) => /['\u2019]/.test(title[m.index! - 1] ?? "") || /['\u2019]/.test(title[m.index! + m[0].length] ?? ""))) return title;
   let out = title;
   for (const m of removed.reverse()) {
     let start = m.index!;
@@ -55,18 +59,27 @@ export function titleWithoutOwnId(title: string, taskId: string): string | undef
     }
     const before = SEPARATORS_BEFORE.exec(out.slice(0, start))![0];
     const after = SEPARATORS_AFTER.exec(out.slice(end))![0];
-    const head = start - before.length === 0;
-    const tail = end + after.length === out.length;
+    const kept = out.slice(0, start - before.length);
     const rest = out.slice(end + after.length);
     let join: string;
-    if (head || tail) join = "";
+    if (kept.length === 0 || rest.length === 0) join = "";
+    // Inside a bracket or before closing punctuation the separator would dangle: `(NEW-1, NEW-2)`, `[NEW-1].`.
+    else if (/[([]$/.test(kept) || /^[,.;:!?)\]]/.test(rest)) join = "";
     else if (after.trim().length > 0) join = after;
     else if (before.trim().length > 0) join = before;
-    else join = /^[,.;:!?)\]]/.test(rest) ? "" : " ";
-    out = out.slice(0, start - before.length) + join + rest;
+    else join = " ";
+    out = kept + join + rest;
   }
   const stripped = out.trim();
   return stripped.length > 0 ? stripped : undefined;
+}
+
+/** True when THIS task, not merely some task of the fragment, raises a ruling-verify or rule15-filing the lint reported:
+ *  the linter's own predicates on the task's own id, files, verify and status. */
+function raisesRecordCheck(target: Record<string, unknown>, id: string, files: readonly string[], checks: ReadonlySet<string>): boolean {
+  const task = { id, files: [...files], verify: target["verify"], status: target["status"] ?? "queued" } as unknown as Task;
+  return (checks.has("ruling-verify") && rulingVerifyViolation(task) !== undefined)
+    || (checks.has("rule15-filing") && rule15FilingViolation(task) !== undefined);
 }
 
 /** A task the fleet App cannot push, so the draft lint lets it stay `verify: human` (inbox.ts `declaresWorkflowPath`). */
@@ -93,7 +106,7 @@ function pathPattern(path: string): RegExp {
  *   and in every criterion that names it. Two such paths, or the computed path already declared, is no repair.
  * - `shard-shape` with a verify outside the enum: `auto`, as the draft prompt files every task, or `human` for a task
  *   that declares a `.github/workflows/` path, the one exception the prompt and `draft-human-ask-repeated` allow.
- * - `ruling-verify` / `rule15-filing`: `verify: human`, only for that workflow-path task, since the draft lint refuses
+ * - `ruling-verify` / `rule15-filing`: `verify: human`, only for a workflow-path task that itself raises the check, since the draft lint refuses
  *   `verify: human` everywhere else and the remedy left is a split no script can choose.
  * Bytes outside the edited scalars are kept. A result that does not re-parse to exactly the intended change comes back
  * as the original fragment with nothing repaired.
@@ -177,7 +190,7 @@ export function repairDraftedFragment(
       const workflow = declaresWorkflowPath(files);
       let next: string | undefined;
       if (checks.has("shard-shape") && verify !== "auto" && verify !== "human") next = workflow ? "human" : "auto";
-      else if ((checks.has("ruling-verify") || checks.has("rule15-filing")) && workflow && verify !== "human") next = "human";
+      else if (workflow && verify !== "human" && raisesRecordCheck(target, id, files, checks)) next = "human";
       if (next !== undefined) {
         replaceScalar(verifyNode, next, next, target, "verify");
         repaired.push(`verify:${id}`);
