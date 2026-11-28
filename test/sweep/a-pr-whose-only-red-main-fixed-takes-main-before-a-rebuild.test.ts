@@ -3,7 +3,8 @@ import { test } from "node:test";
 import { parse } from "yaml";
 
 import {
-  heldRebuildOf, heldRebuildsOfTaskText, PARKED_PR_REMEDY_STEP, takeParkedPrRemedy, type HeldRebuild, type ParkedPrHost,
+  HELD_REBUILD_RATIONALE_RE, heldRebuildOf, heldRebuildsOfTaskText, PARKED_PR_REMEDY_STEP, takeParkedPrRemedy,
+  type HeldRebuild, type ParkedPrHost,
 } from "#src/lib/parked-pr-remedy.js";
 import {
   DESIGN_HOLD_MAIN_ADOPTION_FIELD, designHoldMainAdoptionDeferred, HELD_ESCALATION_SLO_MS, runSweep, type OpenPrView, type SweepDeps,
@@ -229,5 +230,10 @@ test("W1-T15108 criterion 4: one rebuild per closed pull request head", async ()
   const plan = heldRebuildOf({ id: "W1-T1", title: "Rebuild the plan filing of pull request 7 (held rebuild)",
     rationale: `REBUILD of the plan filing ${PR_URL}, filed by the sweep (W1-T13047) at ${HEAD}: a reason.\n` });
   assert.deepEqual(plan, { id: "W1-T1", prUrl: PR_URL, headSha: HEAD });
+  assert.equal(HELD_REBUILD_RATIONALE_RE.exec("not a rebuild rationale"), null);
+  assert.equal(HELD_REBUILD_RATIONALE_RE.exec(`REBUILD of ${PR_URL}, filed by the sweep (W1-T12709) from ${PR_URL} at ${HEAD}: reason`)?.[2], PR_URL,
+    "a held rebuild rationale with its pull request and head is recognized");
+  assert.equal(heldRebuildOf({ id: "W1-T2", title: "Task (held rebuild)", rationale: "not a rebuild rationale" }), undefined,
+    "a held rebuild task with a malformed rationale is refused");
   assert.equal(heldRebuildOf({ ...(parse(first.landed[0]![0]!.content) as Row[])[0], title: "A fixture task" }), undefined);
 });

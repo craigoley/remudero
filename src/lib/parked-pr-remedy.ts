@@ -191,7 +191,7 @@ export interface HeldRebuild { id: string; prUrl: string; headSha: string }
 
 // Both rebuild writers name the pull request and head in the rationale's first line: heldTaskFiles (W1-T12709) and
 // heldPlanRebuildFiles (W1-T13047).
-const HELD_REBUILD_RATIONALE_RE =
+export const HELD_REBUILD_RATIONALE_RE =
   /^REBUILD of (?:the plan filing (\S+)|[^,\s]+), filed by the sweep \(W1-T1(?:2709|3047)\)(?: from (\S+))? at ([0-9a-f]{7,40}):/;
 
 /** W1-T15108: `task` as a held rebuild, or undefined when its title and rationale do not mark it as one. PURE. */
