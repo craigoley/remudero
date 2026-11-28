@@ -2118,11 +2118,7 @@ function subtreeOf(procs: ListedProcs, root: number): number[] {
   return found;
 }
 
-/**
- * W1-T15179: what each admitted static stage still claims. INVARIANT never-counted-twice: its tree's rss+swap is out
- * of MemAvailable, so only max(0, named peak - that) is charged, and a tree not measured here (ended, another
- * container's, unread) charges nothing. INVARIANT no-typecheck-no-change: no record, no input.
- */
+/** W1-T15179: charge max(0, named peak - measured tree RSS); no record means no new input. */
 function staticWorkOf(ports: ShadowMemoryPorts): Pick<ShadowInputs, "staticWork"> {
   if (ports.readStaticWork === undefined) return {};
   let read: ReturnType<NonNullable<ShadowMemoryPorts["readStaticWork"]>>;
