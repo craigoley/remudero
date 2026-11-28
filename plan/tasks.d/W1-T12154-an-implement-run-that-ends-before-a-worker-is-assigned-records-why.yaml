@@ -21,7 +21,7 @@
     - src/lib/dispatch-claim.ts
     - src/lib/analytics-route.ts
     - test/dispatch/an-implement-run-that-ends-before-a-worker-is-assigned-records-why.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The verdict row of a run that wrote no worker.assignment row records that no worker was assigned and names the last stage the run reached"

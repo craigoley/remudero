@@ -38,6 +38,8 @@ import {
   type SreRunbookHost,
   type SreRunbookReceipt,
 } from "../src/lib/sre-runbooks.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for craigoley/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "craigoley/remudero";
 
 const NOW = Date.parse("2026-09-25T12:00:00.000Z");
 const FP = "c".repeat(64);

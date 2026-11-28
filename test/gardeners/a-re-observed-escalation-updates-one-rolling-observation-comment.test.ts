@@ -14,6 +14,8 @@ import {
 } from "#src/lib/escalate.js";
 import { clockFromIsoFn } from "#src/lib/clock.js";
 import { conditionReobserved, parseIssueCommentsRest } from "#src/lib/issue-revalidation-garden.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for craigoley/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "craigoley/remudero";
 
 const ISSUE_URL = "https://github.com/craigoley/remudero/issues/500";
 

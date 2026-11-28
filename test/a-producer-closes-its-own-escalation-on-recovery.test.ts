@@ -14,6 +14,8 @@ import { acquireLease, type ReadModelDb, type ReadModelLease } from "#src/lib/re
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for o/r.
+process.env.RMD_ESCALATION_REPOSITORY ??= "o/r";
 
 const HOUR = 3_600_000;
 const T0 = Date.parse("2026-09-20T00:00:00Z");
