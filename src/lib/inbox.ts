@@ -34,6 +34,7 @@ import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filin
 import { fitConventionalTitle } from "./commit-message.js";
 import { fileURLToPath } from "node:url";
 import { placeTest } from "./test-placement.js";
+import { repairDraftedFragment } from "./draft-repair.js";
 import { readInstanceRegistryText } from "./instance-mode.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
 import { loadManagedRepos } from "./managed-repos.js";
@@ -2060,6 +2061,9 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "The harness supplies the proposal id, UTC date and fragment task ids for MASTER-PLAN.md's stamp.",
     "\"RATIFICATION CANDIDATE\" and \"§7/P25\" above name this PROCESS: never put them in a task title.",
     `Every task MUST declare ${SCOPE_HINT} — never omit it and never leave it empty.`,
+    // W1-T11746's design-invariant-proof check (invariantSlugViolations) was stated only by the example below.
+    "Every `type: implement` task's design: MUST hold one line `INVARIANT <slug>: <statement>` (slug: a-z, 0-9, -) per prior",
+    "behavior it keeps, each mapped by ONE claim `invariant:<slug>` with its own proof, or else the line `NO-INVARIANTS: <reason>`.",
     "Every files: path must exist in this checkout or origin/main: confirm with Glob before listing it.",
     "A new file is either test/<folder>/<task-title-slug>.test.ts, where <folder> is the folder placeTest computes from the src modules in files: (see `rmd test-place`; never directly under test/), or declared in design on its own CREATES: <path> line.",
     "A CREATES path is new-file scope only, never the call site of a call-site proof. Every proof must fail on main.",
@@ -2103,7 +2107,8 @@ export interface ParsedDraft {
   stampLine: string;
 }
 
-function composeDraftStamp(proposalId: string, draft: ParsedDraft, clock?: Clock): ParsedDraft {
+/** The draft the rung lints and caches (blocked tasks queued, STAMP composed); the in-spawn eval judges it too. */
+export function composeDraftStamp(proposalId: string, draft: ParsedDraft, clock?: Clock): ParsedDraft {
   if (draft.releaseTaskId !== undefined) return draft;
   const fragmentYaml = queueDraftedBlockedTasks(draft.fragmentYaml);
   const fragment = safeParseFragment(fragmentYaml, proposalId);
@@ -2265,7 +2270,12 @@ export const INBOX_DRAFT_FRAGMENT_SCHEMA = {
         items: { type: "object", required: ["claim", "proof"], properties: { claim: { type: "string", minLength: 1 }, proof: { type: "string", minLength: 1 } } },
       },
       origin: { type: "string", minLength: 1 },
+      design: { type: "string", minLength: 1 },
     },
+    // An implement task without a design always fails invariantSlugViolations, so requiring it here refuses no draft the
+    // lint would have passed; other types keep design optional, as the linter does.
+    if: { properties: { type: { const: "implement" } } },
+    then: { required: ["design"] },
   },
 } as const;
 
@@ -2287,6 +2297,7 @@ export function validateDraftFragmentData(data: unknown): string[] {
       if (!isNonEmptyString(t[key])) errors.push(`${at}.${key} must be a non-empty string`);
     }
     if (!(TASK_TYPES as readonly unknown[]).includes(t.type)) errors.push(`${at}.type must be one of ${TASK_TYPES.join("|")}`);
+    if (t.type === "implement" && !isNonEmptyString(t.design)) errors.push(`${at}.design must be a non-empty string for an implement task`);
     if (!Number.isInteger(t.attempts) || (t.attempts as number) < 0) errors.push(`${at}.attempts must be a non-negative integer`);
     if (!Array.isArray(t.depends_on) || !t.depends_on.every((d) => typeof d === "string")) errors.push(`${at}.depends_on must be an array of strings`);
     if (!Array.isArray(t.files) || t.files.length === 0 || !t.files.every(isNonEmptyString)) errors.push(`${at}.files must be a non-empty array of non-empty strings`);
@@ -2390,6 +2401,8 @@ export interface DraftRungDeps {
   lane?: DraftLaneIdentity;
   cashFit?: (input: CashDraftFitInput) => CashDraftFit;
   cashResumes?: DraftCashResumes;
+  /** `false` lints each draft as the model wrote it (the `state/DRAFT_AUTOFIX_OFF` kill switch); absent repairs. */
+  draftAutofix?: boolean;
   /** config.json `inboxDraftIndex`; absent is "full", the index every open task appears in. */
   indexMode?: InboxDraftIndexMode;
   /** config.json `inboxDraftTopK`: the shortlist's scored rows under "topk", and the k the recall row measures in
@@ -2680,15 +2693,15 @@ function draftCreatedPaths(task: import("./plan.js").Task): Set<string> {
 }
 
 /** W1-T9875: the path a draft's slug-named new test belongs at, computed by placeTest from the src modules it declares. */
-function draftExpectedTestPath(task: import("./plan.js").Task, slug: string): string {
-  const placed = placeTest({ imports: placementImports(task.files ?? []), name: slug, kind: "unit" }, placementSubsystemMap());
+function draftExpectedTestPath(files: readonly string[], slug: string): string {
+  const placed = placeTest({ imports: placementImports(files), name: slug, kind: "unit" }, placementSubsystemMap());
   return `test/${placed.folder}/${slug}.test.ts`;
 }
 
 function draftMissingPathViolations(task: import("./plan.js").Task, facts: DraftRepoFacts): DraftLintViolation[] {
   const slug = draftShardSlug(task.title);
   const creates = draftCreatedPaths(task);
-  const expected = draftExpectedTestPath(task, slug);
+  const expected = draftExpectedTestPath(task.files ?? [], slug);
   const missing = missingDeclaredPaths(task, { pathExists: facts.moduleExists, pathExistsAtBase: facts.pathExistsAtBase },
     (path) => path === expected || creates.has(path));
   const out: DraftLintViolation[] = missing.map((path) => ({ check: "draft-path-missing", severity: "block",
@@ -2853,6 +2866,38 @@ export function lintDraftedFragment(
   return violations;
 }
 
+/** A drafted fragment linted as the rung lints it, after one pass of the repairs its own violations determine. */
+export interface RepairedDraftLint {
+  fragmentYaml: string;
+  violations: DraftLintViolation[];
+  /** What the repair changed; empty when the first lint was clean, the repair is off, or nothing could be fixed. */
+  repaired: string[];
+}
+
+/** Lint a fragment; when dirty, repair ONCE ({@link repairDraftedFragment}, then {@link repairRatificationFragment})
+ *  and lint again. A repair raising a check the first lint did not is dropped whole, so it never worsens a draft. */
+export function lintDraftedFragmentWithRepair(fragmentYaml: string, proposalId: string, stampLine: string,
+  facts?: DraftRepoFacts, autofix = true): RepairedDraftLint {
+  const moduleExists = facts?.moduleExists ?? HARNESS_FACTS.moduleExists;
+  const atBase = facts?.pathExistsAtBase ?? (moduleExists === HARNESS_FACTS.moduleExists ? HARNESS_FACTS.pathExistsAtBase! : () => false);
+  const lint = (yaml: string) => lintDraftedFragment(yaml, proposalId, stampLine, undefined, moduleExists,
+    facts?.readGrepProofFile ?? HARNESS_FACTS.readGrepProofFile, facts?.pathIsDirectory, atBase);
+  const first = lint(fragmentYaml);
+  if (!autofix || first.length === 0) return { fragmentYaml, violations: first, repaired: [] };
+  const fixed = repairDraftedFragment(fragmentYaml, first, {
+    pathExists: (path) => moduleExists(path) || atBase(path),
+    expectedTestPath: (title, files) => draftExpectedTestPath(files, draftShardSlug(title)),
+  });
+  const approved = repairRatificationFragment(fixed.fragmentYaml, proposalId);
+  const repairedYaml = approved.ok ? approved.fragmentYaml : fixed.fragmentYaml;
+  if (repairedYaml === fragmentYaml) return { fragmentYaml, violations: first, repaired: [] };
+  const repaired = [...fixed.repaired, ...(approved.ok && approved.fragmentYaml !== fixed.fragmentYaml ? ["approve-repair"] : [])];
+  const second = lint(repairedYaml);
+  const raised = new Set(first.map((v) => v.check));
+  if (second.some((v) => !raised.has(v.check))) return { fragmentYaml, violations: first, repaired: [] };
+  return { fragmentYaml: repairedYaml, violations: second, repaired };
+}
+
 /** W1-T9307: for every `[call-site]` violation, the callers the TREE holds (via {@link callSiteCandidates}), so the drafter
  *  — which cannot see the tree — picks a real path or drops the claim. Empty when no call-site violation fired. */
 function draftCallSiteCandidateLines(fragmentYaml: string, violations: DraftLintViolation[], root: string): string[] {
@@ -2949,6 +2994,14 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
   const requestHistory = (lane === undefined ? undefined : CASH_DRAFT_REQUEST_HISTORY.get(lane)) ?? [];
   if (lane !== undefined) CASH_DRAFT_REQUEST_HISTORY.set(lane, requestHistory);
   const draftOne = async (proposal: Proposal, snapshot?: InboxDraftSnapshot): Promise<DraftRungOutcome> => {
+    // ONE repair pass per answer, before its violations spend a redraft; a fully repaired draft caches as a clean one.
+    const lintAndRepair = (draft: ParsedDraft, attempt: number): { parsed: ParsedDraft; violations: DraftLintViolation[] } => {
+      if (draft.releaseTaskId) return { parsed: draft, violations: [] };
+      const linted = lintDraftedFragmentWithRepair(draft.fragmentYaml, proposal.id, draft.stampLine, deps.repoFacts, deps.draftAutofix !== false);
+      if (linted.repaired.length === 0) return { parsed: draft, violations: linted.violations };
+      deps.log("inbox.draft_autofixed", { proposal_id: proposal.id, attempt, repaired: linted.repaired, remaining: linted.violations.length });
+      return { parsed: { ...draft, fragmentYaml: linted.fragmentYaml }, violations: linted.violations };
+    };
     let lastWorker: DraftWorkerResult | undefined;
     let lastRequestedModel: string | null = null;
     try {
@@ -3077,9 +3130,8 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         parsed = parseDraftedCandidate(workerTranscript(worker), proposal, currentPlanText);
         if (!parsed) break; // no markers — nothing to lint or usefully retry (handled below)
         parsed = composeDraftStamp(proposal.id, parsed, deps.clock);
-        violations = parsed.releaseTaskId ? [] : lintDraftedFragment(parsed.fragmentYaml, proposal.id, parsed.stampLine,
-          undefined, deps.repoFacts?.moduleExists, deps.repoFacts?.readGrepProofFile, deps.repoFacts?.pathIsDirectory, deps.repoFacts?.pathExistsAtBase);
-        if (violations.length === 0) break; // lint-clean — cache it
+        ({ parsed, violations } = lintAndRepair(parsed, attempt));
+        if (violations.length === 0) break; // lint-clean, or repaired clean — cache it
         if (attempt < MAX_DRAFT_LINT_ATTEMPTS) {
           deps.log("inbox.draft_relint", { proposal_id: proposal.id, attempt, violations: violations.map((v) => v.message) });
           const from = draftWorkerModel(worker);
@@ -3125,11 +3177,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
             });
             lastWorker = escalated;
             const candidate = parseDraftedCandidate(workerTranscript(escalated), proposal, currentPlanText);
-            if (candidate) {
-              parsed = composeDraftStamp(proposal.id, candidate, deps.clock);
-              violations = parsed.releaseTaskId ? [] : lintDraftedFragment(parsed.fragmentYaml, proposal.id, parsed.stampLine,
-                undefined, deps.repoFacts?.moduleExists, deps.repoFacts?.readGrepProofFile, deps.repoFacts?.pathIsDirectory, deps.repoFacts?.pathExistsAtBase);
-            }
+            if (candidate) ({ parsed, violations } = lintAndRepair(composeDraftStamp(proposal.id, candidate, deps.clock), attempts + 1));
           }
         } catch (error) {
           // A failed subscription attempt cannot discard the cash fragment already produced.

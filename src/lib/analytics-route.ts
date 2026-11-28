@@ -61,9 +61,11 @@ import { LEDGER_COLD_STORE_DIRNAME } from "./ledger-compact.js";
 import {
   buildAnalyticsTimeSeries,
   createHistoricalSeriesAccumulator,
+  endedBeforeWorkerAssignmentNote,
   type HistoricalSeriesAccumulator,
   type LedgerTimeSeries,
 } from "./analytics-timeseries.js";
+import { endedBeforeWorkerAssignment } from "./non-worker-verdict.js";
 import {
   buildAnalyticsBreakdowns,
   createAnalyticsBreakdownAccumulator,
@@ -667,6 +669,9 @@ type OperatorAgentFolds = { proof: OperatorAgentProofFold; decisions: OperatorDe
 type CheckpointHistoryBucket = {
   observed: boolean;
   completedRuns: number;
+  /** W1-T12154: runs that ended before a worker was assigned, counted apart from completed runs and durations.
+   *  Optional because checkpoints written before W1-T12154 restore buckets without it. */
+  endedBeforeWorkerAssignment?: number;
   tokensTotal: number;
   cacheRead: number;
   inputTokens: number;
@@ -687,6 +692,11 @@ type CheckpointHistoryBucket = {
 type CheckpointHistoryState = {
   days: Map<string, CheckpointHistoryBucket>;
   starts: Map<string, number>;
+  /** W1-T12154: the runs whose `worker.assignment` this fold has seen. */
+  assigned: Set<string>;
+  /** FALSE once restored from a checkpoint written before W1-T12154, or from one a fold so restored wrote: a run
+   *  absent from `assigned` is then unseen, not unassigned. */
+  assignedFromStart: boolean;
 };
 
 type CheckpointBreakdownState = {
@@ -778,6 +788,11 @@ type AnalyticsCheckpointState = {
   history: {
     days: Array<[string, CheckpointHistoryBucket]>;
     starts: Array<[string, number]>;
+    /** W1-T12154: optional because checkpoints written before it carry no assigned runs. */
+    assigned?: string[];
+    /** W1-T12154: TRUE on a fold that began from a checkpoint without `assigned`, so its set misses runs assigned
+     *  before it; kept on every later checkpoint until a scan starts from zero. */
+    assignedIncomplete?: true;
   };
   usage?: UsageTelemetryState;
   breakdowns: {
@@ -938,7 +953,7 @@ function analyticsAccumulator(): AnalyticsAccumulator {
     operatorAgentRows: { memory: [] },
     historicalSeries: createHistoricalSeriesAccumulator(),
     breakdowns: createAnalyticsBreakdownAccumulator(),
-    checkpointHistory: { days: new Map(), starts: new Map() },
+    checkpointHistory: { days: new Map(), starts: new Map(), assigned: new Set(), assignedFromStart: true },
     checkpointBreakdowns: { starts: new Set(), terminals: new Map(), startsWithoutRunId: 0, terminalsWithoutRunId: 0, workCategories: new Map() },
     checkpointHydrated: false,
     workIntegrity: emptyWorkIntegrityFold(),
@@ -997,12 +1012,19 @@ function captureCheckpointLine(acc: AnalyticsAccumulator, line: Record<string, u
     const prior = acc.checkpointHistory.starts.get(runId);
     if (prior === undefined || timestamp < prior) acc.checkpointHistory.starts.set(runId, timestamp);
   }
+  if (step === "worker.assignment" && runId) acc.checkpointHistory.assigned.add(runId);
   if (step === "verdict" && runId && Number.isFinite(timestamp)) {
     const started = acc.checkpointHistory.starts.get(runId);
     if (started !== undefined && day !== undefined) {
       const bucket = checkpointHistoryBucket(acc.checkpointHistory, day);
-      bucket.completedRuns += 1;
-      bucket.durationsMs.push(Math.max(0, timestamp - started));
+      // W1-T12154: the same shared test the one-pass series applies (analytics-timeseries.ts).
+      const runAssigned = acc.checkpointHistory.assigned.has(runId) ? true : acc.checkpointHistory.assignedFromStart ? false : undefined;
+      if (endedBeforeWorkerAssignment(line, runAssigned)) {
+        bucket.endedBeforeWorkerAssignment = (bucket.endedBeforeWorkerAssignment ?? 0) + 1;
+      } else {
+        bucket.completedRuns += 1;
+        bucket.durationsMs.push(Math.max(0, timestamp - started));
+      }
     }
   }
   if (day !== undefined && str(line.model) !== undefined) {
@@ -1069,7 +1091,9 @@ function checkpointTimeSeries(state: CheckpointHistoryState, nowIso: string): Le
   const pointFor = (day: string, id: string) => {
     const bucket = state.days.get(day);
     if (bucket === undefined || !bucket.observed) return { t: `${day}T00:00:00.000Z`, value: null, gap: true, note: "missing" };
-    if (id === "runs.completed") return { t: `${day}T00:00:00.000Z`, value: bucket.completedRuns, gap: false };
+    if (id === "runs.completed") {
+      return { t: `${day}T00:00:00.000Z`, value: bucket.completedRuns, gap: false, ...endedBeforeWorkerAssignmentNote(bucket.endedBeforeWorkerAssignment ?? 0) };
+    }
     if (id === "tokens.total") return { t: `${day}T00:00:00.000Z`, value: bucket.tokensTotal, gap: false };
     if (id === "cost.modeled.usd") return { t: `${day}T00:00:00.000Z`, value: bucket.costUsd, gap: false, unpricedRows: bucket.unpricedCostRows ?? 0, ...((bucket.unpricedCostRows ?? 0) > 0 ? { note: "known spend plus unpriced receipts; total uncertain" } : {}) };
     if (id === "cache.reuse") {
@@ -2084,6 +2108,8 @@ function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpoin
     history: {
       days: [...acc.checkpointHistory.days.entries()].map(([day, bucket]) => [day, { ...bucket, durationsMs: [...bucket.durationsMs] }]),
       starts: [...acc.checkpointHistory.starts.entries()],
+      assigned: [...acc.checkpointHistory.assigned],
+      ...(acc.checkpointHistory.assignedFromStart ? {} : { assignedIncomplete: true as const }),
     },
     usage: JSON.parse(JSON.stringify(acc.usage)) as UsageTelemetryState,
     breakdowns: {
@@ -2143,6 +2169,8 @@ function hydrateCheckpointState(state: AnalyticsCheckpointState): AnalyticsAccum
   }
   acc.checkpointHistory.days = new Map(state.history.days.map(([day, bucket]) => [day, { ...bucket, durationsMs: [...bucket.durationsMs] }]));
   acc.checkpointHistory.starts = new Map(state.history.starts);
+  acc.checkpointHistory.assigned = new Set(state.history.assigned ?? []);
+  acc.checkpointHistory.assignedFromStart = state.history.assigned !== undefined && state.history.assignedIncomplete !== true;
   acc.usage = JSON.parse(JSON.stringify(state.usage ?? usageTelemetryState())) as UsageTelemetryState;
   acc.checkpointBreakdowns.starts = new Set(state.breakdowns.starts);
   acc.checkpointBreakdowns.terminals = new Map(state.breakdowns.terminals.map(([key, value]) => [key, { ...value }]));

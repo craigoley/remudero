@@ -155,6 +155,7 @@ import { createIndexedLifetimeAccounting, tallyAuditedLifetimeDispatches, type L
 import { defaultCreditOverridePath, planCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
   type CreditOverrideRow, type CreditReadState, type CreditStore, type ProjectPlanPhases } from "./lib/status.js";
 import type { DependencyMergeEvidence } from "./lib/plan.js";
+import { workerAssignmentTracker } from "./lib/non-worker-verdict.js";
 export { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import {
   GitFetchError, PLAN_SYNC_GIT_TIMEOUT_MS, PlanSyncGitTimeoutError, createPlanRevisionStore,
@@ -1128,7 +1129,8 @@ import {
   commitInboxDraftOutcomes,
   readDraftCashResumes,
   parseDraftedCandidate,
-  lintDraftedFragment,
+  lintDraftedFragmentWithRepair,
+  composeDraftStamp,
   stageBundleProposals,
   summarizeInboxPoll,
   updateProposalRegistry,
@@ -1160,6 +1162,7 @@ import {
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
 import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
+import { draftAutofixOff } from "./lib/draft-repair.js";
 import { learnedBakeoffLimit, renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
 import type { DeployedModel, DeploymentBakeoffCandidate, JudgeReplayOutcome } from "./lib/bakeoff-trigger.js";
 import { judgeReplayKey, judgeShadowAutoRoles, judgeShadowReplayCorpus } from "./lib/judge-shadow.js";
@@ -10896,8 +10899,10 @@ export function predecessorTranscriptPromptLines(paths: readonly string[]): stri
 export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<string, unknown>) => void,
   stackEvidence: BenchmarkStackEvidence = {}, initialWork: BenchmarkWorkInput = {}) {
   const assignments = new Set<string>();
+  const ownRows = workerAssignmentTracker(); // W1-T12154: a verdict with no worker assigned says so, and where
   let work = initialWork;
-  return (step: string, extra: Record<string, unknown> = {}): void => {
+  return (step: string, rawExtra: Record<string, unknown> = {}): void => {
+    const extra = step === "verdict" ? { ...rawExtra, ...ownRows.verdictFields(rawExtra) } : rawExtra;
     work = observeBenchmarkWork(work, step, extra);
     let fields: Record<string, unknown>;
     let durableAssignmentId: string | undefined;
@@ -10934,6 +10939,7 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
       write(step, fields);
       if (durableAssignmentId) assignments.add(durableAssignmentId);
     }
+    ownRows.written(step, extra);
   };
 }
 
@@ -37929,12 +37935,14 @@ export function buildInboxDraftSpawnArgs(args: {
       paidCashDeployments: args.paidCashDeployments,
       cashAvoidModels: cashRetry?.avoidModels,
       evaluate: (worker: WorkerResult) => withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, registryRecord), () => {
-        const parsed = parseDraftedCandidate(workerTranscript(worker), args.proposal, args.currentPlanText);
+        const raw = parseDraftedCandidate(workerTranscript(worker), args.proposal, args.currentPlanText);
+        // The rung composes the STAMP, then repairs before it judges, so an answer it would cache clean is clean here
+        // too and buys no fallback.
+        const parsed = raw === null ? null : composeDraftStamp(args.proposalId!, raw);
         const facts = checkoutRepoFacts(args.cwd);
         return { contractFailed: parsed === null,
-          clean: parsed !== null && (parsed.releaseTaskId !== undefined || lintDraftedFragment(parsed.fragmentYaml,
-            args.proposalId!, parsed.stampLine, undefined, facts.moduleExists, facts.readGrepProofFile,
-            facts.pathIsDirectory, facts.pathExistsAtBase).length === 0) };
+          clean: parsed !== null && (parsed.releaseTaskId !== undefined || lintDraftedFragmentWithRepair(parsed.fragmentYaml,
+            args.proposalId!, parsed.stampLine, facts, !draftAutofixOff(join(args.config.root, "state"))).violations.length === 0) };
       }),
     } } : {}),
   };
@@ -38129,6 +38137,7 @@ export async function draftProposalBatch(
         } : {}),
         cashFit: input => cashDraftFit(config, input),
         cashResumes,
+        draftAutofix: !draftAutofixOff(join(config.root, "state")),
         retryFullIndex: existsSync(join(config.root, "state", DRAFT_RETRY_FULL_INDEX_FILE)),
         log,
       },
@@ -38297,7 +38306,9 @@ function createInboxBakeoffReplay(
           return next;
         };
       };
-      const rows = await replay({ proposals, planText, spawnFor, candidates, learnedLimit: learnedBakeoffLimit(config), log: (step, extra = {}) => {
+      const rows = await replay({ proposals, planText, spawnFor, candidates, learnedLimit: learnedBakeoffLimit(config),
+        draftAutofix: !draftAutofixOff(join(config.root, "state")),
+        retryFullIndex: existsSync(join(config.root, "state", DRAFT_RETRY_FULL_INDEX_FILE)), log: (step, extra = {}) => {
         const candidate = candidates?.find((candidate) => candidate.id === extra.candidate);
         const refusal = refusals.get(String(extra.candidate));
         log(step, { ...extra, ...(candidate ? { model: candidate.model } : {}),

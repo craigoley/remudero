@@ -151,9 +151,13 @@ test("W1-T14310 criterion 4: invariant:a-preflight-clean-draft-lints-as-today â€
   const bare = fragment();
   const shadowing = blockingLintMessages(planOf(bare.replace("NEW-1", "W1-T1")), planOf(bare.replace("NEW-1", "W1-T1")));
   assert.deepEqual(shadowing.filter((m) => m.includes("design-invariant-proof")), []);
-  // The prompt: everything but the example is untouched, and the example is still printed verbatim.
+  // The prompt: the example is still printed verbatim, and beyond it only the OUTPUT section's one invariant rule (its
+  // two lines, added for the design-invariant-proof first-attempt failures) names INVARIANT.
   const prompt = inboxDraftPrompt(PROPOSAL, "- id: W1-T1\n", "run-1");
   const example = inboxDraftExampleFragmentYaml();
   assert.ok(prompt.includes(example));
-  assert.equal(prompt.replace(example, "").includes("INVARIANT"), false, "no prompt text beyond the example changed");
+  const outside = prompt.replace(example, "").split("\n").filter((line) => line.includes("INVARIANT"));
+  assert.equal(outside.length, 2, "no prompt text beyond the example and the invariant rule names INVARIANT");
+  assert.ok(outside[0]!.startsWith("Every `type: implement` task's design: MUST hold"), outside[0]);
+  assert.ok(outside[1]!.includes("`NO-INVARIANTS: <reason>`"), outside[1]);
 });
