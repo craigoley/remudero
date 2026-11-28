@@ -14,7 +14,7 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 
 const SHA = "2".repeat(40);
-const STAMP = "2026-11-14T16:41:24.000Z";
+const STAMP = new Date(Date.now() - 60_000).toISOString();
 const PR = 18449;
 const PR_URL = `https://github.com/fixture/fix-task/pull/${PR}`;
 const UNRECOVERABLE = "criteria unrecoverable (no Remudero-Task: trailer to resolve them from)";

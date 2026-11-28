@@ -19,7 +19,7 @@ import { originWithClone } from "#test/helpers/git-repo.js";
 
 const TASK = "W1-T12701";
 const PR = 18422;
-const STAMP = "2026-11-14T16:53:54.000Z";
+const STAMP = new Date(Date.now() - 60_000).toISOString();
 const PR_URL = `https://github.com/acme/fixrepo/pull/${PR}`;
 const WORKER = { sessionId: "T12701", costUsd: 0, text: "REPORT\nno change\n", blocks: [], stderr: "", subtype: "success",
   isError: false, apiError: false, verdict: "success", tokens: {}, compactionEvents: [], childEnvKeys: [] } as unknown as WorkerResult;
