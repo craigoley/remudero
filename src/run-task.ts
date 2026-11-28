@@ -196,6 +196,7 @@ import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapability
 import { revisionedRead, type ReadGeneration } from "./lib/read-plane.js";
 import { observeLightPassReviewEligibility } from "./lib/sweep.js";
 import { fixRoundClaimId } from "./lib/sweep.js";
+import { trackInboxDraftBatch } from "./lib/sweep.js";
 import {
   applyStaleFixDispatchRecovery,
   authorizeStaleFixDispatchRecovery,
@@ -38600,7 +38601,8 @@ export function buildInboxDraftHook(
       try {
         const cashResumes = readDraftCashResumes(join(inboxRoot, "state"));
         const subscriptionRetryIds = new Set(selected.filter(({ batch }) => batch > 0).map(({ proposal }) => proposal.id));
-        outcomes = await draftBatch(due, config, owner, repo, runId, log, undefined, undefined, undefined, cashResumes, subscriptionRetryIds);
+        // A running batch makes the daemon busy, so an idle freshness restart no longer kills its Architects.
+        outcomes = await trackInboxDraftBatch(async () => await draftBatch(due, config, owner, repo, runId, log, undefined, undefined, undefined, cashResumes, subscriptionRetryIds));
       } finally {
         // ⚠ W1-T2569 CORRECTION — THIS CLAIM WAS FALSE AND COST $123.30. It used to read "Only one
         // draft rung runs at a time (this hook is awaited to completion by the daemon's own serial
