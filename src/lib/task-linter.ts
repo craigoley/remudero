@@ -450,6 +450,7 @@ export function ownFalsifierRenameExit(candidates: readonly string[]): string {
 /** ≥2 concerns at risk<high blocks. At high, `band_meaning: blast-radius` preserves exemption;
  *  `span` reports the count as a WARN. Missing meaning stays silent without `riskTransition`;
  *  with it, newly-high tasks block and already-high tasks warn, preserving the standing backlog.
+ *  A record at a {@link LANDED_SIZING_STATUSES} status reads its block as a warn (W1-T15273).
  *  Why: docs/forensics/task-linter.md#sizingviolation. */
 export function sizingViolation(task: Task, opts: LintOpts = {}): LintViolation | undefined {
   // Special-case: retired withdrawals never dispatch, downgrade sizing to a warning.
@@ -461,6 +462,19 @@ export function sizingViolation(task: Task, opts: LintOpts = {}): LintViolation 
         `retired (withdrawn) shard ${task.id} will never be built — sizing observation downgraded to warn`,
     };
   }
+  const verdict = sizingVerdict(task, opts);
+  // Read at the record's CURRENT status, so a requeue (merged → queued) gets the block back.
+  if (verdict?.severity !== "block" || !LANDED_SIZING_STATUSES.has(task.status)) return verdict;
+  return {
+    ...verdict,
+    severity: "warn",
+    message: `${verdict.message} (record at status ${task.status}: it never dispatches again, so the span is ` +
+      `reported, not refused — W1-T15273)`,
+  };
+}
+
+/** Today's sizing verdict for an unretired record, before the landed-status downgrade. */
+function sizingVerdict(task: Task, opts: LintOpts): LintViolation | undefined {
   // Unscoped callers carry the shard path rather than duplicate-check options; derive it purely.
   const ownFalsifierSlug = opts.duplicateSlug?.trim().toLowerCase() ||
     (task.sourcePath ? shardSlugFromPath(task.sourcePath)?.text.toLowerCase() : undefined);
@@ -2874,6 +2888,12 @@ function isTaskRecordFile(f: string): boolean {
  *  such a task would be blocked by the very check that task earned. Declared locally rather than
  *  imported, following W1-T369: a 3-literal Set carries none of an algorithm's drift risk. */
 const NON_OPEN_FILING_STATUSES = new Set<TaskStatus>(["blocked", "merged", "done"]);
+
+/** Landed statuses at which {@link sizingViolation} reports a Rule 19 block as a warn. A landed
+ *  record never dispatches again (planTaskLanded, planHealthSweep), the same reason the withdrawn
+ *  arm downgrades: its span is an observation, and an ops status landing that flips it to merged
+ *  must not be refused for it (W1-T15273). `blocked` is open here, unlike the filing set above. */
+const LANDED_SIZING_STATUSES = new Set<TaskStatus>(["merged", "done"]);
 
 /** A task that declares a task record — the monolith or its own shard — alongside a path outside
  *  plan scope, at a `verify` the operator will not be asked to judge: the shape `remudero-review`
