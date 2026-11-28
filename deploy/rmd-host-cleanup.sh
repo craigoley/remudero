@@ -167,6 +167,13 @@ PROTECTED_WORKTREE_ROOTS="${RMD_CLEANUP_PROTECTED_WORKTREE_ROOTS-$CLEAN_HOME/rmd
 # W1-T14929: home clones whose linked worktrees the janitor lists through `git worktree list` (default: the live
 # checkouts). Only their LINKED worktrees are judged; each clone's own checkout is never retired.
 HOME_CLONES="${RMD_CLEANUP_HOME_CLONES-$LIVE_CHECKOUTS}"
+# W1-T14891: worktree roots on the state disk that a container bind mount shadows (the daemon mounts the scratch-disk
+# copy over its worktrees folder), so no container reaches them. Empty off the host layout.
+if [ -n "${RMD_CLEANUP_SHADOWED_WORKTREE_ROOTS+x}" ]; then SHADOWED_WORKTREE_ROOTS="$RMD_CLEANUP_SHADOWED_WORKTREE_ROOTS"
+# Every instance folder on the state disk (state2, remudero-console-state, ...) may hold a worktrees folder that a
+# container's deeper scratch bind hides; each is a candidate, and container_reaches_root judges each one.
+elif [ "${RMD_CLEANUP_ROOT_FS:-/}" = / ] || [ -n "${RMD_CLEANUP_STATE_DISK+x}" ]; then SHADOWED_WORKTREE_ROOTS="$STATE_DISK/*/worktrees"
+else SHADOWED_WORKTREE_ROOTS=""; fi
 # W1-T9617: with the hot checkouts on scratch (deploy/scratch-mounts.sh), each daemon's own checkout
 # and serve's code dir live at <scratch>/rmd/<key>/remudero and .../serve-repo. They are live
 # checkouts, so each one present is protected exactly like rmd-serve-repo, whatever the list says.
@@ -607,6 +614,10 @@ bare_repository_scan() {
 # THIS repo's physical top (what Git compares against), never '*'. These calls only read the repo
 # (status runs with GIT_OPTIONAL_LOCKS=0) or remove it, so root creates no files inside it.
 rgit() {
+  if [ -n "${SHADOWED_GITDIR:-}" ] && [ "${1:-}" = "${SHADOWED_GITWORKTREE:-}" ]; then
+    GIT_DIR="$SHADOWED_GITDIR" GIT_WORK_TREE="$SHADOWED_GITWORKTREE" rmd_retirement_git "$@"
+    return $?
+  fi
   rmd_retirement_git "$@"
 }
 worktree_clean() {
@@ -1058,6 +1069,200 @@ retire_orphan_home_tree() {
   log "REMOVE $wt: linked worktree of $clone without admin directory; saved then removed (${bytes:-unknown} bytes; copy: $final)"
   act rm -rf -- "$wt" && tally "home-orphan ${wt%/*}" "$bytes"
 }
+# W1-T14891: container_reaches_root <root>: 0 when a running container can reach the root, 1 when none can, 2 when
+# Docker cannot be read. A container reaches it through a mount whose source is the root, holds it, or sits inside it,
+# unless the root's place in that container is covered by a deeper mount (the daemon mounts the scratch copy over its
+# worktrees folder, inside the mount of the state directory). Directory sources are resolved physically; source
+# identity is also compared against the root's ancestors so a bind alias still reaches the same tree. File sources
+# are normalized through their parent directory instead of being passed to `cd`.
+container_reaches_root() {
+  local root="$1" rp ids id lines line i j src dst ps cpath shadowed cursor identity root_identity root_prefix suffix
+  local -a srcs=() dsts=()
+  rp="$(cd -P -- "$root" 2>/dev/null && pwd -P)" || return 2
+  ids="$($DOCKER_CMD ps -q 2>/dev/null)" || return 2
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    lines="$($DOCKER_CMD inspect --format '{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}' "$id" 2>/dev/null)" || return 2
+    srcs=(); dsts=()
+    while IFS='	' read -r src dst; do
+      [ -n "$src" ] && [ -n "$dst" ] || continue
+      srcs+=("$src"); dsts+=("${dst%/}")
+    done <<< "$lines"
+    for i in "${!srcs[@]}"; do
+      # Docker may bind-mount a file (for example an account file). Resolve its parent
+      # physically and retain its basename; `cd` on the file itself fails.
+      if [ -d "${srcs[$i]}" ]; then
+        ps="$(cd -P -- "${srcs[$i]}" 2>/dev/null && pwd -P)" || return 2
+      elif [ -e "${srcs[$i]}" ]; then
+        ps="$(cd -P -- "${srcs[$i]%/*}" 2>/dev/null && pwd -P)/${srcs[$i]##*/}" || return 2
+      else
+        return 2
+      fi
+      # A bind mount can expose the same directory through another host path. Compare the
+      # mount source with every existing ancestor of the root by device/inode as well as name.
+      cpath=""; cursor="$rp"
+      identity="$(container_path_identity "$ps")" || return 2
+      while [ -n "$identity" ]; do
+        root_prefix="$cursor"
+        root_identity="$(container_path_identity "$root_prefix")" || return 2
+        if [ "$ps" = "$root_prefix" ] || [ "$identity" = "$root_identity" ]; then
+          if [ "$rp" = "$root_prefix" ]; then suffix=""
+          elif [ "$root_prefix" = / ]; then suffix="/${rp#/}"
+          else suffix="${rp#"$root_prefix"}"; fi
+          cpath="${dsts[$i]}$suffix"
+          break
+        fi
+        [ "$cursor" = / ] && break
+        cursor="${cursor%/*}"; [ -n "$cursor" ] || cursor=/
+      done
+      if [ -n "$cpath" ]; then
+      shadowed=0
+      for j in "${!dsts[@]}"; do
+        [ "$j" = "$i" ] && continue
+        [ "${#dsts[$j]}" -gt "${#dsts[$i]}" ] || continue
+        case "$cpath" in "${dsts[$j]}"|"${dsts[$j]}"/*) shadowed=1; break ;; esac
+      done
+      [ "$shadowed" = 1 ] || return 0
+      fi
+      # A source inside the root reaches it only when the source path itself is below it.
+      case "$ps" in "$rp"/*) return 0 ;; esac
+    done
+  done <<< "$ids"
+  return 1
+}
+
+# Translate a container-form linked worktree's .git pointer through the running container's
+# mount table. Both the pointer and its admin directory's back-pointer must map to this exact
+# host worktree before metadata is changed. The caller restores both files if retirement keeps it.
+translate_shadowed_worktree_gitdir() {
+  local wt="$1" gitfile="$1/.git" raw container_gitdir host_gitdir backfile backraw host_back
+  local ids id mounts source destination candidate best_len=0 suffix
+  [ -f "$gitfile" ] && [ ! -L "$gitfile" ] || return 1
+  raw="$(sed -n '1s/^gitdir: //p' -- "$gitfile" 2>/dev/null)"
+  case "$raw" in /*) ;; *) return 1 ;; esac
+  container_gitdir="$raw"
+  ids="$("$DOCKER_CMD" ps -q 2>/dev/null)" || return 1
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    mounts="$("$DOCKER_CMD" inspect --format '{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}' "$id" 2>/dev/null)" || return 1
+    while IFS=$'\t' read -r source destination; do
+      [ -n "$source" ] && [ -n "$destination" ] || continue
+      destination="${destination%/}"
+      case "$container_gitdir" in "$destination"|"$destination"/*) ;; *) continue ;; esac
+      [ "${#destination}" -gt "$best_len" ] || continue
+      suffix="${container_gitdir#"$destination"}"
+      candidate="${source%/}$suffix"
+      [ -e "$candidate" ] || continue
+      host_gitdir="$(cd -P -- "$candidate" 2>/dev/null && pwd -P)" || continue
+      best_len="${#destination}"
+    done <<< "$mounts"
+  done <<< "$ids"
+  [ -n "$host_gitdir" ] && [ -d "$host_gitdir" ] || return 1
+  backfile="$host_gitdir/gitdir"
+  [ -f "$backfile" ] && [ ! -L "$backfile" ] || return 1
+  backraw="$(sed -n '1p' -- "$backfile" 2>/dev/null)"
+  case "$backraw" in /*) ;; *) return 1 ;; esac
+  # Translate the back-pointer by the same destination-prefix rule and require it to name wt/.git.
+  best_len=0; host_back=""
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    mounts="$("$DOCKER_CMD" inspect --format '{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}' "$id" 2>/dev/null)" || return 1
+    while IFS=$'\t' read -r source destination; do
+      [ -n "$source" ] && [ -n "$destination" ] || continue
+      destination="${destination%/}"
+      case "$backraw" in "$destination"|"$destination"/*) ;; *) continue ;; esac
+      [ "${#destination}" -gt "$best_len" ] || continue
+      suffix="${backraw#"$destination"}"
+      candidate="${source%/}$suffix"
+      [ -e "$candidate" ] || continue
+      host_back="$(cd -P -- "${candidate%/*}" 2>/dev/null && pwd -P)/${candidate##*/}" || continue
+      best_len="${#destination}"
+    done <<< "$mounts"
+  done <<< "$ids"
+  # The mount source may be a bind-mount alias (~/rmd-state2 for /mnt/rmd/state2), whose spelling differs from the
+  # worktree's: the back-pointer names this tree when it is the same file by device and inode.
+  [ -n "$host_back" ] || return 1
+  local back_id wt_id
+  back_id="$(container_path_identity "$host_back")" || return 1
+  wt_id="$(container_path_identity "$gitfile")" || return 1
+  [ "$back_id" = "$wt_id" ] || return 1
+  host_back="$wt/.git"
+  printf '%s\n%s\n%s\n%s\n' "$raw" "$backraw" "$host_gitdir" "$host_back"
+  # A dry run must not rewrite either side of Git's linked-worktree pointer. The
+  # caller can read through GIT_DIR instead while simulating the retirement.
+  if [ "$DRY_RUN" != 1 ]; then
+    printf 'gitdir: %s\n' "$host_gitdir" > "$gitfile" || return 1
+    printf '%s\n' "$host_back" > "$backfile" || { printf 'gitdir: %s\n' "$raw" > "$gitfile"; return 1; }
+  fi
+  return 0
+}
+# W1-T14891: a worktree under a state-disk root that no running container reaches is preserved (MANIFEST, verified
+# bundle, patch, untracked tar), then retired through retire_held_worktree, idle past the held-worktree window. A root
+# a container reaches, or one Docker cannot prove unreached, is left alone. A tree whose Git metadata the host cannot
+# read (a container path) is kept and reported.
+SHADOWED_UNREACHED=""
+SHADOWED_GITDIR=""
+SHADOWED_GITWORKTREE=""
+sweep_shadowed_worktree_roots() {
+  local root wt status translated original_gitfile original_backfile mapped_gitdir
+  while IFS= read -r root; do
+    root="${root%/}"
+    [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
+    container_reaches_root "$root"; status=$?
+    case "$status" in
+      0) log "KEEP $root: a running container reaches this worktree root"; continue ;;
+      1) ;;
+      *) log "KEEP $root: Docker mounts unreadable (unknown)"; continue ;;
+    esac
+    log "rmd-host-cleanup: shadowed worktree root $root (no running container reaches it)"
+    for wt in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+      [ -d "$wt" ] && [ ! -L "$wt" ] || continue
+      { [ -e "$wt/.git" ] || [ -L "$wt/.git" ]; } || continue
+      if is_protected_worktree "$wt"; then log "KEEP $wt: protected by janitor configuration"; continue; fi
+      translated=""
+      if ! rgit "$wt" rev-parse --absolute-git-dir >/dev/null 2>&1; then
+        original_gitfile="$(cat -- "$wt/.git" 2>/dev/null)"
+        translated="$(translate_shadowed_worktree_gitdir "$wt")" || {
+          log "KEEP $wt: Git metadata is not readable from the host ($(sed -n '1s/^gitdir: //p' -- "$wt/.git" 2>/dev/null))"; continue
+        }
+        mapped_gitdir="$(sed -n '1s/^gitdir: //p' -- "$wt/.git" 2>/dev/null)"
+        original_backfile="$(printf '%s\n' "$translated" | sed -n '2p')"
+        mapped_gitdir="$(printf '%s\n' "$translated" | sed -n '3p')"
+        if [ "$DRY_RUN" = 1 ]; then
+          SHADOWED_GITDIR="$mapped_gitdir"; SHADOWED_GITWORKTREE="$wt"
+        fi
+        if ! rgit "$wt" rev-parse --absolute-git-dir >/dev/null 2>&1; then
+          if [ "$DRY_RUN" != 1 ]; then
+            printf '%s\n' "$original_gitfile" > "$wt/.git"
+            printf '%s\n' "$original_backfile" > "$mapped_gitdir/gitdir"
+          fi
+          log "KEEP $wt: translated Git metadata could not be read"; continue
+        fi
+      fi
+      SHADOWED_UNREACHED="$root"; HOME_LINKED_TREE="$wt"
+      retire_held_worktree "$wt" "under shadowed worktree root $root"
+      if [ -n "$translated" ] && [ -d "$wt" ]; then
+        if [ "$DRY_RUN" != 1 ]; then
+          printf '%s\n' "$original_gitfile" > "$wt/.git"
+          printf '%s\n' "$original_backfile" > "$mapped_gitdir/gitdir"
+        fi
+      fi
+      SHADOWED_GITDIR=""; SHADOWED_GITWORKTREE=""
+      HOME_LINKED_TREE=""; SHADOWED_UNREACHED=""
+    done
+  done < <(shadowed_root_candidates)
+}
+# The configured roots, each glob (the default "$STATE_DISK/*/worktrees") expanded to the folders that exist.
+shadowed_root_candidates() {
+  local entry path
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      *[*?[]*) for path in $entry; do [ -d "$path" ] && printf '%s\n' "$path"; done ;;
+      *) printf '%s\n' "$entry" ;;
+    esac
+  done < <(printf '%s\n' "$SHADOWED_WORKTREE_ROOTS" | tr ':' '\n') | awk 'NF && !seen[$0]++'
+}
 sweep_home_clone_worktrees() {
   local IDLE_MINUTES=$(( HELD_WORKTREE_DAYS * 1440 ))
   local clone list line wt first gitdir d
@@ -1186,6 +1391,13 @@ keep_container_path() {
 is_docker_mount() {
   local p="$1" mount cursor identity
   [ "$DOCKER_OK" = 1 ] || return 0
+  # W1-T14891: inside a worktree root just proved unreached (every container mount covering it is shadowed by a
+  # deeper one), an ancestor mount does not reach the path. The proof is taken again from Docker each time.
+  if [ -n "$SHADOWED_UNREACHED" ]; then
+    case "$p" in "$SHADOWED_UNREACHED"|"$SHADOWED_UNREACHED"/*)
+      container_reaches_root "$SHADOWED_UNREACHED"; [ "$?" = 1 ] && return 1 ;;
+    esac
+  fi
   DOCKER_PATH_REASON="running container mount"
   while IFS= read -r mount; do
     [ -n "$mount" ] || continue
@@ -2968,6 +3180,7 @@ if [ "$ONLY_TMP" != 1 ]; then
   done < <(printf '%s\n' "$WORKTREE_ROOTS" | tr ':' '\n')
 
   sweep_home_clone_worktrees
+  sweep_shadowed_worktree_roots
   while IFS= read -r checkout; do
     [ -n "$checkout" ] && sweep_live_checkout "$checkout"
   done < <(printf '%s\n' "$LIVE_CHECKOUTS" | tr ':' '\n')
