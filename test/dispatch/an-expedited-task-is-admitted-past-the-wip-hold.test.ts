@@ -33,6 +33,7 @@ function fixture(t: TestContext) {
     checkQueueGovernor: () => growing,
     openPrCount: () => 3,
     readLedgerLines: () => rows.map((row) => JSON.stringify(row)),
+    readExpeditePastWipHistory: async () => rows.map((row) => JSON.stringify(row)),
     log: (name, fields) => rows.push({ step: name, ...fields }),
     runOne: async (id) => { started.push(id); return result(id); },
   };
@@ -122,7 +123,7 @@ test("an expedited start rechecks queue pressure after selecting a task", async 
 test("an unreadable expedited admission history holds the queue", async (t) => {
   const { plan, rows, deps } = fixture(t);
   const held = await runDrain(plan, {
-    ...deps, readLedgerLines: () => { throw new Error("ledger read failed"); },
+    ...deps, readExpeditePastWipHistory: async () => { throw new Error("ledger read failed"); },
   }, { max: 1 });
   assert.deepEqual(held.attempted, []);
   assert.equal(held.stopReason, "queue_governor_deferred");

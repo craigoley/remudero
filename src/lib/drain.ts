@@ -1666,6 +1666,8 @@ export interface DrainDeps extends TaskPreconditionOptions {
   /** W1-T3216: raw ledger lines for {@link resolveReleasedIds}; absent means no releases.
    *  Keep I/O in the caller (`drainCommand`), never add an `fs` import here. */
   readLedgerLines?: () => readonly string[];
+  /** Async history read for the WIP expedited in-flight guard. */
+  readExpeditePastWipHistory?: () => Promise<readonly string[]>;
   /** W1-T10348 — the operator releases kept in state/operator-releases.json, where rotation cannot shed
    *  them. A seam like `readLedgerLines`; absent, only the ledger's rows release. */
   readDurableReleases?: () => ReleaseEvidence;
@@ -2031,7 +2033,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     const queueRead = readPassGovernor("queue", () => deps.checkQueueGovernor?.(), log);
     if (queueRead.kind === "unreadable") return summary(queueRead.stopReason, queueRead.stopDetail);
     const queueGoverned = queueRead.result;
-    if (queueGoverned && !canExpeditePastWip(queueGoverned, plan, deps)) {
+    if (queueGoverned && !(await canExpeditePastWip(queueGoverned, plan, deps))) {
       return summary("queue_governor_deferred", queueHeldStop(queueGoverned, log));
     }
 
@@ -2216,7 +2218,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       return summary("no_runnable", noRunnableDetail({ indeterminate: indeterminateDeclines }));
     }
 
-    const start = queueGoverned ? checkExpeditedStart(plan, deps) : undefined;
+    const start = queueGoverned ? await checkExpeditedStart(plan, deps) : undefined;
     if (start?.verdict) {
       const held = allLanesHeldStop(start.verdict);
       return summary(held.stopReason, held.stopDetail);
@@ -2354,11 +2356,11 @@ function wipOnlyHold(result: QueueGovernorResult | undefined): result is QueueGo
     result.pressureHeld === false && result.measuredBound !== 0;
 }
 
-function canExpeditePastWip(result: QueueGovernorResult | undefined, plan: Plan, deps: DrainDeps): boolean {
-  if (!wipOnlyHold(result) || !deps.readLedgerLines || !deps.log ||
+async function canExpeditePastWip(result: QueueGovernorResult | undefined, plan: Plan, deps: DrainDeps): Promise<boolean> {
+  if (!wipOnlyHold(result) || !deps.readExpeditePastWipHistory || !deps.log ||
     !plan.tasks.some((task) => declaredExpediteReason(task) !== "")) return false;
   try {
-    return !expeditePastWipInFlight(deps.readLedgerLines());
+    return !expeditePastWipInFlight(await deps.readExpeditePastWipHistory());
   } catch (e) {
     deps.log("drain.queue_governor.unreadable", { source: "expedite history", error: String(e) });
     return false;
@@ -2384,17 +2386,18 @@ function queueHeldStop(result: QueueGovernorResult, log: NonNullable<DrainDeps["
   return `${result.observedOpenCount} open PRs at/over the ${result.wipLimit} WIP limit — new dispatch deferred`;
 }
 
-function checkExpeditedStart(plan: Plan, deps: DrainDeps): {
+async function checkExpeditedStart(plan: Plan, deps: DrainDeps): Promise<{
   verdict?: DispatchGovernorVerdict;
   governor?: QueueGovernorResult;
-} {
+}> {
   let governor: QueueGovernorResult | undefined;
+  const queued = deps.checkQueueGovernor?.();
+  const canPass = queued ? await canExpeditePastWip(queued, plan, deps) : false;
   const verdict = checkDispatchGovernors({
     ...deps,
     checkQueueGovernor: () => {
-      const current = deps.checkQueueGovernor?.();
-      if (!current || !canExpeditePastWip(current, plan, deps)) return current;
-      governor = current;
+      if (!queued || !canPass) return queued;
+      governor = queued;
       return undefined;
     },
   }, undefined);
@@ -2615,7 +2618,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     const queueRead = readPassGovernor("queue", () => deps.checkQueueGovernor?.(), log);
     if (queueRead.kind === "unreadable") return summary(queueRead.stopReason, queueRead.stopDetail);
     const queueGoverned = queueRead.result;
-    if (queueGoverned && !canExpeditePastWip(queueGoverned, plan, deps)) {
+    if (queueGoverned && !(await canExpeditePastWip(queueGoverned, plan, deps))) {
       return summary("queue_governor_deferred", queueHeldStop(queueGoverned, log));
     }
 
@@ -2789,7 +2792,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     let expediteGovernor: QueueGovernorResult | undefined;
     let refusal: DispatchGovernorVerdict | undefined;
     for (const t of dispatchSet) {
-      const start = queueGoverned ? checkExpeditedStart(plan, deps) : undefined;
+      const start = queueGoverned ? await checkExpeditedStart(plan, deps) : undefined;
       const verdict = start ? start.verdict : checkDispatchGovernors(deps, undefined);
       if (verdict) {
         refusal = verdict;
