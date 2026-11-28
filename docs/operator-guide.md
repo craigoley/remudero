@@ -440,6 +440,34 @@ flagged rather than refused. The branch is the only evidence that separates a
 phantom revert from an under-declared `files:`, and is preserved; the overrun
 does not halt the PR or block a merge.
 
+## The inbox draft's depends_on index: full, or a shortlist
+
+Two keys in `~/.config/remudero/config.json` decide what the inbox draft prompt lists for `depends_on`
+grounding (`src/lib/depends-on-candidates.ts`):
+
+- `inboxDraftIndex`: `"full"` (the default) lists every open task, as before; `"topk"` lists the tasks
+  the proposal names, the `inboxDraftTopK` open tasks that score highest against it, and every open task
+  one of those depends on (one hop), and tells the drafter to Grep `plan/tasks.yaml` for any other.
+- `inboxDraftTopK`: a positive integer, default 200. Measured on 2026-11-27's plan (1,027 open tasks, a
+  266K-char full index), the shortlist at 200 with the hop held 0.910 of each task's real open
+  `depends_on` at a 67K-char median.
+
+Both modes log one `inbox.draft_shortlist_recall` row for every lint-clean draft, with `proposal_id`,
+`mode`, `k`, `cited` (the fragment's `depends_on` ids that are real open plan tasks; `NEW-n`
+placeholders, landed ids and ids the plan lacks are left out), `in_shortlist` (how many of those the
+shortlist at `k` holds) and `missed` (the ids it does not hold, at most 20). Under `"full"` the row is
+ground truth for what `"topk"` would have missed; under `"topk"` a miss is a dependency the drafter
+found by its own search. Read it with:
+
+```sh
+rmd inspect --state-dir /absolute/state ledger-grep 'inbox.draft_shortlist_recall'
+```
+
+The bar: flip `inboxDraftIndex` to `"topk"` once 100 or more full-mode rows with `cited` above 0 show
+a summed `in_shortlist` / `cited` of at least 0.95. Below that, raise `inboxDraftTopK` and read again;
+the rows record the `k` they measured, so compare rows at one `k`. To roll back, set
+`inboxDraftIndex` to `"full"` (or delete the key); the next draft rung lists every open task again.
+
 ## An instrument-entangled PR now gets a prerequisite PR, not an escalation issue (W1-T2436)
 
 **What changed for you.** Standing rule 25 refuses a diff that touches both a measurement
