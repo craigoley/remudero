@@ -194,7 +194,7 @@ function odds(assignment: WorkerSelectionAssignment, provider: "claude" | "codex
 test("W1-T14297 criterion 1: the committed table prefers Codex for balanced builds and fixes, Claude for the reviewer and for frontier work", async (t) => {
   assert.ok(COMMITTED.includes(`  provider_preference:\n    frontier: claude\n${BALANCED_ROW}`), "the row sits under provider_preference");
   const table = loadMounts(mountsPath(REPO_ROOT)).capabilities;
-  assert.deepEqual(table?.providerPreference, { frontier: "claude", balanced: "codex" });
+  assert.deepEqual(table?.providerPreference, { frontier: "claude", balanced: "codex", economy: "claude" });
   assert.deepEqual(table?.rolePreference, { reviewer: "claude" }, "the reviewer row is unchanged");
 
   const committed = checkout(t);
@@ -368,13 +368,14 @@ test("W1-T14297 criterion 4: reviews, frontier work and economy work route exact
   const before = checkout(t, WITHOUT_ROW);
   // Without the row the table holds origin/main's preferences, so the comparison below is against origin/main's routing.
   const baseline = loadMounts(mountsPath(before)).capabilities;
-  assert.deepEqual(baseline?.providerPreference, { frontier: "claude" }, "origin/main's capability preference");
+  assert.deepEqual(baseline?.providerPreference, { frontier: "claude", economy: "claude" }, "origin/main's capability preference");
   assert.deepEqual(baseline?.rolePreference, { reviewer: "claude" }, "origin/main's role preference");
   // And the rule origin/main gives each of them while both subscriptions have headroom.
   for (const [run, provider, rule] of [
     [{ role: "reviewer" as const }, "claude", "role-preference"],
     [{ role: "implementer" as const, model: "opus" }, "claude", "capability-preference"],
-    [{ role: "implementer" as const, model: "haiku" }, undefined, "headroom-auction"],
+    // W1-T15178: economy prefers Claude while Claude has headroom.
+    [{ role: "implementer" as const, model: "haiku" }, "claude", "capability-preference"],
   ] as const) {
     const { assignment } = await route(committed, { ...run, taskId: "W1-T14297", claudeUsed: 10, codexUsed: 50 });
     assert.equal(assignment.routing.decision?.rule, rule, JSON.stringify(run));

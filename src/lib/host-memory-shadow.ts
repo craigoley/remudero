@@ -1,34 +1,23 @@
 /**
- * W1-T7094: counterfactual host-memory verdicts for committed starts; their throughput/protection benefit is unknown.
- * OBSERVED 2026-10-09: three daemons + serve shared 16.8 GB; one container had 4.0 GB swapped. Serve (5-6 GB steady,
- * 7.5 GB cold) could not restart without heavy swap-in. Measure "would this start have fit?" before ruling on enforcement.
- * NEVER GATES ITS OWN START: synchronous, caught, after commitment; callers ignore the result. Modes: "off", "shadow"
- * (shipped), "enforce". Only host-memory-admission.ts may wait before starting; plan/policy.yaml changes need operator ruling.
- * NO DOUBLE COUNT: resident rss+swap is already in MemAvailable/memory.current. Claim max(0, estimate - resident);
- * nested processes belong only to the innermost tree. ONE TAIL: sum max(0, class median - resident), plus the largest
- * remaining p90-minus-median spike. host-memory-learning.ts learns both; unsampled median = estimate, with no tail.
- * W1-T9972: daemon growth uses LAST-HOUR peak rss+swap, never boot VmHWM; median-minus-current is typical, the rest tail.
- * Too few samples: VmHWM - VmRSS, all typical. Host accounting sums all trees'/daemons' typical growth plus ONE tail.
- * W1-T9762: unseen starts carry their class median; live claims scale by survivalAt(age), the share peaking later.
- * daemon-footprint.ts persists samples across rotations/restarts; use the pid-filtered ledger tail only if it covers
- * more of the last hour (before a footprint exists).
- * CONTAINER CEILING: working set + claims + typical daemon growth crossing memory.high (#10486 tuner) defers when flags
- * predict own pressure beyond noise (unlearned: projection alone). Also defer at the ceiling now: memory.events `high`
- * crossed within a minute AND own memory.pressure exceeds PSI thresholds. Own swap-in is diagnostic: 500-1800 pages/s
- * without crossings was host reclaim. Unread pressure: static containerReserveMib. Never learn onset below memory.high:
- * read-only cgroups prevent resetting memory.peak; samples miss peaks. Core 10-11/12: 1,283 rows, 12 crossings at 2379-3589 MiB;
- * using the lowest sample held 77%, while crossing projections (median 6790 MiB) resembled all rows (6705 MiB).
- * SWAP-IN: over SWAP_STALL_HISTORY_MS, compare closed SWAP_STALL_WINDOW_MS outcomes above swapInPagesPerSecMax with
- * the measured complement; defer only for PSI lift > twice its noise. Too few swap-in samples: rate alone. Observed
- * lift 0.95-1.02, some10 median 0.9 at ~1,245 pages/s: churn. OPERATOR RULING 2026-10-19: never compare with ALL rows;
- * chronic swap-in (~95% of rows; 82-84% stall vs 76-80% overall) self-compares. Complement < SWAP_STALL_MIN_SAMPLES
- * holds nothing ("swap-in chronic: no contrast"). HISTORY OUTLIVES READER: pressure history is instance-wide, not pid-filtered.
- * OPERATOR RULING 2026-10-19 (2): failed readers may only create missing stores, never replace them. Core 10-15..10-19:
- * six history resets, none at boot; 10-19 14:52Z was between same-daemon verdicts 67 s apart. Failed read + write erased history.
- * W1-T10085: learn PSI full avg10 bound with the same windows/minimum/noise. Raise psiFullAvg10Max only where admitted
- * starts have no greater harm than all verdicts in-band, and no OOM kill. Harm = oom_kill rise or full avg60 > PRIOR;
- * unread/thin history keeps the prior. NEVER WAITS: no lock; EWOULDBLOCK/EAGAIN/EBUSY, errno or missing/unreadable/reset
- * stores widen uncertainty, never imply zero reservations. Reads are bounded by ledger-tail bytes and process count.
+ * W1-T7094: counterfactual host-memory verdicts for committed starts; benefit unknown. OBSERVED 2026-10-09: three
+ * daemons + serve shared 16.8 GB, one container 4.0 GB swapped; serve (5-6 GB, 7.5 GB cold) could not restart.
+ * NEVER GATES ITS OWN START: synchronous, caught, after commitment. Modes "off", "shadow" (shipped), "enforce"; only
+ * host-memory-admission.ts waits before a start; plan/policy.yaml changes need an operator ruling.
+ * NO DOUBLE COUNT: resident rss+swap is already in MemAvailable/memory.current: claim max(0, estimate - resident); a
+ * nested process is its innermost tree's. ONE TAIL: sum max(0, class median - resident) plus the largest p90-minus-median
+ * spike (host-memory-learning.ts; unsampled: median = estimate, no tail).
+ * W1-T9972: daemon growth is LAST-HOUR peak rss+swap (daemon-footprint.ts, else the pid-filtered ledger tail), never
+ * boot VmHWM; too few samples: VmHWM - VmRSS, all typical. W1-T9762: an unseen start carries its class median; live
+ * claims scale by survivalAt(age).
+ * CONTAINER CEILING: working set + claims + typical daemon growth past memory.high defers when flags predict own
+ * pressure beyond noise, or at the ceiling now (`high` crossed within a minute AND own PSI past thresholds). Unread
+ * pressure: static containerReserveMib. Onset is never learned below memory.high (memory.peak cannot be reset).
+ * SWAP-IN: over SWAP_STALL_HISTORY_MS, outcomes above swapInPagesPerSecMax are compared with the measured complement;
+ * defer only for lift > twice its noise. OPERATOR RULING 2026-10-19: never compare with ALL rows (chronic swap-in
+ * self-compares); a thin complement holds nothing. (2): failed readers only create missing stores, never replace them.
+ * W1-T10085: the PSI full avg10 bound is learned the same way, raised only where admitted starts show no more harm
+ * (oom_kill rise or full avg60 > PRIOR) than all verdicts in-band. NEVER WAITS: no lock; a lock code, errno or
+ * unreadable store widens uncertainty, never implies zero reservations. Reads are bounded.
  */
 
 import { randomUUID } from "node:crypto";
@@ -76,6 +65,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { DAEMON_PID_ENV, type LedgerLine } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { installPolicyPath } from "./policy.js";
+import { readLiveStaticWork, type LiveStaticWork } from "./test-slot.js";
 
 export const SHADOW_STEP = "memory_budget.shadow";
 export const SHADOW_ERROR_STEP = "memory_budget.shadow_error";
@@ -309,7 +299,12 @@ export interface ShadowInputs {
   strictEvidence?: StrictPressureEvidence;
   /** The learned review estimate, for the counterfactual review (W1-T7095). Absent: the class default. */
   reviewEstimateMib?: number;
+  /** W1-T15179: admitted static stages' charges. */
+  staticWork?: { records: StaticWorkCharge[] } | { unread: string };
 }
+
+/** Named peak less its tree's RSS. */
+export interface StaticWorkCharge { label: string; peakMib: number; treeMib: number; chargeMib: number; basis: string }
 
 /** The host swap-in's parts as every memory_budget row carries them (OPERATOR RULING 2026-10-19 (4)). Pure. */
 export function swapInRowFields(numbers: Pick<ShadowVerdict["numbers"], "swapInDiskPagesPerSec" | "swapInZswapPagesPerSec" | "swapInZswapBasis">): {
@@ -518,6 +513,10 @@ export interface ShadowVerdict {
      * process RSS and cgroup charging have different sharing rules. Null when either side is unavailable. */
     unattributedContainerMibApprox: number | null;
     unattributedContainerBasis: "approximate-cgroup-current-minus-reservation-rss";
+    /** W1-T15179: static charges summed, or why unread. */
+    staticWorkChargeMib?: number;
+    staticWorkStages?: number;
+    staticWorkUnread?: string;
   };
 }
 
@@ -719,6 +718,9 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     }
   }
 
+  // W1-T15179: no static record, no charge.
+  const staticRecords = inputs.staticWork !== undefined && "records" in inputs.staticWork ? inputs.staticWork.records : [];
+  const staticCharge = staticRecords.reduce((sum, r) => sum + r.chargeMib, 0);
   let memAvailable: number | null = null;
   let projected: number | null = null;
   let projectedAllPeaks: number | null = null;
@@ -729,10 +731,10 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     // Staged so each reason names what tipped it: measured headroom less the daemons' typical growth, then the claims
     // (typical growth plus one tail), then uncertainty.
     const base = memAvailable - daemonTypical - coldStartReserve;
-    projected = base - hostClaim - marginMib;
-    projectedAllPeaks = memAvailable - daemonGrowth - coldStartReserve - unrealized - marginMib;
+    projected = base - hostClaim - staticCharge - marginMib;
+    projectedAllPeaks = memAvailable - daemonGrowth - coldStartReserve - unrealized - staticCharge - marginMib;
     if (base < policy.hostReserveMib) reasons.add("memory-available");
-    else if (base - hostClaim < policy.hostReserveMib) reasons.add("unrealized-reservations");
+    else if (base - hostClaim - staticCharge < policy.hostReserveMib) reasons.add("unrealized-reservations");
     else if (projected < policy.hostReserveMib) reasons.add("uncertainty");
   } else {
     reasons.add("uncertainty"); // No measured headroom: a fit cannot be shown.
@@ -807,6 +809,8 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       reservationRssMib: reservationRss,
       unattributedContainerMibApprox: containerCurrent === null || reservationRss === null ? null : containerCurrent - reservationRss,
       unattributedContainerBasis: "approximate-cgroup-current-minus-reservation-rss",
+      ...(staticRecords.length > 0 ? { staticWorkChargeMib: staticCharge, staticWorkStages: staticRecords.length } : {}),
+      ...(inputs.staticWork !== undefined && "unread" in inputs.staticWork ? { staticWorkUnread: inputs.staticWork.unread } : {}),
     },
   };
 }
@@ -873,12 +877,8 @@ export interface SwapStallSample {
   stalled: boolean;
 }
 
-/**
- * Whether the host's swap-in past the threshold has been followed by stall. Over the verdicts in the last
- * SWAP_STALL_HISTORY_MS whose SWAP_STALL_WINDOW_MS has closed, the share followed by a stalled verdict within that window,
- * for those with swap-in past the threshold against those with a measured rate at or below it (the complement), with
- * twice the standard error of the difference. A complement thinner than SWAP_STALL_MIN_SAMPLES has no contrast.
- */
+/** Over closed windows in SWAP_STALL_HISTORY_MS: the stall share after swap-in past the threshold vs the measured
+ *  complement, with twice the difference's standard error; a complement under SWAP_STALL_MIN_SAMPLES: no contrast. */
 export function swapStallRelationOf(history: SwapStallSample[], now: number, policy: HostMemoryBudgetPolicy): SwapStallRelation {
   const closed = history.filter((s) => now - s.at >= SWAP_STALL_WINDOW_MS && now - s.at <= SWAP_STALL_HISTORY_MS)
     .sort((x, y) => x.at - y.at);
@@ -997,13 +997,9 @@ function priorBound(prior: number, why: string, samples: number, at?: Partial<Ps
     noise: null, ooms: null, ...at };
 }
 
-/**
- * W1-T10085: the PSI full avg10 bound learned from the record. A verdict is HARMED when, within SWAP_STALL_WINDOW_MS,
- * oom_kill changed from its last reading or a later verdict read full avg60 past the PRIOR: the outcome never reads the
- * learned bound. For each admitted level v above the prior, the admitted starts with closed windows in (prior, v] are
- * compared with every verdict in that band; the bound is the largest v with SWAP_STALL_MIN_SAMPLES such starts, a lift
- * within twice the noise, no OOM kill after one, and oom_kill read in the band. Otherwise the prior, and why.
- */
+/** W1-T10085: HARMED = within SWAP_STALL_WINDOW_MS oom_kill changed or full avg60 passed the PRIOR. The bound is the
+ *  largest admitted level v whose (prior, v] band has SWAP_STALL_MIN_SAMPLES admitted starts, lift within twice the
+ *  noise, no OOM kill and oom_kill read; else the prior, and why. */
 export function psiStartBoundOf(history: PsiStartSample[], now: number, policy: HostMemoryBudgetPolicy, unread?: string): PsiFullAvg10Bound {
   const prior = policy.psiFullAvg10Max;
   if (unread !== undefined) return priorBound(prior, unread, 0);
@@ -1194,6 +1190,9 @@ export interface ShadowMemoryPorts {
   /** Writes the instance's pressure store (its prior swap-in sample and its swap-in history). `exclusive`: only create
    *  it, throwing EEXIST over an existing file, for a writer that could not read what is there. */
   writeFile: (path: string, content: string, options?: { exclusive?: boolean }) => void;
+  /** W1-T15179: live static records, and /proc names. */
+  readStaticWork?: () => { records: LiveStaticWork[] } | { unread: string };
+  listProc?: () => string[];
 }
 
 let installedSink: ShadowMemoryPorts["write"];
@@ -1273,6 +1272,8 @@ export function defaultShadowMemoryPorts(): ShadowMemoryPorts {
       return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
     },
     listStateDir: (dir) => readdirSync(dir),
+    readStaticWork: () => readLiveStaticWork(),
+    listProc: () => readdirSync("/proc"),
     estimate: (workerClass) => classEstimate(workerClass).estimateMib,
     typical: (workerClass) => classTypical(workerClass).estimateMib,
     survival: (workerClass, ageMs) => classSurvival(workerClass, ageMs),
@@ -1359,10 +1360,8 @@ export function readPsi(read: ShadowMemoryPorts["readFile"], path = "/proc/press
   };
 }
 
-/** The instance's pressure store, beside its ledger: the previous verdict's pswpin and memory.events `high` counts (any
- *  process of the instance, so a short-lived child still measures a rate) and the swap-in and container projection
- *  histories. A store written before #10907's successor also holds `sightings`, which nothing reads any more and the
- *  next write drops. */
+/** The instance's pressure store beside its ledger: the prior verdict's counters and the histories. A legacy
+ *  `sightings` field is unread and dropped on the next write. */
 export const CONTAINER_PRESSURE_FILE = "container-pressure.json";
 /** BACKSTOP on the swap-in history kept; six hours of verdicts is about a thousand. */
 const SWAP_HISTORY_CAP = 4096;
@@ -1996,12 +1995,8 @@ export type BootPhase =
 
 const MIB_BYTES = 1024 * 1024;
 
-/**
- * W1-T9982: what the daemon will still grow while it is inside the boot phase its earlier boots showed. The phase is
- * LEARNED: this generation is in it while its uptime is below the largest peak_uptime_ms among the earlier generations.
- * Within it, the growth is the largest earlier (peak - first) less what this generation has already grown (current
- * rss+swap - its own first reading); the typical part is the median of the same remainders. Anything else is steady.
- */
+/** W1-T9982: in the LEARNED boot phase (uptime below earlier boots' largest peak_uptime_ms), growth is the largest
+ *  earlier (peak - first) less what this generation has grown; typical is their median. Otherwise steady. */
 export function bootPhaseOf(
   store: { samples: readonly FootprintSample[]; boots: readonly BootGrowth[] } | { unread: string },
   now: number, currentMib: number | undefined,
@@ -2045,11 +2040,8 @@ function seriesGrowth(bytes: readonly number[], minSamples: number, unit: string
     peakMib: peak / MIB, medianMib: median / MIB, latestMib: latest / MIB };
 }
 
-/**
- * The serve scenario read from serve's own rows in the ledger tail (serve shares its daemon's state root). With no serve
- * row at all, serve is STOPPED once the tail covers more than three serve.memory periods; a shorter window (a fresh
- * rotation) cannot tell stopped from not-yet-written, and says unknown.
- */
+/** The serve scenario from serve's ledger-tail rows. No row: STOPPED once the tail covers three serve.memory
+ *  periods, else unknown. */
 export function serveScenarioOf(rows: readonly TailRow[], now: number, coverageMs?: number): ShadowInputs["serve"] {
   const serve = rows.filter((r) => r.step.startsWith("serve."));
   if (serve.length === 0) {
@@ -2069,6 +2061,104 @@ export function serveScenarioOf(rows: readonly TailRow[], now: number, coverageM
   const age = now - last.at;
   if (age <= SERVE_SILENT_AFTER_MS) return { scenario: "serve-steady", basis: `${last.step} ${Math.round(age / 1000)}s ago` };
   return { scenario: "serve-stopped", basis: `serve silent ${Math.round(age / 1000)}s` };
+}
+
+/** Its innermost namespace pid (last NSpid). */
+function innermostPidOf(read: ShadowMemoryPorts["readFile"], pid: number): number | undefined {
+  try {
+    const ids = /^NSpid:[ \t]*([0-9]+(?:[ \t]+[0-9]+)*)[ \t]*$/m.exec(read(`/proc/${pid}/status`))?.[1]?.split(/[ \t]+/);
+    return ids === undefined ? undefined : Number(ids.at(-1));
+  } catch (error) {
+    void error; // Exited or unreadable: never picked.
+    return undefined;
+  }
+}
+
+type ListedProcs = ReadonlyMap<number, { parent: number; start: string }>;
+
+/** The holder here: `r.pid` if its start matches, else an unclaimed same-start process with NSpid `r.pid`. */
+function staticHolderOf(read: ShadowMemoryPorts["readFile"], procs: ListedProcs, r: LiveStaticWork,
+  claimed: ReadonlySet<number>): number | undefined {
+  const start = r.processStart?.startsWith("proc:") ? r.processStart : undefined;
+  const own = procs.get(r.pid);
+  if (own && (start === undefined || own.start === start) && (innermostPidOf(read, r.pid) ?? r.pid) === r.pid) return r.pid;
+  if (start === undefined) return undefined;
+  return [...procs].find(([pid, p]) => p.start === start && !claimed.has(pid) && innermostPidOf(read, pid) === r.pid)?.[0];
+}
+
+function subtreeOf(procs: ListedProcs, root: number): number[] {
+  const found = [root], seen = new Set(found);
+  for (let i = 0; i < found.length; i += 1) {
+    for (const [child, c] of procs) if (c.parent === found[i] && !seen.has(child)) { seen.add(child); found.push(child); }
+  }
+  return found;
+}
+
+/** W1-T15179: charge max(0, peak - tree RSS). */
+function staticWorkOf(ports: ShadowMemoryPorts): Pick<ShadowInputs, "staticWork"> {
+  if (ports.readStaticWork === undefined) return {};
+  let read: ReturnType<NonNullable<ShadowMemoryPorts["readStaticWork"]>>;
+  try { read = ports.readStaticWork(); }
+  catch (error) {
+    // Named, uncharged.
+    return { staticWork: { unread: reasonOf(error) } };
+  }
+  if ("unread" in read) return { staticWork: read };
+  const admitted = read.records.filter((r) => r.admitted);
+  if (admitted.length === 0) return {};
+  const daemonPid = ports.daemonPid();
+  let procs: Map<number, { parent: number; start: string }> | undefined, unlisted: string | undefined;
+  try {
+    procs = new Map();
+    for (const name of (ports.listProc ?? (() => readdirSync("/proc")))()) {
+      if (!/^[0-9]+$/.test(name)) continue;
+      try {
+        const stat = parseProcStat(ports.readFile(`/proc/${name}/stat`));
+        if (stat && !stat.zombie) procs.set(Number(name), { parent: stat.parent, start: stat.start });
+      } catch (error) {
+        void error; // Exited: holds nothing.
+      }
+    }
+  } catch (error) {
+    // Unmeasured; named.
+    procs = undefined;
+    unlisted = reasonOf(error);
+  }
+  const claimed = new Set<number>();
+  const holders = admitted.map((r) => {
+    const pid = procs && staticHolderOf(ports.readFile, procs, r, claimed);
+    if (pid !== undefined) claimed.add(pid);
+    return pid;
+  });
+  const counted = new Set<string>();
+  const unclaimed = (pid: number): boolean => !counted.has(identityKey({ pid, start: procs!.get(pid)!.start }));
+  const charge = (r: LiveStaticWork, root: number | undefined): StaticWorkCharge => {
+    const peakMib = r.memoryBytes / 1024 ** 2;
+    const unmeasured = (why: string): StaticWorkCharge =>
+      ({ label: r.label, peakMib, treeMib: 0, chargeMib: 0, basis: `${why}: tree unmeasured, nothing charged` });
+    if (!procs) return unmeasured(`process listing unread (${unlisted ?? "unknown"})`);
+    if (root === undefined) return unmeasured("holder not visible here (ended, or another container's)");
+    let selected = subtreeOf(procs, root).filter((pid) => pid !== daemonPid);
+    if (root === daemonPid) {
+      let cmdlineUnread: string | undefined;
+      const tsc = selected.filter(unclaimed).find((pid) => {
+        try { return /(?:^|\/)tsc(?:\.js|\.cmd)?(?:\0|\s|$)|typescript\/lib\//i.test(ports.readFile(`/proc/${pid}/cmdline`)); }
+        catch (error) { const reason = reasonOf(error); if (reason !== "ENOENT") cmdlineUnread = reason; return false; }
+      });
+      if (tsc === undefined && cmdlineUnread !== undefined) return unmeasured(`tsc attribution unread (${cmdlineUnread})`);
+      selected = tsc === undefined ? [] : subtreeOf(procs, tsc);
+    }
+    const tree: ProcessIdentity[] = selected.filter(unclaimed).map((pid) => ({ pid, start: procs!.get(pid)!.start }));
+    for (const identity of tree) counted.add(identityKey(identity));
+    const resident = treeResident(ports.readFile, tree, { left: MAX_TREE_PROCESSES }, false);
+    return { label: r.label, peakMib, treeMib: resident.mib, chargeMib: Math.max(0, peakMib - resident.mib),
+      basis: `peak ${Math.round(peakMib)} MiB less ${Math.round(resident.mib)} MiB its tree holds${resident.complete ? "" : ` (partial: ${resident.reason ?? "unread"})`}` };
+  };
+  // Other holders claim first; the daemon's record takes an unclaimed tsc.
+  const records = new Array<StaticWorkCharge>(admitted.length);
+  const ofDaemon = (i: number): number => Number(holders[i] !== undefined && holders[i] === daemonPid);
+  for (const i of [...admitted.keys()].sort((a, b) => ofDaemon(a) - ofDaemon(b))) records[i] = charge(admitted[i]!, holders[i]);
+  return { staticWork: { records } };
 }
 
 /** One bounded snapshot for one start. `admitted`: its start runs whatever the verdict (a shadow-mode class). */
@@ -2126,6 +2216,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     daemonGrowth: [own, ...others],
     serve: serveOf(ports, tail, now, start.root),
     reviewEstimateMib: estimateOf(ports, "review"),
+    ...staticWorkOf(ports),
   };
   const gathered = { ...inputs, ...readContainerPressure(ports, start.root, now, policy, inputs, options.admitted === true, strict) };
   if (policy.claimModel !== JOINT_MODEL) return gathered;

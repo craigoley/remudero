@@ -127,8 +127,10 @@ test("a ledger row reaches an events subscriber of the assembled serve over real
   const seen = frames.length;
   const appendedAt = performance.now();
   appendFileSync(ledgerPath, row(2));
-  await until(() => frames.slice(seen).some((f) => f.event === "view" && f.data.etag !== before), 10_000, "the new row's view event");
-  const event = frames.slice(seen).find((f) => f.event === "view")!;
+  await until(() => frames.slice(seen).some((f) => f.event === "view" &&
+    f.data.etag !== before && f.data.cause === "body"), 10_000, "the new row's body view event");
+  const event = frames.slice(seen).find((f) => f.event === "view" &&
+    f.data.etag !== before && f.data.cause === "body")!;
   assert.equal(event.data.view, "read-model");
   assert.equal(event.data.cause, "body");
   const res = await fetch(`${url}/v1/views/read-model`, { headers: READ });

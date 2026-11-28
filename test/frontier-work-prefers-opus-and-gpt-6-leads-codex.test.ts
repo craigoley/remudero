@@ -132,15 +132,18 @@ test("without GPT-6 Sol on the account, balanced falls to older Sol and never to
 
 test("an automatic policy takes the frontier preference and nothing else changes", () => {
   const preferences = ladder().providerPreference;
-  // W1-T14297 (operator option A, 2026-11-22) adds balanced: codex; the frontier row and economy are unchanged.
-  assert.deepEqual(preferences, { frontier: "claude", balanced: "codex" });
+  // W1-T14297 (operator option A, 2026-11-22) adds balanced: codex; W1-T15178 (2026-11-27) adds economy: claude.
+  assert.deepEqual(preferences, { frontier: "claude", balanced: "codex", economy: "claude" });
   const frontier = policyForCapability(policy(), "frontier", preferences);
   assert.equal(frontier.policy.preference, "claude");
   assert.deepEqual(frontier.capabilityPreference, { capability: "frontier", provider: "claude" });
   const balanced = policyForCapability(policy(), "balanced", preferences);
   assert.equal(balanced.policy.preference, "codex");
   assert.deepEqual(balanced.capabilityPreference, { capability: "balanced", provider: "codex" });
-  for (const capability of ["economy", undefined]) {
+  const economy = policyForCapability(policy(), "economy", preferences);
+  assert.equal(economy.policy.preference, "claude");
+  assert.deepEqual(economy.capabilityPreference, { capability: "economy", provider: "claude" });
+  for (const capability of [undefined]) {
     const other = policyForCapability(policy(), capability, preferences);
     assert.equal(other.policy.preference, "automatic", String(capability));
     assert.equal(other.capabilityPreference, undefined);
@@ -175,7 +178,7 @@ test("frontier work takes Claude with headroom even when Codex has far more, and
 test("the loader refuses a preference for cash or for a capability the ladder does not declare", () => {
   const raw = readFileSync(mountsPath(REPO_ROOT), "utf8");
   // W1-T14297: the block now ends with balanced: codex, so a replacement of the whole key takes that row with it.
-  const block = "  provider_preference:\n    frontier: claude\n    balanced: codex\n";
+  const block = "  provider_preference:\n    frontier: claude\n    balanced: codex\n    economy: claude\n";
   assert.ok(raw.includes(block));
   const root = mkdtempSync(join(tmpdir(), "rmd-provider-preference-"));
   try {

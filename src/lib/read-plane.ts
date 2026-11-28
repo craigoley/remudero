@@ -350,10 +350,17 @@ export function freshReadGeneration<T>(published: ReadGeneration<T> | undefined,
       latest.set(bound.consumer, published.generation);
       bound.log("tick_read.stale_refused", { consumer: bound.consumer, generation: published.generation,
         age_ms: ageMs, max_age_ms: maxAgeMs,
-        ...(published.settledAtMs === undefined ? {} : { read_ms: published.settledAtMs - published.publishedAtMs }) });
+        ...(published.settledAtMs === undefined ? {} : { read_ms: published.settledAtMs - published.publishedAtMs }),
+        ...tickReadStagesOf(published.facts) });
     }
   }
   return undefined;
+}
+
+/** W1-T14883: the read's own stage timings, when its facts carry them, beside read_ms. */
+function tickReadStagesOf(facts: unknown): { tick_read_stages_ms?: object } {
+  const stages = (facts as { readStageMs?: unknown } | null | undefined)?.readStageMs;
+  return stages !== null && typeof stages === "object" ? { tick_read_stages_ms: stages } : {};
 }
 
 /** W1-T9763: what a revisioned read posts: the request, with its plan replaced by that plan's revision. */
