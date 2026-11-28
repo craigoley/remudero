@@ -4,7 +4,7 @@ raw: >-
   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
   `feedback-summary`, field `servedModel`.
 
-  Coverage: 439/526 joined worker calls (83.5%) in the trailing 7-day window;
+  Coverage: 468/536 joined worker calls (87.3%) in the trailing 7-day window;
   below the field's 90.0% floor — a chronic gap no baseline excuses.
 
   First seen: 2026-09-28T17:59:01.334Z.
@@ -14,9 +14,12 @@ raw: >-
   lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
   reads), or record why this lane legitimately lacks it. The evidence-coverage
   gardener updates this entry in place while the gap persists.
+
+  Evidence coverage reopened 2026-11-27T22:35:17.141Z: 87.3% (468/536); window
+  2026-11-20T22:35:17.141Z through 2026-11-27T22:35:17.141Z; overrides answered.
 attachments: []
 origin: cli
-status: answered
+status: new
 reply_to: null
 proposal_pr: null
 summary: null
@@ -26,7 +29,7 @@ thread_id: null
 answered_by: fb-1792030217273-6de400
 evidence_coverage_revision:
   version: 1
-  mainSha: e91d91c7428e093165b9fdbf48a130226f05e8ca
+  mainSha: 9cc1bcc7fda6af8ac41835ecdb41b33ab290bf3d
   expectedRecord: >
     id: evidence-coverage-feedback-summary-served-model
 
@@ -36,8 +39,8 @@ evidence_coverage_revision:
       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
       `feedback-summary`, field `servedModel`.
 
-      Coverage: 433/540 joined worker calls (80.2%) in the trailing 7-day window;
-      trailing baseline 90.9% — below it by more than 10.0%.
+      Coverage: 439/526 joined worker calls (83.5%) in the trailing 7-day window;
+      below the field's 90.0% floor — a chronic gap no baseline excuses.
 
       First seen: 2026-09-28T17:59:01.334Z.
 
@@ -68,7 +71,7 @@ evidence_coverage_revision:
 
     evidence_coverage_revision:
       version: 1
-      mainSha: 7ff2bc94213d91a2236b366b900c87a89da13bfd
+      mainSha: e91d91c7428e093165b9fdbf48a130226f05e8ca
       expectedRecord: >
         id: evidence-coverage-feedback-summary-served-model
 
@@ -78,8 +81,8 @@ evidence_coverage_revision:
           Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
           `feedback-summary`, field `servedModel`.
 
-          Coverage: 74/88 joined worker calls (84.1%) in the trailing 7-day window;
-          below the field's 90.0% floor — a chronic gap no baseline excuses.
+          Coverage: 433/540 joined worker calls (80.2%) in the trailing 7-day window;
+          trailing baseline 90.9% — below it by more than 10.0%.
 
           First seen: 2026-09-28T17:59:01.334Z.
 
@@ -110,7 +113,7 @@ evidence_coverage_revision:
 
         evidence_coverage_revision:
           version: 1
-          mainSha: c223fe68126537e9df1d6b8d75a748414757d8c9
+          mainSha: 7ff2bc94213d91a2236b366b900c87a89da13bfd
           expectedRecord: >
             id: evidence-coverage-feedback-summary-served-model
 
@@ -120,7 +123,7 @@ evidence_coverage_revision:
               Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
               `feedback-summary`, field `servedModel`.
 
-              Coverage: 43/50 joined worker calls (86.0%) in the trailing 7-day window;
+              Coverage: 74/88 joined worker calls (84.1%) in the trailing 7-day window;
               below the field's 90.0% floor — a chronic gap no baseline excuses.
 
               First seen: 2026-09-28T17:59:01.334Z.
@@ -149,55 +152,120 @@ evidence_coverage_revision:
             thread_id: null
 
             answered_by: fb-1792030217273-6de400
+
+            evidence_coverage_revision:
+              version: 1
+              mainSha: c223fe68126537e9df1d6b8d75a748414757d8c9
+              expectedRecord: >
+                id: evidence-coverage-feedback-summary-served-model
+
+                ts: 2026-09-29T12:03:53.425Z
+
+                raw: >-
+                  Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+                  `feedback-summary`, field `servedModel`.
+
+                  Coverage: 43/50 joined worker calls (86.0%) in the trailing 7-day window;
+                  below the field's 90.0% floor — a chronic gap no baseline excuses.
+
+                  First seen: 2026-09-28T17:59:01.334Z.
+
+
+                  This follow-up never gates a PR or blocks work. Restore the field at the
+                  lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+                  reads), or record why this lane legitimately lacks it. The evidence-coverage
+                  gardener updates this entry in place while the gap persists.
+                attachments: []
+
+                origin: cli
+
+                status: answered
+
+                reply_to: null
+
+                proposal_pr: null
+
+                summary: null
+
+                expansion: null
+
+                submission_key: null
+
+                thread_id: null
+
+                answered_by: fb-1792030217273-6de400
+              expectedPlan:
+                plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+                plan/tasks.d: c61e5b2d8b470ca45b44dd3797e2e563d37b1ba8
+              measurement:
+                lane: feedback-summary
+                field: servedModel
+                observed: 74
+                denominator: 88
+                floor: 0.9
+                baseline: 0.925
+                at: 2026-11-09T02:20:22.244Z
+                since: 2026-11-02T02:20:22.244Z
+                line: "Coverage: 74/88 joined worker calls (84.1%) in the trailing 7-day window;
+                  below the field's 90.0% floor — a chronic gap no baseline excuses."
+              closure:
+                eligible: false
+                reason: task W1-T5197 is unknown
           expectedPlan:
             plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-            plan/tasks.d: c61e5b2d8b470ca45b44dd3797e2e563d37b1ba8
+            plan/tasks.d: 7be80212659d7ee0b4c4c85f206be5f43985224d
           measurement:
             lane: feedback-summary
             field: servedModel
-            observed: 74
-            denominator: 88
+            observed: 433
+            denominator: 540
             floor: 0.9
-            baseline: 0.925
-            at: 2026-11-09T02:20:22.244Z
-            since: 2026-11-02T02:20:22.244Z
-            line: "Coverage: 74/88 joined worker calls (84.1%) in the trailing 7-day window;
-              below the field's 90.0% floor — a chronic gap no baseline excuses."
+            baseline: 0.9090909090909091
+            at: 2026-11-27T03:49:35.795Z
+            since: 2026-11-20T03:49:35.795Z
+            line: "Coverage: 433/540 joined worker calls (80.2%) in the trailing 7-day
+              window; trailing baseline 90.9% — below it by more than 10.0%."
           closure:
             eligible: false
             reason: task W1-T5197 is unknown
       expectedPlan:
         plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-        plan/tasks.d: 7be80212659d7ee0b4c4c85f206be5f43985224d
+        plan/tasks.d: 12b05d87aa482615683977f545ede7e053dcdb09
       measurement:
         lane: feedback-summary
         field: servedModel
-        observed: 433
-        denominator: 540
+        observed: 439
+        denominator: 526
         floor: 0.9
         baseline: 0.9090909090909091
-        at: 2026-11-27T03:49:35.795Z
-        since: 2026-11-20T03:49:35.795Z
-        line: "Coverage: 433/540 joined worker calls (80.2%) in the trailing 7-day
-          window; trailing baseline 90.9% — below it by more than 10.0%."
+        at: 2026-11-27T14:01:46.982Z
+        since: 2026-11-20T14:01:46.982Z
+        line: "Coverage: 439/526 joined worker calls (83.5%) in the trailing 7-day
+          window; below the field's 90.0% floor — a chronic gap no baseline
+          excuses."
       closure:
         eligible: false
         reason: task W1-T5197 is unknown
   expectedPlan:
     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-    plan/tasks.d: 12b05d87aa482615683977f545ede7e053dcdb09
+    plan/tasks.d: f91d4dfd932259c859b643078612c8f225ebca29
   measurement:
     lane: feedback-summary
     field: servedModel
-    observed: 439
-    denominator: 526
+    observed: 468
+    denominator: 536
     floor: 0.9
     baseline: 0.9090909090909091
-    at: 2026-11-27T14:01:46.982Z
-    since: 2026-11-20T14:01:46.982Z
-    line: "Coverage: 439/526 joined worker calls (83.5%) in the trailing 7-day
+    at: 2026-11-27T22:35:17.141Z
+    since: 2026-11-20T22:35:17.141Z
+    line: "Coverage: 468/536 joined worker calls (87.3%) in the trailing 7-day
       window; below the field's 90.0% floor — a chronic gap no baseline
       excuses."
   closure:
-    eligible: false
-    reason: task W1-T5197 is unknown
+    eligible: true
+    reason: complete task PR evidence
+    completePlan: true
+    tasks:
+      - id: W1-T8511
+        state: closed
+evidence_coverage_last_reopened: "87.3"

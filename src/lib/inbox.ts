@@ -1786,6 +1786,8 @@ export interface PlanDependsOnIndex {
   text: string;
   omitsLanded: boolean;
   shortlist?: true;
+  /** A redraft's index: only the rows its last draft cited and the proposal names ({@link citedDependsOnIndex}). */
+  cited?: true;
 }
 
 /** config.json `inboxDraftIndex`: "full" lists every open task (the default); "topk" lists the shortlist. */
@@ -1879,6 +1881,43 @@ function draftPlanIndexFromRows(proposal: Proposal, rows: readonly ProjectedPlan
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
+
+/** `state/DRAFT_RETRY_FULL_INDEX`: while present, a redraft carries the full index again, as before the cited one. */
+export const DRAFT_RETRY_FULL_INDEX_FILE = "DRAFT_RETRY_FULL_INDEX";
+
+const CITED_INDEX_LINE = "This index lists only the tasks your last draft cited and the proposal names; Grep plan/tasks.yaml and plan/tasks.d/ for any other dependency.";
+const CITED_LANDED_LINE = "A dependency on a merged or done task is already satisfied, so leave it out of depends_on.";
+
+/** The ids a failed fragment's depends_on names, as a list or a comma string. */
+function fragmentDependsOnIds(fragmentYaml: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(fragmentYaml);
+  } catch {
+    // An unparseable fragment cites nothing: the index keeps the proposal's own ids, and draft-parse reports the YAML.
+    return [];
+  }
+  return (Array.isArray(parsed) ? parsed : [parsed]).flatMap((task) => {
+    const dependsOn = typeof task === "object" && task !== null ? (task as Record<string, unknown>)["depends_on"] : undefined;
+    return (Array.isArray(dependsOn) ? dependsOn : [dependsOn])
+      .flatMap((id) => typeof id === "string" || typeof id === "number" ? String(id).split(/[\s,[\]]+/) : []).filter(Boolean);
+  });
+}
+
+/** W1-T4442 meant a redraft to carry no copy of the first prompt, yet each one repeated it, full index included.
+ *  This index keeps only the rows a redraft can still need, in plan order and row text. */
+function citedDependsOnIndex(proposal: Proposal, rows: readonly ProjectedPlanRow[], fragments: readonly string[]): PlanDependsOnIndex {
+  const keep = new Set([...proposalNamedTaskIds(proposal), ...fragments.flatMap(fragmentDependsOnIds)]);
+  return { text: rows.filter((row) => keep.has(row.id)).map((row) => row.text).join("\n"), omitsLanded: false, cited: true };
+}
+
+/** The failed fragment a relint prompt ends with ({@link inboxDraftRelintPrompt}). */
+function relintPromptFragment(relintPrompt: string): string | undefined {
+  const at = relintPrompt.indexOf(RELINT_FRAGMENT_LABEL);
+  return at < 0 ? undefined : relintPrompt.slice(at + RELINT_FRAGMENT_LABEL.length);
+}
+
+const RELINT_FRAGMENT_LABEL = "\nThe fragment you must fix:\n";
 
 function projectPlanRows(planText: string): ProjectedPlanRow[] {
   let parsed: unknown;
@@ -1995,7 +2034,7 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "depends_on. It is an index, NOT the whole plan: each task shows only id, title, status, type",
     "and depends_on. If you need a task's rationale, design or acceptance, Read plan/tasks.yaml —",
     "you have Read/Grep/Glob and the file is in this worktree. Do not assume a field you cannot see.",
-    ...(planIndex.omitsLanded ? ["This index lists OPEN tasks only, plus any landed task the proposal names:",
+    ...(planIndex.cited ? [CITED_INDEX_LINE, CITED_LANDED_LINE] : planIndex.omitsLanded ? ["This index lists OPEN tasks only, plus any landed task the proposal names:",
       "a dependency on a merged or done task is already satisfied, so leave it out of depends_on."] : []),
     "",
     "=== plan/tasks.yaml INDEX (id, title, status, type, depends_on — for depends_on grounding) ===",
@@ -2356,6 +2395,8 @@ export interface DraftRungDeps {
   /** config.json `inboxDraftTopK`: the shortlist's scored rows under "topk", and the k the recall row measures in
    *  both modes; absent is {@link DEFAULT_DEPENDS_ON_SHORTLIST_K}. */
   topK?: number;
+  /** `state/DRAFT_RETRY_FULL_INDEX` is present: a redraft repeats the first prompt's full index. */
+  retryFullIndex?: boolean;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -2916,11 +2957,19 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       const planIndex = draftPlanIndexFromRows(proposal, rows, deps.indexMode, deps.topK);
       const planIndexChars = planIndex.text.length;
       const initialPrompt = inboxDraftPrompt(proposal, currentPlanText, runId, planIndex);
+      // A redraft is a new session: its prompt is the proposal's own, re-indexed to the rows the failed drafts cite.
+      const retryBase = (fragments: readonly string[]) => {
+        if (deps.retryFullIndex) return { text: initialPrompt, indexChars: planIndexChars, index: "full" as const };
+        const cited = citedDependsOnIndex(proposal, rows, fragments);
+        return { text: inboxDraftPrompt(proposal, currentPlanText, runId, cited), indexChars: cited.text.length, index: "cited" as const };
+      };
       const generation = snapshot?.generation;
       const saved = cashFit ? deps.cashResumes?.[proposal.id] : undefined;
       const resume = saved?.generation === generation ? saved : undefined;
       let dirty: DraftRelint | undefined;
       let prompt = initialPrompt;
+      let promptTail = "";
+      let promptIndex: ReturnType<typeof retryBase> | undefined;
       let parsed: ReturnType<typeof parseDraftedCandidate> = null;
       let violations: DraftLintViolation[] = [];
       // cc71f2 SELF-LINT: draft, lint, and on a blocking violation redraft with the failures in hand, bounded, so a
@@ -2936,7 +2985,10 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         const retry = attempt === 1 ? resume : undefined;
         const cashAttempt = retry?.attempt ?? attempt;
         const cashDirty = retry ? retry.relint : dirty;
-        const cashPrompt = retry && cashDirty ? `${initialPrompt}\n\n${cashDirty.prompt}` : prompt;
+        const cashFragment = retry && cashDirty ? relintPromptFragment(cashDirty.prompt) : undefined;
+        const cashBase = retry && cashDirty ? retryBase(cashFragment === undefined ? [] : [cashFragment]) : undefined;
+        const cashPrompt = cashBase && cashDirty ? `${cashBase.text}\n\n${cashDirty.prompt}` : prompt;
+        const cashIndexChars = cashBase?.indexChars ?? promptIndex?.indexChars ?? planIndexChars;
         const cashAvoidModels = retry ? [...retry.avoidModels] : avoidModels;
         const paidDeployments = [...(retry?.paidDeployments ?? [])];
         const logCashSkip = (skipped: Extract<CashDraftFit, { fits: false }>, expectedRequests: number, promptChars: number) => {
@@ -2945,7 +2997,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
             estimated_usd: skipped.reason === "allowance" ? skipped.estimatedUsd : null,
             left_usd: skipped.reason === "allowance" ? skipped.leftUsd : null, expected_requests: expectedRequests,
             ...(skipped.reason === "allowance" && skipped.leftUsd === null ? { allowance_error: skipped.allowanceError } : {}),
-            prompt_chars: promptChars, plan_index_chars: planIndexChars });
+            prompt_chars: promptChars, plan_index_chars: cashIndexChars });
         };
         let worker: DraftWorkerResult;
         try {
@@ -2986,6 +3038,8 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           attempt = cashAttempt;
           dirty = cashDirty;
           prompt = cashPrompt;
+          promptTail = cashDirty ? `\n\n${cashDirty.prompt}` : "";
+          promptIndex = cashBase;
           avoidModels = cashAvoidModels;
           hasPaidCashWork = true;
         }
@@ -3013,8 +3067,10 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           cost_usd: worker.costUsd,
           subtype: worker.subtype,
           prompt_chars: worker.promptChars ?? prompt.length,
-          plan_index_chars: planIndexChars,
-          ...(planIndex.shortlist ? { plan_index_mode: "topk" } : {}),
+          plan_index_chars: promptIndex?.indexChars ?? planIndexChars,
+          ...(promptIndex ? { retry_index: promptIndex.index } : {}),
+          // A "full" retry repeats the first prompt, so it carries the shortlist whenever the first prompt did.
+          ...(planIndex.shortlist && promptIndex?.index !== "cited" ? { plan_index_mode: "topk" } : {}),
           num_turns: worker.numTurns,
           ...workerLedgerFields(worker),
         });
@@ -3030,13 +3086,18 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           if (from !== null && !avoidModels.includes(from)) avoidModels.push(from);
           dirty = { from, violations: violations.map((v) => v.message),
             prompt: inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations) };
-          prompt = `${initialPrompt}\n\n${dirty.prompt}`;
+          promptIndex = retryBase([parsed.fragmentYaml]);
+          promptTail = `\n\n${dirty.prompt}`;
+          prompt = `${promptIndex.text}${promptTail}`;
         }
       }
       if (deps.escalate && (unreadableCash || (lastWorker && !lastWorker.usageRefusal && (!parsed || violations.length > 0)))) {
         const reason = unreadableCash ? "allowance-unreadable" : parsed ? "dirty-lint" : "fragment-contract";
+        // With no failed fragment there is nothing cited: the escalation keeps the prompt as it stands.
+        const tailFragment = relintPromptFragment(promptTail);
+        const escalationIndex = parsed ? retryBase([...(tailFragment === undefined ? [] : [tailFragment]), parsed.fragmentYaml]) : promptIndex;
         const escalationPrompt = parsed
-          ? `${prompt}\n\n${inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)}`
+          ? `${escalationIndex!.text}${promptTail}\n\n${inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)}`
           : `${prompt}\n\nThe cash draft missed the fragment contract. Re-emit the complete fragment and STAMP using the literal markers in the prompt.`;
         try {
           const escalate = deps.escalate;
@@ -3056,8 +3117,9 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
               cost_usd: escalated.costUsd,
               subtype: escalated.subtype,
               prompt_chars: escalated.promptChars ?? escalationPrompt.length,
-              plan_index_chars: planIndexChars,
-              ...(planIndex.shortlist ? { plan_index_mode: "topk" } : {}),
+              plan_index_chars: escalationIndex?.indexChars ?? planIndexChars,
+              retry_index: escalationIndex?.index ?? "full",
+              ...(planIndex.shortlist && escalationIndex?.index !== "cited" ? { plan_index_mode: "topk" } : {}),
               num_turns: escalated.numTurns,
               ...workerLedgerFields(escalated),
             });

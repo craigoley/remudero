@@ -2359,6 +2359,19 @@ To turn the reuse off, create `state/CI_JUDGE_REUSE_OFF`; every changed head is 
 The full-floor skip has no switch of its own: a full floor runs everything whatever the judge says.
 `state/CI_JUDGE_OFF` still turns the whole judge off and wins over both.
 
+### An inbox redraft carries a cited depends_on index
+
+The first draft of a proposal carries the depends_on index of every open task in `plan/tasks.yaml`.
+A redraft is a new session, so it pays for its whole prompt again. A relint retry, the escalation
+after a dirty draft, and a cash resume of a relint therefore carry a cited index instead. It lists
+only the tasks the failed fragment's `depends_on` names and the tasks the proposal names, and it
+tells the worker to Grep `plan/tasks.yaml` for any other dependency. The relint text follows it as
+before. Each `inbox.draft_synthesized` row of a redraft has `retry_index: "cited"` or `"full"`, and
+its `plan_index_chars` counts the index that prompt actually carried.
+
+To send the full index on every redraft again, create `state/DRAFT_RETRY_FULL_INDEX`. The next
+draft batch reads it; delete the file to return to the cited index.
+
 ### One fleet cash cap across core, site, and console
 
 The shared cash allowance is opt-in and requires a stopped-writer migration. Until it is
