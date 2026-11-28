@@ -31,7 +31,7 @@ import { loadConfig, type Config, type WorkerProviderId } from "./config.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import {
-  escalationBodyInLegacyOrder, escalationHeadSha, ghIssueGatewayAsync, prReferentFromIssueText, splitConcatenatedJsonPages,
+  escalationBodyInLegacyOrder, escalationHeadSha, escalationIssueRepository, ghIssueGatewayAsync, hostEscalationDestination, pooledIssueIsCodeRepositorys, prReferentFromIssueText, recordsAnotherCodeRepository, splitConcatenatedJsonPages,
   type AsyncIssueGateway,
 } from "./escalate.js";
 import { feedbackCaptured, stageFeedbackCapture } from "./feedback.js";
@@ -511,7 +511,7 @@ const TERMINAL_RULE_CLASSES = new Set(["BLOCKED", "MANUAL"]);
  *  its task is `PR-<n>`; it says `PR <url> needs a clarification` and every pull URL it names is that one, in this
  *  repository; or it carries `<!-- Strike-Ladder-PR: <n> -->` markers for a single PR. A GRILL, or any other
  *  shape, is `undefined`. */
-export function terminalRulePr(issue: Pick<RevalidationIssue, "url" | "title" | "body">): number | undefined {
+export function terminalRulePr(issue: Pick<RevalidationIssue, "url" | "title" | "body">, codeRepository?: string): number | undefined {
   const cls = issueEscalationClass(issue);
   const body = fieldsFirstBody(issue);
   const strike = [...new Set([...body.matchAll(STRIKE_LADDER_PR_RE)].map((m) => Number(m[1])))];
@@ -519,7 +519,8 @@ export function terminalRulePr(issue: Pick<RevalidationIssue, "url" | "title" | 
   if (!TERMINAL_RULE_CLASSES.has(cls)) return undefined;
   const task = /^PR-(\d+)$/.exec(issueTaskId(issue) ?? "");
   if (task) return Number(task[1]);
-  const repo = /github\.com\/([^/]+\/[^/]+)\/issues\//i.exec(issue.url)?.[1]?.toLowerCase();
+  // W1-T14998: the pull request is on the code repository, which a privately filed issue no longer names.
+  const repo = (codeRepository ?? /github\.com\/([^/]+\/[^/]+)\/issues\//i.exec(issue.url)?.[1])?.toLowerCase();
   const text = `${issue.title}\n${body}`;
   const asked = CLARIFICATION_PR_RE.exec(text);
   if (asked && `${asked[1]}/${asked[2]}`.toLowerCase() === repo) {
@@ -717,6 +718,9 @@ export interface IssueRevalidationPorts {
   /** W1-T13220: one pull request's state and when it ended, in this repository. THROWS on a failed read.
    *  Absent, no terminal-PR rule runs. */
   pullState?: (prNumber: number) => Promise<PullStateFact>;
+  /** W1-T14998: `<owner>/<name>` of the code repository {@link pullState} reads, where an escalation's pull request
+   *  lives. Absent, the repository the issue's own URL names. */
+  codeRepository?: string;
   /** W1-T13220: a plan task's shard on origin/main and whether it is done, merged or retired, with the commit
    *  that set it. `undefined` when no single shard names the task. THROWS on a failed read. Absent, no
    *  terminal-task rule runs. */
@@ -858,7 +862,7 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
   /** W1-T13220: a deterministic terminal-referent resolution, or `undefined` when no rule decides the issue.
    *  A failed read decides nothing, so the issue takes the path it took before. */
   const terminalReferent = async (issue: RevalidationIssue): Promise<RevalidationVerdict | undefined> => {
-    const pr = terminalRulePr(issue);
+    const pr = terminalRulePr(issue, ports.codeRepository);
     if (pr !== undefined && ports.pullState && pullReads < MAX_TERMINAL_PR_READS_PER_PASS) {
       pullReads++;
       try {
@@ -1278,6 +1282,11 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
     return read.rows;
   });
   const repoArg = `${opts.owner}/${opts.repo}`;
+  // W1-T14998: escalation issues are listed and read where they are filed; pull requests stay on the code repository.
+  const destination = hostEscalationDestination();
+  const [issueOwner, issueRepo] = escalationIssueRepository(opts.owner, opts.repo, () => destination);
+  // A configured escalation repository is a pool other code repositories file in, even when it is this one.
+  const pooled = destination.outcome === "named";
   const sinceIso = () => fixedClock(clock.now() - ISSUE_REVALIDATION_LEDGER_WINDOW_MS).iso();
   let ownRows: Array<Record<string, unknown>> | undefined;
   const rows = () => (ownRows ??= readLedgerRows([ISSUE_REVALIDATION_VERDICT_STEP, "read_model.consistency"], sinceIso()));
@@ -1291,14 +1300,19 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
     clock,
     log: opts.log,
     listOpenIssues: async () => {
-      listed = parseOpenIssuesRest(await readText(openIssuesRestArgs(opts.owner, opts.repo)));
+      // W1-T14998: from a pool this garden judges (and closes) only the issues that record this code repository, or
+      // record none and live in it; unrouted, its own repository's issues as before, less another's recorded ones.
+      listed = parseOpenIssuesRest(await readText(openIssuesRestArgs(issueOwner, issueRepo)))
+        .filter((issue) => pooled ? pooledIssueIsCodeRepositorys(issue, repoArg, `${issueOwner}/${issueRepo}`)
+          : !recordsAnotherCodeRepository(issue.body, repoArg));
       stepRows = undefined;
       commits = undefined;
       shardList = undefined;
       return listed;
     },
-    listComments: async (n) => parseIssueCommentsRest(await readText(["api", `repos/${repoArg}/issues/${n}/comments?per_page=100`, "--paginate"])),
+    listComments: async (n) => parseIssueCommentsRest(await readText(["api", `repos/${issueOwner}/${issueRepo}/issues/${n}/comments?per_page=100`, "--paginate"])),
     answeredOrigins: () => readAnsweredCommentOrigins(opts.repoRoot),
+    codeRepository: repoArg,
     pullState: async (n) => pullStateFromRest(await readText(["api", `repos/${repoArg}/pulls/${n}`, "--jq", "{state: .state, merged_at: .merged_at, closed_at: .closed_at}"])),
     // One tree listing per pass, however many BLOCKED issues ask for a shard.
     planTaskState: (taskId) => planTaskStateAtOriginMain((args) => (args[0] === "ls-tree" ? (shardList ??= runGit(args)) : runGit(args)), taskId,
@@ -1322,7 +1336,7 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
       }
     },
     readModelVerdict: (taskId) => readModelVerdictFromRows(taskId, rows()),
-    priorVerdicts: () => priorVerdictsFromRows(rows().filter((r) => verdictRowNamesRepository(r, repoArg, opts.managedTarget === true))),
+    priorVerdicts: () => priorVerdictsFromRows(rows().filter((r) => verdictRowNamesRepository(r, `${issueOwner}/${issueRepo}`, opts.managedTarget === true))),
     evidence: (issue) => {
       const facts: string[] = [];
       for (const name of evidenceNames(issue)) {

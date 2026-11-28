@@ -11,6 +11,8 @@ import type { Plan } from "../src/lib/plan.js";
 import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { capStrikeLadderNote, decideStrikeLadderRung, hasUnspentLadderRefresh, latestStrikeLadderAttempt, strikeCauseKey } from "../src/lib/strike-ladder.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for acme/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "acme/remudero";
 
 const NOW = Date.now();
 const stamp = (offset = 0) => new Date(NOW + offset).toISOString();

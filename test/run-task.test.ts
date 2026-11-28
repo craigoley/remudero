@@ -8360,6 +8360,8 @@ test("buildSweepLightHook: an internal failure (malformed gh output) is caught +
 
 // ── W1-T255: serviceFreshnessGate — assess + ledger, NEVER refuse/exit/re-exec ───────────────
 import type { ServiceFreshness } from "../src/lib/self-sync.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for acme/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "acme/remudero";
 
 function readSteps(ledgerPath: string): string[] {
   if (!existsSync(ledgerPath)) return [];
