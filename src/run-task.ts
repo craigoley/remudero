@@ -155,6 +155,7 @@ import { createIndexedLifetimeAccounting, tallyAuditedLifetimeDispatches, type L
 import { defaultCreditOverridePath, planCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
   type CreditOverrideRow, type CreditReadState, type CreditStore, type ProjectPlanPhases } from "./lib/status.js";
 import type { DependencyMergeEvidence } from "./lib/plan.js";
+import { workerAssignmentTracker } from "./lib/non-worker-verdict.js";
 export { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import {
   GitFetchError, PLAN_SYNC_GIT_TIMEOUT_MS, PlanSyncGitTimeoutError, createPlanRevisionStore,
@@ -429,7 +430,7 @@ import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type Kn
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
 import { KNOWLEDGE_MEASURED_STEP } from "./lib/knowledge-gaps.js";
-import { buildInboxVerbActions, inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
+import { buildInboxVerbActions, inboxThreadStorePath, ratifyCliGateway, readAskTaskPlan, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
 import { realThreadDecider, type ThreadDecisionContext } from "./lib/inbox-responder.js";
 import { realRecommendationWriter } from "./lib/inbox-recommendation.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
@@ -945,7 +946,7 @@ import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
 import { inboxVerbCommand, inboxVerbHelp, type InboxVerbActions, type InboxVerbName } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
-import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
+import { adoptPlanSource, planSourceFailed, planSourceLoaded, readBoardCatalogs, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
 import { planFilesIdentity } from "./lib/thread-plan.js";
 import {
   buildReadyServeServer,
@@ -1128,7 +1129,8 @@ import {
   commitInboxDraftOutcomes,
   readDraftCashResumes,
   parseDraftedCandidate,
-  lintDraftedFragment,
+  lintDraftedFragmentWithRepair,
+  composeDraftStamp,
   stageBundleProposals,
   summarizeInboxPoll,
   updateProposalRegistry,
@@ -1160,6 +1162,7 @@ import {
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
 import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
+import { draftAutofixOff } from "./lib/draft-repair.js";
 import { learnedBakeoffLimit, renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
 import type { DeployedModel, DeploymentBakeoffCandidate, JudgeReplayOutcome } from "./lib/bakeoff-trigger.js";
 import { judgeReplayKey, judgeShadowAutoRoles, judgeShadowReplayCorpus } from "./lib/judge-shadow.js";
@@ -10896,8 +10899,10 @@ export function predecessorTranscriptPromptLines(paths: readonly string[]): stri
 export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<string, unknown>) => void,
   stackEvidence: BenchmarkStackEvidence = {}, initialWork: BenchmarkWorkInput = {}) {
   const assignments = new Set<string>();
+  const ownRows = workerAssignmentTracker(); // W1-T12154: a verdict with no worker assigned says so, and where
   let work = initialWork;
-  return (step: string, extra: Record<string, unknown> = {}): void => {
+  return (step: string, rawExtra: Record<string, unknown> = {}): void => {
+    const extra = step === "verdict" ? { ...rawExtra, ...ownRows.verdictFields(rawExtra) } : rawExtra;
     work = observeBenchmarkWork(work, step, extra);
     let fields: Record<string, unknown>;
     let durableAssignmentId: string | undefined;
@@ -10934,6 +10939,7 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
       write(step, fields);
       if (durableAssignmentId) assignments.add(durableAssignmentId);
     }
+    ownRows.written(step, extra);
   };
 }
 
@@ -37929,12 +37935,14 @@ export function buildInboxDraftSpawnArgs(args: {
       paidCashDeployments: args.paidCashDeployments,
       cashAvoidModels: cashRetry?.avoidModels,
       evaluate: (worker: WorkerResult) => withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, registryRecord), () => {
-        const parsed = parseDraftedCandidate(workerTranscript(worker), args.proposal, args.currentPlanText);
+        const raw = parseDraftedCandidate(workerTranscript(worker), args.proposal, args.currentPlanText);
+        // The rung composes the STAMP, then repairs before it judges, so an answer it would cache clean is clean here
+        // too and buys no fallback.
+        const parsed = raw === null ? null : composeDraftStamp(args.proposalId!, raw);
         const facts = checkoutRepoFacts(args.cwd);
         return { contractFailed: parsed === null,
-          clean: parsed !== null && (parsed.releaseTaskId !== undefined || lintDraftedFragment(parsed.fragmentYaml,
-            args.proposalId!, parsed.stampLine, undefined, facts.moduleExists, facts.readGrepProofFile,
-            facts.pathIsDirectory, facts.pathExistsAtBase).length === 0) };
+          clean: parsed !== null && (parsed.releaseTaskId !== undefined || lintDraftedFragmentWithRepair(parsed.fragmentYaml,
+            args.proposalId!, parsed.stampLine, facts, !draftAutofixOff(join(args.config.root, "state"))).violations.length === 0) };
       }),
     } } : {}),
   };
@@ -38129,6 +38137,7 @@ export async function draftProposalBatch(
         } : {}),
         cashFit: input => cashDraftFit(config, input),
         cashResumes,
+        draftAutofix: !draftAutofixOff(join(config.root, "state")),
         retryFullIndex: existsSync(join(config.root, "state", DRAFT_RETRY_FULL_INDEX_FILE)),
         log,
       },
@@ -38297,7 +38306,9 @@ function createInboxBakeoffReplay(
           return next;
         };
       };
-      const rows = await replay({ proposals, planText, spawnFor, candidates, learnedLimit: learnedBakeoffLimit(config), log: (step, extra = {}) => {
+      const rows = await replay({ proposals, planText, spawnFor, candidates, learnedLimit: learnedBakeoffLimit(config),
+        draftAutofix: !draftAutofixOff(join(config.root, "state")),
+        retryFullIndex: existsSync(join(config.root, "state", DRAFT_RETRY_FULL_INDEX_FILE)), log: (step, extra = {}) => {
         const candidate = candidates?.find((candidate) => candidate.id === extra.candidate);
         const refusal = refusals.get(String(extra.candidate));
         log(step, { ...extra, ...(candidate ? { model: candidate.model } : {}),
@@ -38784,7 +38795,8 @@ export async function improvementActionCommand(rest: string[], deps: Partial<typ
   return "kind" in result && ["completed", "waiting"].includes(result.state) ? 0 : 1;
 }
 
-export async function inboxCommand(rest: string[], deps: { config?: Config; github?: GitHub; draftBatch?: typeof draftProposalBatch } = {}): Promise<number> {
+export async function inboxCommand(rest: string[], deps: { config?: Config; github?: GitHub; draftBatch?: typeof draftProposalBatch;
+  readInboxCatalog?: PanelGraphDeps["readInboxCatalog"] } = {}): Promise<number> {
   const badArg = unknownArgError("inbox", rest, [], ["--dry-run"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -38835,7 +38847,9 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   }
 
   const deriveDeps: DeriveDeps = { ledgerPath, github: deps.github ?? buildBatchedGithub(owner, repo) };
-  const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
+  // W1-T15105: an ask for an ops-catalog task is judged on that task, as serve's Inbox judges it.
+  const askPlan = await readAskTaskPlan(plan, proposals, dirname(ledgerPath), deps.readInboxCatalog);
+  const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(askPlan, deriveDeps);
   const openProposalIds = new Set(proposals.map((p) => p.id));
   // W1-T190: re-derive "already ratified" from the ledger on every `rmd inbox` pass, never
   // from the registry's own state — a proposal ratify.approved already fired for is reported
@@ -38845,14 +38859,14 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   const classifications = proposals.map((p) =>
     classifyProposal(p, drafts[p.id], {
       retirement: lifecycleContext,
-      plan,
+      plan: askPlan,
       isMerged,
       depsUnobservable,
       grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
       openProposalIds,
       isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
       isDeclined: declinedWithReceipts(ledgerLinesForRatify, join(config.root, "state")),
-      isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLinesForRatify),
+      isReleasedHumanTask: releasedHumanTaskPredicate(askPlan, ledgerLinesForRatify),
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
@@ -38907,6 +38921,7 @@ function loadProposalForRatify(
   repo: string,
   config: Config,
   inboxRoot = config.root,
+  github?: GitHub,
 ): { proposal: Proposal | undefined; proposals: Proposal[]; drafts: DraftCache; draftsPath: string; classification?: InboxClassification } {
   const registryPath = join(inboxRoot, "state", "inbox-proposals.json");
   const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
@@ -38917,7 +38932,7 @@ function loadProposalForRatify(
 
   if (!proposal) return { proposal: undefined, proposals, drafts, draftsPath };
 
-  const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
+  const deriveDeps: DeriveDeps = { ledgerPath, github: github ?? ghGateway(owner, repo) };
   const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
   // W1-T190: read the ledger ONCE here and cross-check it, never the registry's own copy of
   // "is this ratified" (there isn't one) — a proposal the ledger already carries
@@ -40403,6 +40418,10 @@ export async function approveCommand(
     reviewedImprovement?: { goalDigest: string; draftDigest: string };
     /** W1-T13386: how the release path reads the ops catalog (default: the host's own transport). */
     taskLookup?: TaskLookupOptions;
+    /** W1-T15105: how an ask's ops-catalog task is read (default: the board catalog read serve's approve uses). */
+    readInboxCatalog?: PanelGraphDeps["readInboxCatalog"];
+    /** Status gateway for the same live facts used to classify the named proposal. */
+    github?: GitHub;
   } = {},
 ): Promise<number> {
   const proposalId = rest[0];
@@ -40491,14 +40510,21 @@ export async function approveCommand(
   }
 
   const config = deps.config ?? loadConfig();
-  const plan = loadPlan(planPath);
   const inboxRoot = deps.inboxRoot ?? config.root;
   const ledgerPath = deps.inboxLedgerPath ?? ledgerPathFor(config);
   const registryPath = join(inboxRoot, "state", "inbox-proposals.json");
+  // W1-T15105: serve's Approve spawns this path, so it judges an ops-catalog task's ask as serve did.
+  // The whole registry composes the plan, as the Inbox's does; only this ask decides whether the catalog is read.
+  const registry = parseProposalRegistry(readFileIfExists(registryPath));
+  const catalogState = dirname(ledgerPathFor(config));
+  const publicPlan = loadPlan(planPath);
+  const plan = await readAskTaskPlan(publicPlan, registry, catalogState,
+    deps.readInboxCatalog ?? ((pub) => readBoardCatalogs(pub, catalogState, deps.taskLookup?.api)),
+    registry.filter(p => p.id === proposalId));
   const { owner, repo } = proposalPlan.target ?? resolveOwnerRepo();
   const registryIntent = selectedRegistryIntentForConfig(config);
 
-  const { proposal, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config, inboxRoot);
+  const { proposal, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config, inboxRoot, deps.github);
   if (!proposal || !classification) {
     console.error(`rmd approve: unknown proposal '${proposalId}' — not in the ACTIVE registry (state/inbox-proposals.json)`);
     return 2;
@@ -40511,7 +40537,7 @@ export async function approveCommand(
 
   if (classification.state === "ready" && classification.releaseTaskId) {
     const code = await approveCommand([classification.releaseTaskId], deps);
-    if (code === 0 && releasedTaskIds(readLedgerRawLines(ledgerPath), loadPlan(planPath)).has(classification.releaseTaskId)) {
+    if (code === 0 && releasedTaskIds(readLedgerRawLines(ledgerPath), plan).has(classification.releaseTaskId)) {
       appendLedger(ledgerPath, { run_id: `APPROVE-${proposalId}`, task_id: proposalId,
         step: "ratify.approved", release_task_id: classification.releaseTaskId });
       approveNoteChain(rest, proposalId, config, deps);
@@ -40522,7 +40548,7 @@ export async function approveCommand(
   // W1-T12214: the repository this approval files its task file in. Skill approvals stay in the public repository.
   const publicFiling = { owner, repo, checkoutDir: join(config.root, "repos", repo), destination: false };
   const filing = deps.gateway === undefined && classification.state === "ready" && classification.draft && !classification.skillFile
-    ? await approveFilingRepository([classification.draft.fragmentYaml], plan, join(config.root, "state"), publicFiling) : publicFiling;
+    ? await approveFilingRepository([classification.draft.fragmentYaml], publicPlan, join(config.root, "state"), publicFiling) : publicFiling;
   if ("refused" in filing) {
     console.error(`rmd approve: refusing ${proposalId} — ${filing.refused}`);
     return 1;

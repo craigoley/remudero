@@ -93,7 +93,7 @@ export function thresholdFor(threshold: JudgeThreshold | undefined, model: strin
 
 /** What one shadow call came to. `refused` is a capacity or budget refusal; nothing is acted on in any case. */
 export type JudgeShadowOutcome =
-  | { kind: "paired"; agreement: boolean }
+  | { kind: "paired"; agreement: boolean | null }
   | { kind: "refused"; refusal: "capacity" | "budget"; reason: string }
   | { kind: "unavailable"; reason: string }
   | { kind: "skipped" }
@@ -235,8 +235,10 @@ export async function runJudgeShadow<T>(request: JudgeShadowRequest<T>): Promise
     record("judge_shadow.unavailable", { ...ask.spend, reason: ask.reason });
     return { kind: "unavailable", reason: ask.reason };
   }
-  record("judge_shadow.paired", { ...ask.spend, shadow_verdict: ask.verdict, agreement: ask.agreement });
-  return { kind: "paired", agreement: ask.agreement };
+  const unanswered = ask.primaryKey === null;
+  record("judge_shadow.paired", { ...ask.spend, shadow_verdict: ask.verdict,
+    agreement: unanswered ? null : ask.agreement, ...(unanswered ? { primary_unanswered: true } : {}) });
+  return { kind: "paired", agreement: unanswered ? null : ask.agreement };
 }
 
 // ── W1-T12187: the risk judge and the decision summary ──────────────────────────────────────
@@ -317,8 +319,10 @@ export async function shadowJudgeCall<T>(call: ShadowJudgeCall<T>): Promise<void
   const ask = await askShadow<T>({ spawn: call.spawn, parse: call.parse, primaryVerdict: call.primaryAnswer, agreementKey: keyed ?? (() => "") }, args);
   const shadow = { shadow_model: ask.spend?.served_model ?? null, shadow_cost_usd: ask.spend?.cost_usd ?? null };
   if (ask.kind === "answered") {
+    const unanswered = ask.primaryKey === null;
     record("judge_shadow.compared", { ...shadow,
-      ...(keyed === undefined ? { parses: true } : { primary_answer: ask.primaryKey, shadow_answer: ask.shadowKey, agreement: ask.agreement }) });
+      ...(keyed === undefined ? { parses: true } : { primary_answer: ask.primaryKey, shadow_answer: ask.shadowKey,
+        agreement: unanswered ? null : ask.agreement, ...(unanswered ? { primary_unanswered: true } : {}) }) });
   } else if (ask.kind === "unavailable" && ask.unparseable && keyed === undefined) {
     record("judge_shadow.compared", { ...shadow, parses: false, reason: ask.reason });
   } else {
@@ -439,8 +443,10 @@ function decisionShadowRow(row: DecisionAnsweredRow, primaryAnswer: string | nul
     return ["judge_shadow.skipped", { ...spend, ...tuned, distribution, abstained: "below-threshold",
       reason: `abstained (the top option ${top.option} has ${top.probability.toFixed(3)}, below the threshold ${threshold})` }];
   }
+  // W1-T15164: a primary that gave no answer is no disagreement; the row says so and records no agreement.
+  const compared = primaryAnswer === null ? { agreement: null, primary_unanswered: true } : { agreement: primaryAnswer === top.option };
   return ["judge_shadow.compared", { ...spend, ...tuned, distribution, primary_answer: primaryAnswer, shadow_answer: top.option,
-    agreement: primaryAnswer === top.option, ...(answer.cannotTell === undefined ? {} : { cannot_tell: answer.cannotTell }) }];
+    ...compared, ...(answer.cannotTell === undefined ? {} : { cannot_tell: answer.cannotTell }) }];
 }
 
 /** Every step {@link judgeShadowSummary} reads: this task's two and the three of W1-T11075. */
@@ -453,6 +459,8 @@ export interface JudgeShadowRoleSummary {
   role: string;
   /** Shadow calls that gave a usable answer beside the primary's. */
   paired: number;
+  /** Usable shadow answers whose primary gave no answer; excluded from `paired` and agreement. */
+  primaryUnanswered?: number;
   /** Of the paired calls that record agreement, the share that agree. `null` for a role that records none. */
   agreeShare: number | null;
   /** Of the shadow requests made, the share that failed or gave no usable answer. A cap refusal made no request. */
@@ -470,21 +478,30 @@ function median(values: number[]): number | null {
   return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
 }
 
+/** Older rows predate the marker but encode a missing primary answer as null. */
+function isPrimaryUnansweredShadowRow(row: Record<string, unknown>): boolean {
+  if (row.primary_unanswered === true) return true;
+  return (row.step === "judge_shadow.compared" && row.primary_answer === null &&
+      (typeof row.shadow_answer === "string" || (row.model_surface === "decisions" && Array.isArray(row.distribution)))) ||
+    (row.step === "judge_shadow.paired" && row.primary_verdict === null && row.shadow_verdict !== undefined);
+}
+
 /** The shadow record of each role in `rows`, from `sinceMs` on when it is given. A refused, failed or unusable
- *  shadow call is never counted as paired or as agreement. */
+ *  shadow call is never counted as paired or as agreement. A usable answer with no primary answer is counted apart. */
 export function judgeShadowSummary(rows: ReadonlyArray<Record<string, unknown>>, sinceMs?: number): JudgeShadowRoleSummary[] {
-  const byRole = new Map<string, { paired: number; judged: number; agreed: number; noAnswer: number; refused: number; primary: number[]; shadow: number[] }>();
+  const byRole = new Map<string, { paired: number; primaryUnanswered: number; judged: number; agreed: number; noAnswer: number; refused: number; primary: number[]; shadow: number[] }>();
   for (const row of rows) {
     const role = row.role ?? row.surface;
     if (typeof row.step !== "string" || !JUDGE_SHADOW_STEPS.includes(row.step) || typeof role !== "string") continue;
     if (sinceMs !== undefined && !(Date.parse(String(row.ts)) >= sinceMs)) continue;
-    const tally = byRole.get(role) ?? { paired: 0, judged: 0, agreed: 0, noAnswer: 0, refused: 0, primary: [], shadow: [] };
+    const tally = byRole.get(role) ?? { paired: 0, primaryUnanswered: 0, judged: 0, agreed: 0, noAnswer: 0, refused: 0, primary: [], shadow: [] };
     byRole.set(role, tally);
     const shadowCost = row.shadow_cost_usd ?? row.cost_usd;
     if (typeof shadowCost === "number") tally.shadow.push(shadowCost);
     if (typeof row.primary_cost_usd === "number") tally.primary.push(row.primary_cost_usd);
     if (row.step === "judge_shadow.refused" || row.refusal !== undefined) tally.refused += 1;
     else if (row.step === "judge_shadow.skipped" || row.step === "judge_shadow.unavailable" || row.parses === false) tally.noAnswer += 1;
+    else if (isPrimaryUnansweredShadowRow(row)) tally.primaryUnanswered += 1;
     else {
       tally.paired += 1;
       if (typeof row.agreement === "boolean") {
@@ -494,9 +511,9 @@ export function judgeShadowSummary(rows: ReadonlyArray<Record<string, unknown>>,
     }
   }
   return [...byRole].sort(([a], [b]) => a.localeCompare(b)).map(([role, t]) => ({
-    role, paired: t.paired,
+    role, paired: t.paired, ...(t.primaryUnanswered > 0 ? { primaryUnanswered: t.primaryUnanswered } : {}),
     agreeShare: t.judged === 0 ? null : t.agreed / t.judged,
-    noAnswerShare: t.paired + t.noAnswer === 0 ? null : t.noAnswer / (t.paired + t.noAnswer),
+    noAnswerShare: t.paired + t.primaryUnanswered + t.noAnswer === 0 ? null : t.noAnswer / (t.paired + t.primaryUnanswered + t.noAnswer),
     refused: t.refused,
     primaryMedianCostUsd: median(t.primary), shadowMedianCostUsd: median(t.shadow),
   }));

@@ -46,8 +46,9 @@ import type { DigestCadenceRunResult } from "./digest.js";
 import type { LedgerCompactionDecision, LedgerCompactionOutcome } from "./ledger-compaction-rung.js";
 import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
 import {
-  DETACHED_WORK_KINDS, detachedWorkPlacement, measureDrainCosts, planSha, priorChildPlacements, runChildOutsideKill,
+  abortRunChild, DETACHED_WORK_KINDS, detachedWorkPlacement, measureDrainCosts, planSha, priorChildPlacements, runChildOutsideKill,
   type AdoptedRunChild, type DetachedWorkEvidence, type DetachedWorkKind, type DetachedWorkMode, type RunChildHandle, type RunChildPending,
+  RUN_CHILD_ABORT_STEP, RUN_CHILD_SPAWNED_STEP, type AbortRunChildPorts,
 } from "./run-child.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
@@ -148,6 +149,7 @@ import {
   runningReviewLaneIds,
   restartDrainInventory,
   directMergeRestartItem,
+  markChildWorkShed,
   type RestartDrainInventoryEntry,
 } from "./sweep.js";
 import {
@@ -201,7 +203,10 @@ import { defaultLaneGovernorPorts, DISPATCH_LANE_CPU_CLASS, initialLaneCpuLearne
 import type { LaneGovernorMode } from "./policy.js";
 import {
   createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, quantileOf, reclaimBeforeMemoryRestart, reclaimLedgerFields, type DaemonMemoryGovernor, type HeapShadowOptions,
+  decideContainerShed, readContainerShedReading, MEMORY_SHED_HELD_STEP, MEMORY_SHED_STEP,
+  type ContainerShedDecision, type ContainerShedEndOutcome, type ContainerShedEntry, type ContainerShedEpisode, type ContainerShedReading,
 } from "./daemon-memory-policy.js";
+import { SWAP_STALL_HISTORY_MS } from "./host-memory-shadow.js";
 import {
   IDLE_LANE_SUMMARY_WINDOW_MS,
   accountIdleLaneMinutes,
@@ -493,7 +498,9 @@ export const RESTART_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60_000;
  *  it carries the settled full passes too, so the sweep-bound seed survives a restart (W1-T9632). */
 /** The steps {@link readRestartHistoryLines} reads; a standby's rotation cache keys its warm read by the same list (W1-T14635). */
 export const RESTART_HISTORY_STEPS: readonly string[] = ["run.start", "verdict", "pr.opened", "run.phase", "recon.done", "implement.done",
-  "implement.unfinished", "fallback_push.cause", SWEEP_SETTLED_STEP];
+  "implement.unfinished", "fallback_push.cause", SWEEP_SETTLED_STEP,
+  // W1-T15181: an adopted run child's spawn time and a shed signalled before the boot.
+  "run_child.spawned", "run_child.abort"];
 export function readRestartHistoryLines(stateDir: string, nowMs = systemClock.now(),
   rotationRecords?: LedgerRotationHook): readonly string[] {
   const read = readLedgerUnionRecordsSync(stateDir, {
@@ -1615,6 +1622,8 @@ export interface DaemonDeps {
   refreshMergedForRefill?: (plan?: Plan) => Promise<MergedSet>;
   /** W1-T14644: where the last refreshMerged read's projection spent its time, handed over once; undefined when it measured nothing. */
   takeRefreshMergedPhases?: () => ProjectPlanPhases | undefined;
+  /** W1-T14883: that read's own stage timings in ms, handed over once beside the phases. */
+  takeTickReadStages?: () => Readonly<Record<string, number>> | undefined;
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
     sync_spawn_top?: unknown[] }) & { takeLagInterval?: (consumer?: string) => { top: unknown; sync_spawn_ms: number;
       by_caller?: unknown[]; unnamed_ms?: number; // W1-T9577: the interval's callers by total, and the rest
@@ -1626,6 +1635,11 @@ export interface DaemonDeps {
    *  W1-T7092: `afterRow` starts the worker-thread heap read once the row is written; the tick never
    *  awaits it, and the NEXT row's fields carry what it found. */
   readMemoryTelemetry?: (() => Record<string, unknown>) & { afterRow?: () => void };
+  /** W1-T15181: the container-shed rung each in-flight tick consults; absent, one over this process's own cgroup and the
+   *  sweep's run children, ended through abortRunChild under `fleetLane.stateDir`. A test seam. */
+  containerShed?: ContainerShedRung;
+  /** W1-T15181: the default rung's reader, state directory and abort signals. Test seams; production sets none. */
+  containerShedSeams?: { read?: ContainerShedPorts["read"]; stateDir?: string; abort?: ContainerShedAbortPorts };
   /** W1-T8883: the heap-ceiling shadow's heap reading and process id; absent, this process's own. A test seam. */
   heapShadowSeams?: Pick<HeapShadowOptions, "snapshot" | "pid">;
   /** Report-only observer; null disables it. The state directory supplies the production store. */
@@ -2462,6 +2476,7 @@ function dispatchSelectionTiming(
   let measuredMs = 0;
   let candidatesExamined = 0;
   let refreshMergedPhases: ProjectPlanPhases | undefined;
+  let tickReadStages: Readonly<Record<string, number>> | undefined;
   const elapsed = (since: number) => Math.max(0, clock.now() - since);
   const probe = <T>(name: string, read: () => T): T => {
     if (log === undefined) return read();
@@ -2490,6 +2505,7 @@ function dispatchSelectionTiming(
     wrap,
     /** W1-T14644: the refreshMerged probe's phases, written beside its total; undefined adds nothing. */
     noteRefreshMergedPhases(phases: ProjectPlanPhases | undefined) { if (log !== undefined) refreshMergedPhases = phases; },
+    noteTickReadStages(stages: Readonly<Record<string, number>> | undefined) { if (log !== undefined) tickReadStages = stages; },
     selectionInputs(plan: Plan, isMerged: MergedSet, limit: number, opts: NextRunnableOpts) {
       if (log === undefined || limit <= 0) return { isMerged, opts, finish: () => {} };
       const started = clock.now();
@@ -2525,6 +2541,7 @@ function dispatchSelectionTiming(
         log?.("dispatch.selection_timing", {
           site, total_ms: elapsed(startedAt), candidates_examined: candidatesExamined, probe_ms: { ...probeMs },
           ...(refreshMergedPhases ? { refresh_merged_phases: refreshMergedPhases } : {}),
+          ...(tickReadStages ? { tick_read_stages_ms: tickReadStages } : {}),
         });
       } catch (error) { void error; /* A timing row is best-effort and cannot hold a lane. */ }
     },
@@ -2909,6 +2926,114 @@ export function takeSyncSpawn(deps: Pick<DaemonDeps, "readLoopTelemetry">, consu
       syncSpawnByCaller: taken.by_caller, syncSpawnUnnamedMs: taken.unnamed_ms,
       asyncSpawnSyncMs: taken.async_spawn_sync_ms, asyncSpawnByCaller: taken.async_by_caller };
   } catch { return {}; /* Reason: observability only. */ }
+}
+
+/** W1-T15181 — the container-shed rung: the history and the episode for this boot, around the pure decision. */
+export interface ContainerShedRung {
+  tick(atMs: number, missedTicks: number | undefined): ContainerShedDecision;
+}
+
+export interface ContainerShedPorts {
+  read: (atMs: number, missedTicks: number | undefined) => ContainerShedReading;
+  inventory: () => readonly ContainerShedEntry[];
+  clock: Pick<Clock, "now">;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+function shedOutcome(outcome: ContainerShedEndOutcome): "terminal" | "lost" | "unsignalled" {
+  return outcome.signalled ? outcome.ended : "unsignalled";
+}
+
+/**
+ * W1-T15181: each tick reads, asks {@link decideContainerShed}, and keeps the history (fully read readings, this boot,
+ * W1-T10085's history span) and the episode. A shed ends its child without blocking the tick and writes its one
+ * memory.shed row once the end resolves; the episode waits on the child's settlement. A partly met hold writes its
+ * episode's one memory.shed_held row.
+ */
+export function createContainerShedRung(ports: ContainerShedPorts): ContainerShedRung {
+  const readings: ContainerShedReading[] = [];
+  let episode: ContainerShedEpisode = {};
+  return {
+    tick(atMs, missedTicks) {
+      const reading = ports.read(atMs, missedTicks);
+      let inventory: readonly ContainerShedEntry[] | { unread: string };
+      try {
+        inventory = ports.inventory();
+      } catch (error) {
+        // Reason: an unread inventory is carried as `unread` into the decision, which then holds and names it.
+        inventory = { unread: String((error as Error)?.message ?? error).slice(0, 160) };
+      }
+      const decision = decideContainerShed(reading, { readings, episode }, inventory);
+      episode = decision.episode;
+      if ((reading.unread ?? []).length === 0) readings.push(reading);
+      while (readings.length > 0 && readings[0]!.at_ms < atMs - SWAP_STALL_HISTORY_MS) readings.shift();
+      const fields = {
+        memory_current_mib: reading.memory_current_mib, memory_high_mib: reading.memory_high_mib,
+        psi_full_avg60: reading.psi_full_avg60, calm_band: decision.band.band, band_source: decision.band.source,
+        missed_ticks: reading.missed_ticks,
+      };
+      if (decision.write_held) ports.log(MEMORY_SHED_HELD_STEP, { missing: decision.missing, reason: decision.reason, ...fields });
+      const entry = decision.entry;
+      if (decision.action === "shed" && entry?.end !== undefined) {
+        const shed = episode.shed!;
+        void entry.settled.then(() => {
+          if (episode.shed === shed) episode = { ...episode, shed: { ...shed, settled_at_ms: ports.clock.now() } };
+        });
+        const row = { run_id: entry.run_id, kind: entry.kind, task_id: entry.task_id, pr: entry.pr,
+          age_ms: Math.max(0, reading.at_ms - entry.admitted_at_ms), ...fields };
+        void Promise.resolve().then(() => entry.end!()).then(shedOutcome, () => "unsignalled" as const)
+          .then((outcome) => ports.log(MEMORY_SHED_STEP, { ...row, outcome }));
+      }
+      return decision;
+    },
+  };
+}
+
+/** The seams of a shed's abort a test injects; production signals the real process group. */
+export type ContainerShedAbortPorts = Pick<AbortRunChildPorts, "kill" | "knownPid" | "wait" | "clock">;
+
+/** W1-T15181: end a run child the rung shed through abortRunChild on its run directory. `teardownBudgetMs` is the learned
+ *  teardown before SIGKILL, computed before the shed (unknown: SIGTERM only, never a kill). Once signalled, the sweep's
+ *  registration is marked, so the child's settlement is not read as a failed dispatch. */
+export function endRunChildForShed(
+  stateDir: string, runId: string, log: (step: string, extra?: Record<string, unknown>) => void,
+  teardownBudgetMs?: number, ports: ContainerShedAbortPorts = {},
+): Promise<ContainerShedEndOutcome> {
+  return abortRunChild(join(stateDir, "runs", runId), { ...ports, teardownMs: () => teardownBudgetMs, log: (step, extra) => {
+    const signalled = step === RUN_CHILD_ABORT_STEP;
+    if (signalled) markChildWorkShed(runId);
+    log(step, signalled ? { ...extra, memory_shed: true } : extra);
+  } });
+}
+
+/** W1-T15181: the sweep's inventory with its run children, each given an end under `stateDir`; with no state directory
+ *  no entry can be ended, so none is a candidate. */
+export function containerShedInventory(
+  stateDir: string | undefined, log: (step: string, extra?: Record<string, unknown>) => void, teardownBudgetMs?: number,
+  ports?: ContainerShedAbortPorts,
+): () => ContainerShedEntry[] {
+  return () => restartDrainInventory({ children: true }).map((entry) => {
+    const runId = entry.run_id;
+    if (runId === undefined || stateDir === undefined) return entry;
+    return { ...entry, end: () => endRunChildForShed(stateDir, runId, log, teardownBudgetMs, ports) };
+  });
+}
+
+/** One boot's container-shed state: the teardown learned from the history that boot read, and its one rung. */
+interface ContainerShedBoot { teardownMs?: number; rung?: ContainerShedRung }
+const containerShedBoots = new WeakMap<object, ContainerShedBoot>();
+
+/** The boot's one rung: the injected one, else a default created on the first in-flight tick. */
+function containerShedRungFor(deps: DaemonDeps, log: (step: string, extra?: Record<string, unknown>) => void): ContainerShedRung {
+  if (deps.containerShed) return deps.containerShed;
+  const boot: ContainerShedBoot = containerShedBoots.get(deps) ?? {};
+  containerShedBoots.set(deps, boot);
+  const seams = deps.containerShedSeams;
+  return boot.rung ??= createContainerShedRung({
+    read: seams?.read ?? ((atMs, missed) => readContainerShedReading(atMs, missed)),
+    inventory: containerShedInventory(seams?.stateDir ?? deps.fleetLane?.stateDir, log, boot.teardownMs, seams?.abort),
+    clock: clockFromDateFn(deps.now), log,
+  });
 }
 
 /** W1-T7746: report a tick's lag, and first hand it to the loop-stall profiler, which sets its bound from
@@ -3575,11 +3700,15 @@ function startInFlightTicker(
           const tickDueAtMs = daemonClock.now() + pollIntervalMs;
           const waitResult = await (owner.sweepRetrigger ? (deps.sleepUntilSweepWake ?? deps.sleep) : deps.sleep)(pollIntervalMs);
           const lastStepBeforeBlock = deps.lastStepBeforeBlock?.();
+          const tickObservedAtMs = daemonClock.now();
           reportTickLag(deps,
-            { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: daemonClock.now(), intervalMs: pollIntervalMs, lastStepBeforeBlock,
+            { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: tickObservedAtMs, intervalMs: pollIntervalMs, lastStepBeforeBlock,
               ...takeSyncSpawn(deps, "ticker") },
             log,
           );
+          // W1-T15181: the tick's own lateness in whole intervals, as daemon.loop_lag counts it; a non-finite clock is unread.
+          const tickLateMs = tickObservedAtMs - tickDueAtMs;
+          const tickMissed = Number.isFinite(tickLateMs) ? (tickLateMs > pollIntervalMs ? Math.floor(tickLateMs / pollIntervalMs) : 0) : undefined;
           if (waitResult === "wake") eventWakePending = true;
           if (!owner.active) break;
           recordNearLimitHeapSample(deps, "in-flight-tick");
@@ -3612,6 +3741,12 @@ function startInFlightTicker(
             ...(diskHeadroom?.freeBytes !== undefined ? { disk_free_bytes: diskHeadroom.freeBytes } : {}),
           });
           startMemoryReadAfterRow(deps, log);
+          // W1-T15181: the container-shed rung reads the cgroup this heartbeat sampled; it never blocks the tick.
+          try {
+            containerShedRungFor(deps, log).tick(tickObservedAtMs, tickMissed);
+          } catch (e) {
+            log("daemon.in_flight_ticker.failed", { phase: owner.phase, surface: "container_shed", error: String((e as Error)?.message ?? e).slice(0, 160) });
+          }
           // W1-T7093: the reservation tree must be refreshed by the real recurring heartbeat,
           // not merely by worker start/release calls. Best-effort, after the liveness row so a
           // slow or failed ledger walk cannot erase this tick's heartbeat.
@@ -5371,6 +5506,9 @@ export async function runDaemon(
     sweepSeedSource = "live_ledger";
     log("daemon.restart_history_unreadable", { error: String((error as Error)?.message ?? error) });
   }
+  // W1-T15181: derive abort's SIGKILL allowance from the restart-history read already made at boot. A shed must signal
+  // immediately; it cannot synchronously reread the seven-day ledger union on the throttled tick. A new boot, new rung.
+  containerShedBoots.set(deps, { teardownMs: restartWorkHistory(restartHistoryLines, clockFromDateFn(deps.now).now()).yieldCost.ms });
   deps.bootPhases?.mark("restart_history");
   // W1-T9632: the union holds the live file too, so ONE source seeds the learner and no live row counts twice.
   for (const ms of settledSweepDurations(sweepSeedSource === "ledger_union" ? restartHistoryLines : bootLedgerLines)) recordSettledSweep(sweepBound, ms);
@@ -5695,6 +5833,20 @@ export async function runDaemon(
   // pass returns or the BACKSTOP passes (10-05: first `sweep.pass` 6.7-15.8 min after `daemon.boot`). It holds
   // only what is wired: with nothing to defer, tick 1's admission keeps W1-T4998's no-wait contract.
   const adoptedAll = deps.adoptRunChildren ? deps.adoptRunChildren() : [];
+  // W1-T15181: an adopted child's admission is its spawn row's time, and a shed before this boot is its marked abort row.
+  // Both are read from the live rows and the restart history, which still holds them after a rotation.
+  const childAdmissionAt = new Map<string, number>();
+  const shedBeforeBoot = new Set<string>();
+  for (const raw of [...bootLedgerLines, ...restartHistoryLines]) {
+    if (!raw.includes(RUN_CHILD_SPAWNED_STEP) && !raw.includes(RUN_CHILD_ABORT_STEP)) continue;
+    try {
+      const row = JSON.parse(raw) as { step?: unknown; run_id?: unknown; ts?: unknown; memory_shed?: unknown };
+      if (typeof row.run_id !== "string") continue;
+      const at = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+      if (row.step === RUN_CHILD_SPAWNED_STEP && Number.isFinite(at)) childAdmissionAt.set(row.run_id, at);
+      if (row.step === RUN_CHILD_ABORT_STEP && row.memory_shed === true) shedBeforeBoot.add(row.run_id);
+    } catch (error) { void error; /* A torn ledger line supplies no admission time and marks no shed. */ }
+  }
   const adoptedChildren = adoptedAll.filter((child) => child.work === undefined);
   const children = new Map<string, AdoptedRunChild>(adoptedChildren.map((child) => [child.runId, child]));
   // W1-T11129: the review-lane hook reads `children` and the build lanes, so it is installed only now that both exist,
@@ -5703,7 +5855,8 @@ export async function runDaemon(
   // W1-T9114: a child hosting a review or a fix dispatch holds a review slot, never a lane: it is registered with the sweep.
   // W1-T11790: a retro child adopted here is watched from adoption (its age a lower bound); the watch only observes.
   const retroWatch = retroDurationWatch(daemonClock, log);
-  for (const child of adoptedAll) if (child.work) void adoptChildWork({ ...child, work: child.work,
+  for (const child of adoptedAll) if (child.work) void adoptChildWork({ ...child,
+    admittedAtMs: childAdmissionAt.get(child.runId) ?? Number.NaN, memoryShed: shedBeforeBoot.has(child.runId), work: child.work,
     ...(child.work.kind === "retro" ? { settled: retroWatch.watch(child.settled, { pid: child.pid, runId: child.runId, basis: "adopted" }) } : {}) }, log);
   let childMode = deps.adoptRunChildren !== undefined;
   const childTaskIds = (): string[] => [...children.values()].map((child) => child.taskId);
@@ -10025,11 +10178,13 @@ export async function runDaemon(
             // object that supplies no async port keeps the synchronous read, and its refill stays synchronous.
             // W1-T14644: drop phases an earlier read left, so the row names only this probe's own.
             deps.takeRefreshMergedPhases?.();
+            deps.takeTickReadStages?.();
             const refillRead = deps.refreshMergedAsync ? (deps.refreshMergedForRefill ?? deps.refreshMergedAsync) : undefined;
             if (refillRead) {
               return timing.probe("refreshMerged", () => refillRead(refillPlan)).then(
                 (isMerged) => {
                   timing.noteRefreshMergedPhases(deps.takeRefreshMergedPhases?.());
+                  timing.noteTickReadStages(deps.takeTickReadStages?.());
                   if (deps.readLiveState) return decideLive(refillPlan, isMerged);
                   return decideThenConclude({ plan: refillPlan, isMerged });
                 },
@@ -10038,6 +10193,7 @@ export async function runDaemon(
             }
             const isMerged = timing.probe("refreshMerged", () => deps.refreshMerged(refillPlan));
             timing.noteRefreshMergedPhases(deps.takeRefreshMergedPhases?.());
+            timing.noteTickReadStages(deps.takeTickReadStages?.());
             if (deps.readLiveState) return decideLive(refillPlan, isMerged);
             return decideThenConclude({ plan: refillPlan, isMerged });
           } catch (e) {
