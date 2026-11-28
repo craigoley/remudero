@@ -11,6 +11,7 @@ import { assertClaimRefPushAllowed, assertClaimRefPushAllowedAsync } from "./liv
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { Escalation } from "./escalate.js";
+import { workerAssignmentTracker } from "./non-worker-verdict.js";
 
 /**
  * Cross-host git-ref CAS closing the dispatch-time race, in the same family as `refs/rmd-id/`
@@ -896,6 +897,11 @@ export interface RunLedgerState {
   readonly prUrl?: string;
 }
 
+/** W1-T12154: a run's {@link RunLedgerState}, plus the fields its verdict adds when it wrote no `worker.assignment`. */
+export interface RunLedgerReading extends RunLedgerState {
+  readonly assignmentFields?: Record<string, unknown>;
+}
+
 /** W1-T10896: reads the full run history, including starts before mint and verdicts in later rotations. */
 export function readRunLedgerState(
   stateDir: string,
@@ -903,9 +909,22 @@ export function readRunLedgerState(
   _anchor: ClaimAnchorIdentity,
   fs: LedgerGrepFsDeps = realLedgerFs,
 ): RunLedgerState {
+  return readRunLedger(stateDir, runId, fs).state;
+}
+
+/**
+ * The one pass {@link readRunLedgerState} makes. W1-T12154: it also follows the run's own rows the way the run's
+ * ledger writer does, so a verdict the boot sweep writes for it records `worker_assigned: false` and its last stage.
+ */
+function readRunLedger(
+  stateDir: string,
+  runId: string,
+  fs: LedgerGrepFsDeps,
+): { state: RunLedgerState; assignmentFields: Record<string, unknown> } {
   let started = false;
   let verdict = false;
   let prUrl: string | undefined;
+  const ownRows = workerAssignmentTracker();
   const names = fs.existsSync(stateDir) ? fs.readdirSync(stateDir) : [];
   const files = ledgerRotationEntries(names, stateDir)
     .map((entry) => ({ path: entry.path, gzip: entry.form === "gzip" }));
@@ -918,9 +937,10 @@ export function readRunLedgerState(
       if (parsed.row.step === "run.start") started = true;
       if (parsed.row.step === "verdict") verdict = true;
       if (parsed.row.step === "pr.opened" && typeof parsed.row.pr_url === "string") prUrl = parsed.row.pr_url;
+      if (typeof parsed.row.step === "string") ownRows.written(parsed.row.step, parsed.row);
     }
   }
-  return { started, verdict, ...(prUrl !== undefined ? { prUrl } : {}) };
+  return { state: { started, verdict, ...(prUrl !== undefined ? { prUrl } : {}) }, assignmentFields: ownRows.verdictFields({}) };
 }
 
 /** The tip `git ls-remote origin refs/heads/<branch>` names for exactly `branch`, or `undefined`. */
@@ -935,7 +955,7 @@ export function runBranchHeadFromLsRemote(res: { status: number | null; stdout?:
 
 /** W1-T10896: the reads that end a run whose claim the same-host arm released. */
 export interface RestartOrphanReads {
-  runState: (runId: string, anchor: ClaimAnchorIdentity) => RunLedgerState;
+  runState: (runId: string, anchor: ClaimAnchorIdentity) => RunLedgerReading;
   branchHead: (branch: string) => string | undefined;
 }
 
@@ -972,7 +992,7 @@ function bootSweepProbes(taskId: string, i: BootSweepProbeInputs, seen: BootSwee
 interface RestartOrphanedRun {
   runId: string;
   branch: string;
-  state: RunLedgerState;
+  state: RunLedgerReading;
   anchor: ClaimAnchorIdentity;
   liveness: ClaimantLivenessProbe;
 }
@@ -999,7 +1019,7 @@ function restartOrphanedRun(
 /**
  * W1-T10896: the ONE terminal verdict for a restart-orphaned run. With its pushed head and no PR of its own the row
  * is a checkpoint receipt; without, it carries none. `handed_off` is a non-worker verdict (non-worker-verdict.ts),
- * so it is never a strike.
+ * so it is never a strike. W1-T12154: a run that wrote no `worker.assignment` gets the record its own verdict would.
  */
 function restartOrphanVerdict(taskId: string, run: RestartOrphanedRun, headSha: string | undefined): Record<string, unknown> {
   const { runId, branch, state, anchor, liveness } = run;
@@ -1016,6 +1036,7 @@ function restartOrphanVerdict(taskId: string, run: RestartOrphanedRun, headSha: 
       `and pid ${anchor.pid} is absent, so its daemon restarted under it and it cannot end itself`,
     ...(state.prUrl !== undefined ? { pr_url: state.prUrl } : {}),
     ...(headSha !== undefined ? { branch, head_sha: headSha } : {}),
+    ...state.assignmentFields,
   };
 }
 
@@ -1060,7 +1081,10 @@ function bootSweepReads(i: BootSweepInputs): BootSweepProbeInputs & { runState: 
     lockHeldSinceIso: i.lockHeldSinceIso,
     findMintRow: (taskId, anchor) => findClaimMintRow(i.stateDir, taskId, anchor),
     livenessProbe,
-    runState: (runId, anchor) => readRunLedgerState(i.stateDir, runId, anchor),
+    runState: (runId) => {
+      const { state, assignmentFields } = readRunLedger(i.stateDir, runId, realLedgerFs);
+      return { ...state, assignmentFields };
+    },
   };
 }
 

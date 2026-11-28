@@ -128,11 +128,14 @@ function observedPoint(day: string, value: number): TimeSeriesPoint {
   return { t: `${day}T00:00:00.000Z`, value, gap: false };
 }
 
+/** W1-T12154: the note a day's completed-runs point carries for runs that ended before a worker was assigned. */
+export function endedBeforeWorkerAssignmentNote(apart: number): { note: string } | Record<string, never> {
+  return apart > 0 ? { note: `${apart} ended before a worker was assigned; not counted as completed` } : {};
+}
+
 /** The day's completed runs; a run that ended before a worker was assigned is named apart in the point's note. */
 function completedRunsPoint(day: string, bucket: HistoricalBucket): TimeSeriesPoint {
-  const point = observedPoint(day, bucket.completedRuns);
-  const apart = bucket.endedBeforeWorkerAssignment;
-  return apart > 0 ? { ...point, note: `${apart} ended before a worker was assigned; not counted as completed` } : point;
+  return { ...observedPoint(day, bucket.completedRuns), ...endedBeforeWorkerAssignmentNote(bucket.endedBeforeWorkerAssignment) };
 }
 
 function buildHistoricalSeries(state: Map<string, HistoricalBucket>, nowIso: string | null): LedgerTimeSeries[] {

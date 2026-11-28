@@ -7,14 +7,20 @@
  * for such a run, and the analytics time series counts it apart from completed runs and durations.
  */
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { test, type TestContext } from "node:test";
 
+import { scanAnalyticsLedger, type AnalyticsCheckpoint, type AnalyticsSnapshotReadResult } from "#src/lib/analytics-route.js";
 import { buildAnalyticsTimeSeries } from "#src/lib/analytics-timeseries.js";
-import { dispatchClaimRef } from "#src/lib/dispatch-claim.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { bootSweepDispatchClaimsAsync, dispatchClaimRef } from "#src/lib/dispatch-claim.js";
+import { appendLedger } from "#src/lib/ledger.js";
 import { endedBeforeWorkerAssignment } from "#src/lib/non-worker-verdict.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 import { benchmarkRunLedgerLogger } from "#test/helpers/run-task-test.js";
 import {
-  TASK, RUN_ID, DEAD_PID, LOCAL, MINT_ISO, anchorMessage, fakeReserver, instance, orphanVerdicts,
+  TASK, RUN_ID, DEAD_PID, LOCAL, MINT_ISO, FIXED_HOST_PROBE, anchorMessage, fakeReserver, instance, orphanVerdicts,
 } from "#test/helpers/restart-orphan.js";
 
 type Row = Record<string, unknown>;
@@ -125,7 +131,10 @@ test("W1-T12154 criterion 2: a run found orphaned with no assignment is read as 
   assert.ok(verdict, "the boot sweep ended the orphaned run");
   assert.equal(verdict.verdict, "handed_off");
   assert.equal(endedBeforeWorkerAssignment(verdict, false), true, "the run's rows hold no worker.assignment");
-  assert.equal(endedBeforeWorkerAssignment(verdict), false, "with the run's rows unseen the orphan is not presumed");
+  assert.equal(verdict.worker_assigned, false, "the boot sweep's own row records that no worker was assigned");
+  assert.equal(verdict.last_stage, "dispatch.claim", "with no phase, the last row the run wrote is its last stage");
+  assert.equal(verdict.last_step, "dispatch.claim");
+  assert.equal(endedBeforeWorkerAssignment(verdict), true, "the row alone answers, with the run's rows unseen");
   // The same record the analytics series keeps for a stamped run: counted apart, never completed.
   const nowIso = String(verdict.ts);
   const completed = pointOf(node.rows(), "runs.completed", nowIso);
@@ -145,10 +154,63 @@ test("W1-T12154 criterion 2: an orphaned run that had assigned a worker is not r
   node.boot(fakeReserver({ [TASK]: anchorMessage(DEAD_PID, LOCAL, MINT_ISO) }));
   const [verdict] = orphanVerdicts(node.rows());
   assert.ok(verdict, "the boot sweep ended the orphaned run");
+  for (const field of ["worker_assigned", "last_stage", "last_step"]) assert.equal(field in verdict, false, `no ${field}`);
+  assert.equal(endedBeforeWorkerAssignment(verdict), false);
   assert.equal(endedBeforeWorkerAssignment(verdict, true), false);
   const completed = pointOf(node.rows(), "runs.completed", String(verdict.ts));
   assert.equal(completed.value, 1);
   assert.equal(completed.note, undefined);
+});
+
+/** The orphan's own rows: its start, its claim and the phase it reached, then (optionally) the worker it assigned. */
+function orphanRows(assigned: boolean): Row[] {
+  return [
+    { ts: "1999-12-31T23:59:59.000Z", run_id: RUN_ID, task_id: TASK, step: "run.start", host: LOCAL },
+    { ts: "2000-01-01T00:00:00.500Z", run_id: RUN_ID, task_id: TASK, step: "dispatch.claim", host: LOCAL, actor: "run_child",
+      ref: dispatchClaimRef(TASK), outcome: "created" },
+    { ts: "2000-01-01T00:00:01.000Z", run_id: RUN_ID, task_id: TASK, step: "run.phase", waiting_on: "recon" },
+    ...(assigned ? [{ ts: "2000-01-01T00:00:02.000Z", run_id: RUN_ID, task_id: TASK, step: "worker.assignment", worker_assignment: ASSIGNMENT }] : []),
+  ];
+}
+
+/** The daemon's own boot (daemon.ts): the awaited sweep, writing through the daemon's plain ledger log. */
+async function daemonBootSweep(t: TestContext, seed: Row[]): Promise<Row[]> {
+  const stateDir = makeTempDir("unassigned-orphan");
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const ledger = join(stateDir, "ledger.ndjson");
+  writeFileSync(ledger, seed.map((row) => `${JSON.stringify(row)}\n`).join(""));
+  const lockIso = new Date().toISOString();
+  await bootSweepDispatchClaimsAsync(fakeReserver({ [TASK]: anchorMessage(DEAD_PID, LOCAL, MINT_ISO) }), {
+    hostProbe: FIXED_HOST_PROBE,
+    lockHeldSinceMs: Date.parse(lockIso),
+    lockHeldSinceIso: lockIso,
+    stateDir,
+    log: (step, fields) => appendLedger(ledger, { run_id: "DAEMON-1", task_id: "DAEMON", step, lane: "daemon", ...fields }),
+  });
+  return readFileSync(ledger, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Row);
+}
+
+test("W1-T12154 criterion 2: the daemon's boot sweep writes the same record on an unassigned orphan's verdict row", async (t) => {
+  const rows = await daemonBootSweep(t, orphanRows(false));
+  const [verdict] = orphanVerdicts(rows);
+  assert.ok(verdict, "the daemon's boot sweep ended the orphaned run");
+  assert.equal(verdict.run_id, RUN_ID, "the verdict is the orphan's own, not the daemon's");
+  assert.equal(verdict.worker_assigned, false);
+  assert.equal(verdict.last_stage, "recon", "the last phase the run reached, as a run's own verdict names it");
+  assert.equal(verdict.last_step, "run.phase");
+  assert.equal(endedBeforeWorkerAssignment(verdict), true, "the row alone answers, as a stamped run verdict does");
+  // The sync sweep writes the same record.
+  const node = instance(t, orphanRows(false));
+  node.boot(fakeReserver({ [TASK]: anchorMessage(DEAD_PID, LOCAL, MINT_ISO) }));
+  const [synced] = orphanVerdicts(node.rows());
+  assert.deepEqual([synced?.worker_assigned, synced?.last_stage, synced?.last_step], [false, "recon", "run.phase"]);
+});
+
+test("W1-T12154 criterion 2: the daemon's boot sweep stamps nothing on an orphan that had assigned a worker", async (t) => {
+  const [verdict] = orphanVerdicts(await daemonBootSweep(t, orphanRows(true)));
+  assert.ok(verdict, "the daemon's boot sweep ended the orphaned run");
+  for (const field of ["worker_assigned", "last_stage", "last_step"]) assert.equal(field in verdict, false, `no ${field}`);
+  assert.equal(endedBeforeWorkerAssignment(verdict), false);
 });
 
 test("W1-T12154 criterion 3: a run with no worker is left out of completed runs and durations, and counted apart", () => {
@@ -184,4 +246,100 @@ test("W1-T12154 criterion 4: a run that assigned a worker is stamped with nothin
   assert.equal("worker_assigned" in verdictOf(named.rows), false);
   // The reader's own sight of the assignment overrides even a stamped row.
   assert.equal(endedBeforeWorkerAssignment({ verdict: "failed", worker_assigned: false }, true), false);
+});
+
+const SCAN_CLOCK = fixedClock(Date.parse(NOW));
+
+function ledgerDir(t: TestContext, rows: Row[]): { dir: string; append: (more: Row[]) => void } {
+  const dir = makeTempDir("unassigned-analytics");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ledger = join(dir, "ledger.ndjson");
+  writeFileSync(ledger, rows.map((row) => `${JSON.stringify(row)}\n`).join(""));
+  return { dir, append: (more) => appendFileSync(ledger, more.map((row) => `${JSON.stringify(row)}\n`).join("")) };
+}
+
+async function scan(dir: string, prior?: AnalyticsCheckpoint): Promise<AnalyticsSnapshotReadResult> {
+  const result = await scanAnalyticsLedger(dir, SCAN_CLOCK, undefined, prior);
+  assert.ok("checkpoint" in result, "the scan finished");
+  return result as AnalyticsSnapshotReadResult;
+}
+
+function seriesPoint(result: AnalyticsSnapshotReadResult, id: string): Row {
+  const point = result.snapshot.timeSeries.find((s) => s.id === id)?.points.find((p) => p.t.startsWith(NOW.slice(0, 10)));
+  assert.ok(point, `the ${id} window holds ${NOW.slice(0, 10)}`);
+  return point as Row;
+}
+
+/** A run that wrote no worker.assignment, through the real run logger. */
+function unassignedRun(runId: string, startMs: number): Row[] {
+  const { log, rows } = runLog(runId, startMs);
+  log("run.start", { type: "implement" });
+  log("run.phase", { waiting_on: "recon" });
+  log("verdict", { verdict: "failed", stage: "run.error", reason: "boom" });
+  return rows;
+}
+
+test("W1-T12154 criterion 3: a checkpoint-resumed analytics scan leaves such a run out of completed runs and durations", async (t) => {
+  const corpus = ledgerDir(t, [...assignedRun("W1-T1-10"), ...unassignedRun("W1-T1-11", DAY_START + 3_600_000)]);
+  const full = await scan(corpus.dir);
+  assert.equal(full.scan?.mode, "full");
+  const resumed = await scan(corpus.dir, JSON.parse(JSON.stringify(full.checkpoint)) as AnalyticsCheckpoint);
+  assert.equal(resumed.scan?.mode, "resume", "the second scan resumed from the first one's checkpoint");
+  for (const result of [full, resumed]) {
+    const completed = seriesPoint(result, "runs.completed");
+    assert.equal(completed.value, 1, `${result.scan?.mode}: only the run that assigned a worker completed`);
+    assert.equal(completed.note, "1 ended before a worker was assigned; not counted as completed");
+    assert.equal(seriesPoint(result, "duration.p50.ms").value, 3 * 60_000, `${result.scan?.mode}: the assigned run's alone`);
+  }
+  // A second unassigned run lands after the checkpoint: the resumed scan counts it apart too.
+  corpus.append(unassignedRun("W1-T1-12", DAY_START + 7_200_000));
+  const later = await scan(corpus.dir, JSON.parse(JSON.stringify(resumed.checkpoint)) as AnalyticsCheckpoint);
+  assert.equal(later.scan?.mode, "resume");
+  assert.equal(seriesPoint(later, "runs.completed").value, 1);
+  assert.equal(seriesPoint(later, "runs.completed").note, "2 ended before a worker was assigned; not counted as completed");
+  assert.equal(seriesPoint(later, "duration.p50.ms").value, 3 * 60_000);
+});
+
+test("W1-T12154 criterion 3: a resumed scan folds an unstamped orphan verdict exactly as one full pass does", async (t) => {
+  // Two runs reach the checkpoint without verdicts; only one had assigned a worker. Both are ended after it by an
+  // older boot sweep's unstamped orphan verdict, so the answer rests on what the run's own rows held.
+  const start = (runId: string): Row => ({ ts: "2026-11-10T02:00:00.000Z", run_id: runId, task_id: "W1-T1", step: "run.start" });
+  const orphan = (runId: string): Row => ({ ts: "2026-11-10T03:00:00.000Z", run_id: runId, task_id: "W1-T1", step: "verdict",
+    verdict: "handed_off", reason: "orphaned-by-restart", surface: "boot-sweep" });
+  const corpus = ledgerDir(t, [start("W1-T1-13"), start("W1-T1-14"),
+    { ts: "2026-11-10T02:01:00.000Z", run_id: "W1-T1-14", task_id: "W1-T1", step: "worker.assignment", worker_assignment: ASSIGNMENT }]);
+  const checkpoint = (await scan(corpus.dir)).checkpoint;
+  corpus.append([orphan("W1-T1-13"), orphan("W1-T1-14")]);
+  const resumed = await scan(corpus.dir, JSON.parse(JSON.stringify(checkpoint)) as AnalyticsCheckpoint);
+  assert.equal(resumed.scan?.mode, "resume");
+  const onePass = await scan(corpus.dir);
+  assert.equal(onePass.scan?.mode, "full");
+  const onePassCompleted = seriesPoint(onePass, "runs.completed");
+  assert.equal(onePassCompleted.value, 1, "positive control: one pass counts only the assigned orphan as completed");
+  assert.equal(onePassCompleted.note, "1 ended before a worker was assigned; not counted as completed");
+  for (const id of ["runs.completed", "duration.p50.ms"]) assert.deepEqual(seriesPoint(resumed, id), seriesPoint(onePass, id), id);
+});
+
+test("W1-T12154 criterion 3: a checkpoint written before the assigned runs were kept does not presume an orphan unassigned", async (t) => {
+  const corpus = ledgerDir(t, [{ ts: "2026-11-10T02:00:00.000Z", run_id: "W1-T1-15", task_id: "W1-T1", step: "run.start" },
+    { ts: "2026-11-10T02:01:00.000Z", run_id: "W1-T1-15", task_id: "W1-T1", step: "worker.assignment", worker_assignment: ASSIGNMENT }]);
+  const checkpoint = JSON.parse(JSON.stringify((await scan(corpus.dir)).checkpoint)) as AnalyticsCheckpoint;
+  assert.deepEqual(checkpoint.state.history.assigned, ["W1-T1-15"], "positive control: this version keeps the assigned runs");
+  delete checkpoint.state.history.assigned;
+  corpus.append([{ ts: "2026-11-10T03:00:00.000Z", run_id: "W1-T1-15", task_id: "W1-T1", step: "verdict",
+    verdict: "handed_off", reason: "orphaned-by-restart", surface: "boot-sweep" }]);
+  const resumed = await scan(corpus.dir, checkpoint);
+  assert.equal(resumed.scan?.mode, "resume");
+  const completed = seriesPoint(resumed, "runs.completed");
+  assert.equal(completed.value, 1, "the run's assignment sits before the older checkpoint, unseen: it is not presumed absent");
+  assert.equal(completed.note, undefined);
+  // A stamped verdict needs no sight of the run's rows: it answers alone on the same older checkpoint.
+  const stamped = ledgerDir(t, [{ ts: "2026-11-10T02:00:00.000Z", run_id: "W1-T1-16", task_id: "W1-T1", step: "run.start" }]);
+  const older = JSON.parse(JSON.stringify((await scan(stamped.dir)).checkpoint)) as AnalyticsCheckpoint;
+  delete older.state.history.assigned;
+  stamped.append([{ ts: "2026-11-10T03:00:00.000Z", run_id: "W1-T1-16", task_id: "W1-T1", step: "verdict",
+    verdict: "handed_off", reason: "orphaned-by-restart", worker_assigned: false, last_stage: "recon", last_step: "run.phase" }]);
+  const after = await scan(stamped.dir, older);
+  assert.equal(seriesPoint(after, "runs.completed").value, 0);
+  assert.equal(seriesPoint(after, "runs.completed").note, "1 ended before a worker was assigned; not counted as completed");
 });
