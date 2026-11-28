@@ -492,6 +492,13 @@ export interface HeldTokenAccess {
 export const HELD_TOKEN_READ_MARGIN_MS = 5 * 60 * 1000;
 /** W1-T14677: this process's most recently armed loop, until it stops. A long pass reaches its renewal through it. */
 let armedHeldToken: HeldTokenAccess | undefined;
+/** W1-T15055: the armed loop's expiry for a token it holds; a gated CLI read must not wait past it. */
+let armedHeldDeadline: ((token: string | undefined) => number | undefined) | undefined;
+
+/** W1-T15055: when `token` is this process's held token, the time it expires; otherwise undefined. */
+export function heldTokenDeadlineMs(token: string | undefined = process.env.GH_TOKEN): number | undefined {
+  return armedHeldDeadline?.(token);
+}
 
 /** W1-T14677: before a GitHub read, renew this process's held token when it has less than `minRemainingMs` left, so
  *  a pass that outlives its token never presents it. `not_armed`: no loop holds a token here, and nothing is done. */
@@ -676,10 +683,14 @@ export function startInstallationTokenRefresh(opts: {
   const ready = firstResult.then(() => undefined);
   const access: HeldTokenAccess = { tokenState, ensureFresh };
   armedHeldToken = access;
+  const deadlineOf = (token: string | undefined): number | undefined =>
+    tokenState(token) === "not_held" ? undefined : lastSuccessfulExpiresAtMs;
+  armedHeldDeadline = deadlineOf;
   const stop = (): void => {
     stopped = true;
     if (timer) clear(timer);
     if (armedHeldToken === access) armedHeldToken = undefined;
+    if (armedHeldDeadline === deadlineOf) armedHeldDeadline = undefined;
   };
   return { armed: true, ready, firstResult, stop, tokenState, ensureFresh };
 }

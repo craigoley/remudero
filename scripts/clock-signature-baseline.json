@@ -448,5 +448,10 @@
     "legacy": 1,
     "dateNow": 1,
     "newDate": 5
+  },
+  "src/lib/typecheck-buildinfo.ts": {
+    "legacy": 0,
+    "dateNow": 0,
+    "newDate": 1
   }
 }

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { captureInboxDraftSnapshot, commitInboxDraftOutcomes, draftsDueOnDaemon, inboxDraftExampleFragmentYaml,
+import { captureInboxDraftSnapshot, commitInboxDraftOutcomes, DRAFT_RETRY_FULL_INDEX_FILE, draftsDueOnDaemon, inboxDraftExampleFragmentYaml,
   planProjectionForDependsOn, readDraftCashResumes, resolvedInboxDraftLane, runDraftRung,
   type DraftCashResumes, type DraftRungOutcome, type DraftWorkerResult, type Proposal } from "#src/lib/inbox.js";
 import type { Config } from "#src/lib/config.js";
@@ -58,6 +58,7 @@ type FixtureOptions = {
   proposals?: Proposal[];
   polls?: number;
   afterPoll?: (root: string, poll: number) => void;
+  retryFullIndex?: boolean;
 };
 
 /** Exercise the real batch, router and ladder, replacing the external provider boundaries. */
@@ -79,6 +80,10 @@ async function productionBatch(t: TestContext, opts: FixtureOptions) {
     target.git("push", "origin", "main");
     mkdirSync(join(root, "repos"));
     renameSync(target.dir, join(root, "repos", "remudero"));
+  }
+  if (opts.retryFullIndex) {
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(join(root, "state", DRAFT_RETRY_FULL_INDEX_FILE), "");
   }
   const config = { root, installRoot: REPO_ROOT, dailyCapUsd: opts.cap,
     workerProviders: { enabled: ["cash", ...(opts.allowCodex || opts.blockedAuction ? ["codex"] : []), ...(opts.allowClaude ? ["claude"] : [])],
@@ -524,7 +529,9 @@ test("W1-T13863 criterion 5: cash, relint and rescue rows count the full prompt 
     cashResult: worker({ text: dirty }) });
   const rescue = await productionBatch(t, { cap: 1000, deployments: ["gpt-oss-120b"], only: ["gpt-oss-120b"],
     allowClaude: true, cashResult: worker({ text: "missing the fragment markers" }) });
-  for (const batch of [run, rescue]) {
+  const full = await productionBatch(t, { cap: 1000, deployments: ["gpt-5-nano", "gpt-oss-120b"], allowClaude: true,
+    cashResult: worker({ text: dirty }), retryFullIndex: true });
+  for (const batch of [run, rescue, full]) {
     const prompts = [...batch.cashPrompts, ...batch.subscriptionPrompts];
     assert.ok(prompts.length > 1, JSON.stringify(batch.rows));
     const synthesized = batch.rows.filter(row => row.step === "inbox.draft_synthesized");
@@ -532,9 +539,17 @@ test("W1-T13863 criterion 5: cash, relint and rescue rows count the full prompt 
     assert.deepEqual(batch.fitInputs.map(input => input.promptChars), batch.cashPrompts.map(prompt => prompt.length));
     const planIndex = planProjectionForDependsOn(inboxDraftExampleFragmentYaml().replace("NEW-1", "W1-T1"));
     assert.ok(planIndex.length > 0);
-    assert.ok(prompts.every(prompt => prompt.includes(planIndex)));
-    for (const row of synthesized) assert.equal(row.plan_index_chars, planIndex.length);
+    // The relint redraft cites no plan row here, so its index is empty; the first draft and the rescue carry it whole.
+    for (const [i, row] of synthesized.entries()) {
+      const cited = row.retry_index === "cited";
+      assert.equal(prompts[i]!.includes(planIndex), !cited);
+      assert.equal(row.plan_index_chars, cited ? 0 : planIndex.length);
+    }
   }
+  const retryIndex = (batch: typeof run) => batch.rows.filter(row => row.step === "inbox.draft_synthesized").map(row => row.retry_index);
+  assert.deepEqual(retryIndex(run), [undefined, "cited"]);
+  assert.deepEqual(retryIndex(rescue), [undefined, "full"]);
+  assert.deepEqual(retryIndex(full), [undefined, "full"], "state/DRAFT_RETRY_FULL_INDEX reaches the rung through draftProposalBatch");
   assert.deepEqual(run.transports, ["gpt-5-nano", "gpt-oss-120b"]);
   assert.match(run.cashPrompts[1], /FAILED the plan's own linter/);
   assert.deepEqual(rescue.transports, ["gpt-oss-120b", "claude"]);
