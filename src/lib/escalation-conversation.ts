@@ -172,7 +172,11 @@ export function projectEscalationCorrespondence(input: {
 
 /** Per-service bounded cache. Revalidating a reply bypasses saved source, while concurrent reads coalesce. */
 export function createEscalationConversationReader(opts: {
-  repository?: string; threadStorePath?: string; ledgerPath?: string; clock?: Clock; readIssue?: (issueUrl: string, fresh?: boolean) => Promise<unknown>;
+  repository?: string;
+  /** W1-T14998: every repository this repository's escalation issues live in (the private route's, then its own,
+   *  legacy). Absent, only `repository`. Feedback is still read from `repository`. */
+  issueRepositories?: readonly string[];
+  threadStorePath?: string; ledgerPath?: string; clock?: Clock; readIssue?: (issueUrl: string, fresh?: boolean) => Promise<unknown>;
   readFeedback?: (repository: string, feedbackId: string, fresh?: boolean) => Promise<FeedbackEntry>;
   knownIssue?: (issueUrl: string, identity: ThreadIdentity) => boolean;
 }): EscalationConversationReader {
@@ -234,7 +238,9 @@ export function createEscalationConversationReader(opts: {
   return async (issueUrl, fresh = false) => {
     const location = escalationIssueLocation(issueUrl);
     if (!location) return { state: "unavailable", reason: "invalid_request", detail: "Choose a canonical GitHub escalation issue." };
-    if (!opts.repository || location.repository.toLowerCase() !== opts.repository.toLowerCase()) {
+    const repository = opts.repository;
+    const issueRepositories = (opts.issueRepositories ?? (repository ? [repository] : [])).map(r => r.toLowerCase());
+    if (!repository || !issueRepositories.includes(location.repository.toLowerCase())) {
       return { state: "unavailable", reason: "wrong_repository", detail: "This escalation does not belong to the selected repository." };
     }
     const loaded = await loadSource(issueUrl, fresh);
@@ -299,11 +305,11 @@ export function createEscalationConversationReader(opts: {
     if (intake?.questionIssueUrl) {
       const parent = ordered.find(message => message.role === "reply" && message.seq === intake.replySeq && message.extra?.replyId === intake.replyId);
       const questionLocation = escalationIssueLocation(intake.questionIssueUrl);
-      if (parent?.extra?.escalation === undefined || questionLocation?.repository.toLowerCase() !== location.repository.toLowerCase()) questionFailure = "invalid";
+      if (parent?.extra?.escalation === undefined || !questionLocation || !issueRepositories.includes(questionLocation.repository.toLowerCase())) questionFailure = "invalid";
       else {
         try {
           const questionSource = await loadSource(intake.questionIssueUrl, fresh);
-          const feedback = await loadFeedback(location.repository, intake.feedbackId, fresh);
+          const feedback = await loadFeedback(repository, intake.feedbackId, fresh);
           const question = questionSource.state === "loaded" ? parseEscalationConversationSource(questionSource.evidence.source) : undefined;
           if (questionSource.state !== "loaded" || questionSource.stale) questionFailure = "unavailable";
           else if (questionSource.evidence.source.state !== "open" || question?.identity.class !== "GRILL"

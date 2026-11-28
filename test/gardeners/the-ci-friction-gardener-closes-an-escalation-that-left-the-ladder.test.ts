@@ -22,6 +22,8 @@ import { clockFromMillisFn } from "#src/lib/clock.js";
 import type { GardenerDeps } from "#src/lib/gardener.js";
 import type { LedgerRecord } from "#src/lib/retro.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for acme/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "acme/remudero";
 
 const NOW = Date.parse("2026-11-17T12:00:00.000Z");
 const DAY = 24 * 3_600_000;
