@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
   ESCALATION_REPOSITORY_ENV, escalate, escalateAsync, escalationCodeRepository, escalationDestinationAt, escalationListingIsRouted, escalationIssueRepositories, escalationIssueRepository, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, issueGatewayRepository, issueGatewayUnfiled,
-  issueUrlRepository, NEEDS_HUMAN_LABEL, prReferentRepositoryFromIssueText, renderIssueBody, tryEscalate, withCodeRepositoryField, type Escalation, type EscalationDestinationRead,
+  issueUrlRepository, NEEDS_HUMAN_LABEL, prReferentRepositoryFromIssueText, renderIssueBody, tryEscalate, tryEscalateAsync, withCodeRepositoryField, type Escalation, type EscalationDestinationRead,
 } from "#src/lib/escalate.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { sreOperatorEscalation } from "#src/lib/sre-runbooks.js";
@@ -232,6 +232,38 @@ test("W1-T14998 criterion 2: the engine repository records an unrouted escalatio
   // A set escalation repository that is not <owner>/<name> files nowhere, never on public core.
   assert.equal(withEnv("../remudero", () => issueGatewayUnfiled(ghIssueGateway(CODE.owner, CODE.repo))),
     "RMD_ESCALATION_REPOSITORY is not <owner>/<name>");
+});
+
+test("W1-T14998 criterion 2: with no private repository an escalation opens no public issue, through a producer's"
+  + " own gateway wrapper", async (t) => {
+  // The self-check's probe: producers wrap the gateway by spreading it — the sweep's stall question replaces
+  // listOpen, run-task's assigning gateway replaces create, the reviewer-health and refusal-alarm dedups replace
+  // listOpen. Each wrapper must still be read as filing nowhere: a ledger row, never a thrown create.
+  const { path, rows } = ledger(t);
+  const gh = fakeGh();
+  const quiet = ghIssueGatewayAsync(CODE.owner, CODE.repo, { exec: async (args) => gh.exec(args), destination: nowhere });
+  assert.equal(issueGatewayUnfiled(quiet), "no-private-escalation-repository", "precondition: the engine's own gateway files nowhere");
+  const creates: string[] = [];
+  const wrappers = {
+    "stall-question": { ...quiet, listOpen: async () => [] },
+    "assigning": { ...quiet, create: async (title: string, body: string, labels: string[]) => { creates.push(title); return quiet.create(title, body, labels); } },
+    "alarm-dedup": { ...quiet, listOpen: () => [] },
+  };
+  for (const [name, issues] of Object.entries(wrappers)) {
+    assert.equal(issueGatewayUnfiled(issues), "no-private-escalation-repository", `${name} carries the mark`);
+    assert.equal(await tryEscalateAsync(escalation({ taskId: `W1-T1570${Object.keys(wrappers).indexOf(name)}` }),
+      { issues, ledgerPath: path, runId: `WRAP-${name}` }), null, name);
+  }
+  const sync = ghIssueGateway(CODE.owner, CODE.repo, { exec: gh.exec, destination: nowhere });
+  assert.equal(tryEscalate(escalation({ taskId: "W1-T15709" }), { issues: { ...sync, listOpen: () => [] }, ledgerPath: path, runId: "WRAP-SYNC" }), null);
+  assert.deepEqual(rows().filter((row) => row.step === "escalation.not_filed").map((row) => row.task_id),
+    ["W1-T15700", "W1-T15701", "W1-T15702", "W1-T15709"], "each wrapped escalation is the ledger row");
+  assert.equal(rows().some((row) => row.step === "escalation.failed" || row.step === "escalation.issue_opened"), false);
+  assert.deepEqual([creates, gh.calls], [[], []], "no create is attempted and no gh call runs");
+  // A routed gateway's route survives the same wrapper, so a wrapped listing is still read as the pool.
+  const routed = ghIssueGatewayAsync(CODE.owner, CODE.repo, { exec: async (args) => gh.exec(args), destination: toOps });
+  assert.equal(issueGatewayRepository({ ...routed, listOpen: async () => [] }), OPS);
+  assert.equal(escalationListingIsRouted(CODE.owner, CODE.repo, { ...routed, listOpen: async () => [] }), true);
 });
 
 test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery closes it", (t) => {

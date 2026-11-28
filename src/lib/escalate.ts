@@ -2012,6 +2012,23 @@ const asyncIssueTwins = new WeakMap<IssueGateway, AsyncIssueGateway>();
 /** W1-T14998: the repository each real gateway files in, and the reason a gateway files nowhere. */
 const gatewayRepository = new WeakMap<object, string>();
 const unfiledGateways = new WeakMap<object, string>();
+/** The same two marks as own enumerable symbol properties, so a producer's `{ ...issues, listOpen }` wrapper (the
+ *  sweep's stall question, run-task's assigning gateway, the reviewer-health and refusal-alarm dedups) still carries
+ *  them: an unrouted engine escalation through a wrapper stays a ledger row, never a thrown create. */
+const GATEWAY_REPOSITORY_MARK: unique symbol = Symbol("rmd.escalation-gateway.repository");
+const GATEWAY_UNFILED_MARK: unique symbol = Symbol("rmd.escalation-gateway.unfiled");
+type MarkedGateway = { [GATEWAY_REPOSITORY_MARK]?: string; [GATEWAY_UNFILED_MARK]?: string };
+
+function markGateway(gateway: object, mark: typeof GATEWAY_REPOSITORY_MARK | typeof GATEWAY_UNFILED_MARK, value: string): void {
+  (mark === GATEWAY_REPOSITORY_MARK ? gatewayRepository : unfiledGateways).set(gateway, value);
+  (gateway as MarkedGateway)[mark] = value;
+}
+
+function gatewayMark(gateway: object, mark: typeof GATEWAY_REPOSITORY_MARK | typeof GATEWAY_UNFILED_MARK): string | undefined {
+  const carried = (gateway as MarkedGateway)[mark];
+  return typeof carried === "string" ? carried
+    : (mark === GATEWAY_REPOSITORY_MARK ? gatewayRepository : unfiledGateways).get(gateway);
+}
 
 function driveSynchronousEscalation<T>(drive: () => T): T {
   // Latched producers and SRE feedback can consume an incident after this call. Preserve
@@ -2356,7 +2373,7 @@ export function ghIssueGateway(
     return local;
   }
   const gateway = scopedToCodeRepository(issueGatewaySteps(route.repository, run, runStepsSync), route.repository, code, true) as IssueGateway;
-  gatewayRepository.set(gateway, route.repository);
+  markGateway(gateway, GATEWAY_REPOSITORY_MARK, route.repository);
   if (opts.exec === undefined) asyncIssueTwins.set(gateway, ghIssueGatewayAsync(owner, repo, { destination: () => route }));
   return gateway;
 }
@@ -2376,7 +2393,7 @@ export function ghIssueGatewayAsync(
   const raw = issueGatewaySteps(route.repository, run, runStepsAsync);
   const gateway = opts.scopeToCodeRepository === false ? raw
     : scopedToCodeRepository(raw, route.repository, code, true);
-  gatewayRepository.set(gateway, route.repository);
+  markGateway(gateway, GATEWAY_REPOSITORY_MARK, route.repository);
   return gateway;
 }
 
@@ -2490,7 +2507,7 @@ export function pooledIssueIsCodeRepositorys(issue: Pick<OpenIssue, "url" | "bod
  *  do). Only then does a reader apply {@link pooledIssueIsCodeRepositorys}; an unrouted, fake or unfiled gateway
  *  lists its own repository's issues unfiltered. The code repository (`_owner`/`_repo`) does not change the answer. */
 export function escalationListingIsRouted(_owner: string, _repo: string, gateway: object): boolean {
-  return gatewayRepository.get(gateway) !== undefined;
+  return gatewayMark(gateway, GATEWAY_REPOSITORY_MARK) !== undefined;
 }
 
 /** W1-T14998 — `body` with its code repository recorded first in its machine fields, so it is the one
@@ -2537,12 +2554,12 @@ export function scopedToCodeRepository(gateway: AsyncIssueGateway, route: string
 
 /** W1-T14998 — the repository a gateway files in, or undefined for a fake gateway or one that files nowhere. */
 export function issueGatewayRepository(gateway: object): string | undefined {
-  return gatewayRepository.get(gateway);
+  return gatewayMark(gateway, GATEWAY_REPOSITORY_MARK);
 }
 
 /** W1-T14998 — why a gateway files nowhere, or undefined when it files somewhere. */
 export function issueGatewayUnfiled(gateway: object): string | undefined {
-  return unfiledGateways.get(gateway);
+  return gatewayMark(gateway, GATEWAY_UNFILED_MARK);
 }
 
 /** A gateway that opens nothing: no open issue to dedupe against or retire, and every write refused with its reason. */
@@ -2557,7 +2574,7 @@ function unfiledIssueGateway(reason: string, form: "sync" | "async" = "async"): 
     editBody: () => Promise.reject(error()), editComment: () => Promise.reject(error()),
     listOpen: () => Promise.resolve([]), listCommentsSince: () => Promise.resolve([]), ensureLabel: () => Promise.resolve(false),
   };
-  unfiledGateways.set(gateway, reason);
+  markGateway(gateway, GATEWAY_UNFILED_MARK, reason);
   return gateway;
 }
 
@@ -2650,7 +2667,7 @@ export function ghIssueGatewayGraphql(
   // (a route naming the code repository itself included), so its listing and writes are scoped the same way.
   if (route.outcome === "unfiled") return gateway;
   const scoped = scopedToCodeRepository(gateway, repoArg, code, true);
-  gatewayRepository.set(scoped, repoArg);
+  markGateway(scoped, GATEWAY_REPOSITORY_MARK, repoArg);
   return scoped;
 }
 
