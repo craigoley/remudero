@@ -78,7 +78,7 @@ interface PortDouble {
   lifecycleError?: Error;
   headError?: Error;
   truncated?: boolean;
-  open: Array<{ number: number; headRef: string }>;
+  open: Array<{ number: number; headRef: string; body?: string }>;
   openError?: Error;
   reads: number;
   reopened: Array<{ prUrl: string; comment: string }>;
@@ -100,7 +100,7 @@ function reversalPort(over: Partial<PortDouble> = {}): PortDouble & { port: Rese
       },
       openPullRequests: async () => {
         if (gh.openError) throw gh.openError;
-        return gh.open;
+        return gh.open.map((pr) => ({ body: "", ...pr }));
       },
       reopen: async (kept: KeptResequenceClose, comment: string) => {
         if (gh.reopenError) throw gh.reopenError;
@@ -553,6 +553,65 @@ test("W1-T15185 criterion 1: a kept close whose task has a newer open PR on anot
   }
 });
 
+/** The production port over GitHub answers for the closed #18581 and one page of open pull requests. */
+function productionPort(open: Array<{ number: number; head: string; body: string }>) {
+  const reopened: string[][] = [];
+  const port = createResequenceCloseReversalPort({
+    readJson: async (args) => {
+      const path = args[1]!;
+      if (path.endsWith(`/pulls/${PR_NUMBER}`)) return { state: "closed", merged: false };
+      if (path.includes(`/issues/${PR_NUMBER}/events`)) return [{ event: "closed", created_at: new Date(CLOSED_AT_MS).toISOString() }];
+      if (path.includes("/git/matching-refs/heads/")) return [{ ref: `refs/heads/${HEAD_REF}` }];
+      if (path.includes("/pulls?state=open") && path.endsWith("&page=1")) {
+        return open.map((pr) => ({ number: pr.number, html_url: PR_URL.replace(/\d+$/, String(pr.number)), state: "open",
+          head: { ref: pr.head, sha: "e".repeat(40) }, body: pr.body, title: "t", updated_at: "2026-11-15T00:00:00Z" }));
+      }
+      if (path.includes("/pulls?state=open")) return [];
+      throw new Error(`unexpected read ${path}`);
+    },
+    ghRun: (_file, args) => { reopened.push([...args]); },
+  });
+  return { port, reopened };
+}
+
+for (const [shape, head] of [["a trailer on a non-run head", "fix/dep-rework"], ["a trailer on a run-shaped head with no epoch", "run-W1-T12214-rebuild"]] as const) {
+  test(`W1-T15185 criterion 1: an open PR owning the task by ${shape} drops the close through the production port`, async () => {
+    // A human opens the rework on GitHub: its body carries the task's trailer, so the plan already credits it to the task.
+    const gh = productionPort([{ number: 18700, head: "run-W1-T99999-1794800000000", body: "Remudero-Task: W1-T99999" },
+      { number: NEWER_PR, head, body: `Rework after the dependency merged.\n\nRemudero-Task: ${TASK_ID}\n` }]);
+    const h = await closedForUnmetDependency(reversalPort(), { resequenceCloseReversal: gh.port });
+    try {
+      h.merged(DEP_ID);
+      await runSweep([], h.deps, DEFAULT_SWEEP_POLICY);
+      assert.deepEqual(gh.reopened, [], "the closed PR is not reopened beside the open one");
+      const dropped = h.rows(DROPPED);
+      assert.equal(dropped.length, 1, "exactly one drop row");
+      assert.equal(dropped[0]!.pr_number, PR_NUMBER);
+      assert.equal(dropped[0]!.open_pr_number, NEWER_PR);
+      assert.equal(dropped[0]!.open_head_ref, head);
+      assert.equal(h.rows(REVERSED).length + h.rows(REVERSE_FAILED).length, 0);
+      assert.equal(readKeptResequenceCloses(h.ledgerPath).kept.length, 0, "the kept close is removed");
+    } finally {
+      h.cleanup();
+    }
+  });
+}
+
+test("W1-T15185 criterion 2: invariant:sole-pr-still-reopens — an open PR whose trailer names another task, through the production port, does not stop the reopen", async () => {
+  const gh = productionPort([{ number: 18700, head: "fix/dep-rework", body: "Remudero-Task: W1-T99999" },
+    { number: 18702, head: "run-W1-T12214-rebuild", body: "no trailer here" }]);
+  const h = await closedForUnmetDependency(reversalPort(), { resequenceCloseReversal: gh.port });
+  try {
+    h.merged(DEP_ID);
+    await runSweep([], h.deps, DEFAULT_SWEEP_POLICY);
+    assert.deepEqual(gh.reopened.map((args) => args.slice(0, 3)), [["pr", "reopen", PR_URL]], "reopened exactly as before");
+    assert.equal(h.rows(REVERSED).length, 1);
+    assert.equal(h.rows(DROPPED).length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("W1-T15185 criterion 2: invariant:sole-pr-still-reopens — with no other open PR for the task the close is reopened, and an unreadable open-PR list holds it", async () => {
   // Open PRs that are not the task's, or are the closed PR's own number or head, do not stop the reopen.
   const sole = reversalPort({ open: [{ number: 18700, headRef: "run-W1-T99999-1794800000000" },
@@ -596,7 +655,7 @@ test("W1-T15185 criterion 2: the production port reads every open PR fresh and r
     },
     ghRun: () => {},
   });
-  assert.deepEqual(await port.openPullRequests(kept), [{ number: NEWER_PR, headRef: NEWER_HEAD }]);
+  assert.deepEqual(await port.openPullRequests(kept), [{ number: NEWER_PR, headRef: NEWER_HEAD, body: "" }]);
   assert.ok(calls.length >= 1 && calls.every((c) => c.fresh && c.args[1]!.startsWith("repos/craigoley/remudero/pulls?state=open")));
   pages = [[{ number: 5, html_url: PR_URL, state: "open", head: {}, body: "", title: "t", updated_at: "x" }]];
   await assert.rejects(() => port.openPullRequests(kept), /unreadable head ref/);
