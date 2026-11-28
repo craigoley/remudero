@@ -1439,6 +1439,7 @@
     "dispatch.refill_read": "Observability for W1-T14893: whether each lane refill reused the published tick read or read afresh, and why; no decision reads it.",
     "dispatch.selection_timing": "Observability for W1-T13286: per-probe selection timing that an operator reads to pick the next speed fix; no decision reads it (invariant measuring-changes-no-decision).",
     "github_app.token_refresh_late": "W1-T14537: a diagnostic that a scheduled App token refresh ran after the token it replaced had expired, with how late; it changes no refresh or credential decision.",
+    "inbox.draft_shortlist_recall": "PR-21136 depends_on shortlist: operator evidence of what share of each lint-clean draft's open depends_on the shortlist at inboxDraftTopK holds, read by hand (rmd ledger-grep) before flipping inboxDraftIndex to topk; nothing decides on the row.",
     "object_reaper.gc_log_cleared": "An operator-facing record that the reaper removed a stale gc.log after a clean full pass, with its age and first line; the following repository_maintenance.complete row carries the gc.log verdict every reader uses, so nothing re-reads it.",
     "reviewer.health_save_superseded": "A diagnostic that an evaluation skipped its save because a newer health file was already on disk; the newer file is the state every reader uses, so nothing re-reads the row.",
     "reviewer.model_divergence": "An operator-facing record of each evaluation's per-model judgement; the incident state in reviewer-health.json carries the decision, so nothing re-reads the row.",
@@ -1472,6 +1473,11 @@
     "github.delivery": "W1-T14881: GitHub's own record of each webhook delivery's status and duration; it is the evidence for webhook timeouts, and only its own pass reads it back (W1-T14979, to redeliver failed ones).",
     "github.delivery.read_failed": "W1-T14881: a diagnostic that a delivery-log pass could not read a page; the next pass rereads from the same cursor, so nothing re-reads the row.",
     "github.delivery.redelivered": "W1-T14979: the record that a failed delivery was redelivered once; only its own pass reads it back, to never redeliver twice.",
-    "host_memory.shared": "W1-T14903: an audit row of the one host memory snapshot both lanes cut from; the widths act on the snapshot itself, and nothing decides on the row."
+    "host_memory.shared": "W1-T14903: an audit row of the one host memory snapshot both lanes cut from; the widths act on the snapshot itself, and nothing decides on the row.",
+    "ci_judge.skipped": "PR-unfiled ci-judge reuse: an audit row that a full floor was posted without a model call; the posted status carries the verdict, and nothing decides on the row.",
+    "ci_judge.reused": "PR-unfiled ci-judge reuse: an audit row that a prior verdict was reposted for an unchanged patch id; the verdicts file carries the state, and nothing decides on the row.",
+    "ci_judge.verdicts_unreadable": "PR-unfiled ci-judge reuse: a diagnostic that the verdicts file could not be read, so the pass judged afresh; it is rewritten on the same pass, and nothing re-reads the row.",
+    "typecheck.waited_for_worktree": "W1-T15169: a stderr line that one npm run typecheck waited for another of the same worktree, naming the holder pid and the wait; the lock itself decides, and nothing reads the line.",
+    "typecheck.worktree_beat_failed": "W1-T15169: a stderr diagnostic that a worktree typecheck lock could not be beaten because it was already released or taken over; the holder runs on, and nothing reads the line."
   }
 }

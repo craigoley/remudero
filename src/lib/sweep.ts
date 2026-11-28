@@ -17,7 +17,7 @@ import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolv
   type FixProgressWitness, type FixProgressHostedProofResult,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict,
   sameCriterionStall, nextStallRemedy, stallRemedyRows, failedApproaches, rowPrNumber, type StallRemedy,
-  type FixProgressReaskResult, type PriorRoundHold } from "./fix-progress-judge.js";
+  type FixProgressReaskResult, type FixProgressReaskedFrom, type PriorRoundHold } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredNames, resolveCiGateRequiredSource, type CiGateRequiredSource } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehomePorts } from "./head-rehome.js";
@@ -1001,6 +1001,22 @@ export function isFleetOwnedRunBranch(head: string | undefined): boolean {
   const owner = taskIdFromRunBranch(head);
   if (owner === undefined) return false;
   return isSyntheticOrchestratorLaneId(owner) || TASK_ID_TRAILER_RE.test(owner);
+}
+
+/** W1-T15170: an operator hand build of a filed task uses the same run-<task>-<ms> head the fleet does, so the head
+ * alone cannot tell them apart. An open PR is fleet-owned only when its head is and its author is the fleet App.
+ * An author the batch did not carry (absent, empty, not a string) counts owned, as an unresolvable head does. */
+export function isFleetOwnedOpenPr(pr: { headRefName?: string; authorLogin?: unknown }): boolean {
+  if (!isFleetOwnedRunBranch(pr.headRefName)) return false;
+  const author = pr.authorLogin;
+  return typeof author !== "string" || author.trim() === "" || isFleetAppAuthor(author);
+}
+
+/** W1-T15170: the queue governor's and the W1-T172 lane budget's owned/foreign split of one open-board batch. */
+export function splitOpenPrOwnership(openPrs: ReadonlyArray<{ number: number; headRefName?: string; authorLogin?: unknown }>):
+  { owned: number; foreign: number; ownedPrNumbers: number[] } {
+  const ownedPrNumbers = openPrs.filter(isFleetOwnedOpenPr).map((pr) => pr.number);
+  return { owned: ownedPrNumbers.length, foreign: openPrs.length - ownedPrNumbers.length, ownedPrNumbers };
 }
 
 /** Fix ownership: plan tasks require their own creditable run branch (`status.ts:ownsBranch`).
@@ -2687,8 +2703,13 @@ export function productionFixProgressJudge(opts: {
     const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge");
     const primaryArgs: SpawnWorkerArgs = { ...args, prompt, memoryShadow: { ...args.memoryShadow, ...lightPassMemoryWaitPorts() },
       ...(mount.provider === undefined ? {} : { mountProvider: mount.provider }) };
-    const result = await spawn(primaryArgs);
-    const verdict = result.subtype !== undefined && result.subtype !== "success" ? undefined : parseFixProgressVerdict(result.text);
+    // W1-T15163: a worker that ended without a result (a non-success subtype, or a throw before one) is asked once
+    // more at once with its provider excluded. A worker that returned a success subtype is never re-asked here.
+    const attempt = await askFixProgressJudgeOnce(spawn, primaryArgs);
+    if (attempt === undefined) return undefined;
+    const { result, reaskedFrom } = attempt;
+    const parsed = result.subtype !== undefined && result.subtype !== "success" ? undefined : parseFixProgressVerdict(result.text);
+    const verdict = parsed === undefined || reaskedFrom === undefined ? parsed : { ...parsed, reasked_from: reaskedFrom };
     const shadowKey = `${input.prNumber === undefined ? input.taskId ?? "unknown" : `PR${input.prNumber}`}@${input.headSha}`;
     if (mount.shadow?.provider === "decisions" && opts.log !== undefined) {
       // W1-T12417: a decision-model arm. Not awaited: the verdict returned below is the primary's.
@@ -2711,6 +2732,46 @@ export function productionFixProgressJudge(opts: {
   };
   PRODUCTION_FIX_PROGRESS_JUDGES.add(judge);
   return judge;
+}
+
+/**
+ * W1-T15163: one fix-progress judge call. INVARIANT an-answer-is-asked-once: the second spawn runs only when the first
+ * ended without a result (a defined non-success subtype, or a throw), with the failed provider excluded so the
+ * auction routes elsewhere. A success subtype, parseable or not, returns as it is. A second failure returns that
+ * result (or rethrows), so the caller sees no verdict exactly as before.
+ */
+async function askFixProgressJudgeOnce(spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>, args: SpawnWorkerArgs):
+  Promise<{ result: WorkerResult; reaskedFrom?: FixProgressReaskedFrom } | undefined> {
+  let first: WorkerResult | undefined;
+  let firstThrew = false;
+  let assigned: { provider: WorkerProviderId; model: string } | undefined;
+  const firstArgs: SpawnWorkerArgs = { ...args, onSelectionAssignment: (assignment) => {
+    assigned = { provider: assignment.selected.provider, model: assignment.selected.model };
+    args.onSelectionAssignment?.(assignment);
+  } };
+  try { first = await spawn(firstArgs); } catch {
+    firstThrew = true;
+    first = undefined; // a throw before a result is an attempt that ended without one: it is re-asked below
+  }
+  if (first !== undefined && (first.subtype === undefined || first.subtype === "success")) return { result: first };
+  const provider = first?.provider ?? assigned?.provider;
+  // `model` is the caller's requested label on routed workers (for example Codex
+  // reports `haiku` there); retain the concrete model that actually ran.
+  const reaskedFrom: FixProgressReaskedFrom = { provider: provider ?? "unknown", model: first?.routedModel || assigned?.model || first?.model || "unknown",
+    subtype: first?.subtype ?? "threw" }; // the error text is never copied: a message may carry a secret
+  const exclude = provider === undefined ? args.excludeProviders : [...new Set([...(args.excludeProviders ?? []), provider])];
+  // Cash is a blocked-auction fallback, not an auction candidate. Excluding it alone can send a
+  // second blocked auction straight back into that same fallback before this spawn returns.
+  // Pin this one re-ask to a subscription provider so the excluded cash route cannot re-enter.
+  const reaskMount = provider === "cash" ? "claude" : args.mountProvider;
+  let result: WorkerResult;
+  try { result = await spawn({ ...args, ...(exclude === undefined || exclude.length === 0 ? {} : { excludeProviders: exclude }),
+    ...(reaskMount === undefined ? {} : { mountProvider: reaskMount }) }); }
+  catch (error) {
+    if (firstThrew) throw error;
+    return undefined; // a returned failure followed by a throw preserves the caller's unparseable/re-ask path
+  }
+  return { result, reaskedFrom };
 }
 
 /** W1-T12711: a second uncorroborated harness answer reruns this head's failed checks once; the next pass judges their red. */
