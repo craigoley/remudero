@@ -85,6 +85,53 @@ test("W1-T14929 an idle linked worktree of a home clone is preserve-retired", ()
   } finally { drop(r); }
 });
 
+test("W1-T14929 an unpublished home-tree HEAD with GitHub 422 is not treated as an open PR", () => {
+  const r = homeRig();
+  try {
+    const wt = linkedTree(r, ".worktrees", "wt-unpublished-head");
+    const head = git(wt, "rev-parse", "HEAD").trim();
+    r.shim.addRoute({
+      when: `api repos/craigoley/remudero/commits/${head}/pulls`,
+      stderr: `gh: HTTP 422: No commit found for SHA ${head}`,
+      exit: 1,
+    });
+    age(wt, 10 * DAY_HOURS);
+
+    const out = pass(r);
+    assert.match(out, new RegExp(`REMOVE ${wt}: uncommitted changes; idle 7 days, preserved then retired`));
+    assert.equal(existsSync(wt), false, out);
+    assert.ok(copies(r, wt)[0], out);
+    assert.ok(r.shim.calls().some(call => call.includes(head)), "HEAD itself is checked with GitHub");
+  } finally { drop(r); }
+});
+
+test("W1-T14929 an unpublished HEAD still checks related published PR tips", () => {
+  const r = homeRig();
+  try {
+    const wt = linkedTree(r, ".worktrees", "wt-unpublished-after-pr");
+    git(wt, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+    git(wt, "push", "-q", r.origin, "HEAD:refs/heads/hand/published-pr-tip");
+    git(wt, "update-ref", "refs/remotes/origin/hand/published-pr-tip", "HEAD");
+    const publishedTip = git(wt, "rev-parse", "HEAD").trim();
+    writeFileSync(join(wt, "followup.txt"), "local commit after the published tip\n");
+    git(wt, "add", "followup.txt");
+    git(wt, "commit", "-q", "-m", "local commit after the published tip");
+    const head = git(wt, "rev-parse", "HEAD").trim();
+    r.shim.addRoute({
+      when: `api repos/craigoley/remudero/commits/${head}/pulls`,
+      stderr: `gh: HTTP 422: No commit found for SHA ${head}`,
+      exit: 1,
+    });
+    age(wt, 10 * DAY_HOURS);
+
+    const out = pass(r, { GH_OPEN: "1" });
+    assert.equal(existsSync(wt), true, `related published PR tip keeps the tree:\n${out}`);
+    assert.match(out, new RegExp(`KEEP ${wt}: linked worktree of ${r.clone} has an open pull request`));
+    assert.ok(r.shim.calls().some(call => call.includes(head)), `HEAD ${head}; published ${publishedTip}; calls ${r.shim.calls().join(" | ")}\n${out}`);
+    assert.ok(r.shim.calls().some(call => call.includes(publishedTip)), "the related published tip is checked too");
+  } finally { drop(r); }
+});
+
 test("W1-T14929 a home checkout and a live linked tree are kept", () => {
   const r = homeRig();
   try {
@@ -199,7 +246,7 @@ test("W1-T14929 a recent clean home linked tree waits for the retain window afte
       stdout: "1 1",
     });
 
-    const out = pass(r, { IDLE_MINUTES: "10080", GH_OPEN: "0" });
+    const out = pass(r, { GH_OPEN: "0" });
     assert.equal(existsSync(wt), true, `recent tree waits for retention:\n${out}`);
     assert.match(out, new RegExp(`KEEP ${wt}: written within 10080 min`));
     assert.deepEqual(copies(r, wt), []);

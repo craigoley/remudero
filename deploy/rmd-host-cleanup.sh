@@ -942,7 +942,7 @@ sweep_worktree() {
 # that hold it or that it holds outside the default branch. A non-GitHub origin has no pull requests.
 HOME_PR_MAX_LOOKUPS="${RMD_CLEANUP_HOME_PR_MAX_LOOKUPS:-20}"
 home_tree_open_pr() {
-  local wt="$1" url base head tips tip n count=0 head_in_base=1
+  local wt="$1" url base head tips tip n count=0 head_in_base=1 head_result head_error gh slug
   url="$(rgit "$wt" config --get remote.origin.url 2>/dev/null)" || return 1
   case "$url" in https://github.com/*|git@github.com:*|ssh://git@github.com/*) ;; *) return 1 ;; esac
   base="$(rgit "$wt" rev-parse -q --verify refs/remotes/origin/HEAD 2>/dev/null)" ||
@@ -963,7 +963,26 @@ home_tree_open_pr() {
     [ "$tip" = "$base" ] && continue
     count=$(( count + 1 ))
     [ "$count" -le "$HOME_PR_MAX_LOOKUPS" ] || return 0      # too many to establish: keep
-    n="$(rmd_gh_commit_pulls "$wt" "$tip" '[.[] | select(.state == "open")] | length')" || return 0
+    if [ "$tip" = "$head" ]; then
+      # A local unpublished HEAD is a normal worktree state. GitHub's commits/pulls endpoint
+      # answers 422 when it has never seen that SHA; that means no PR for this tip, while any
+      # related published tips below still need their own checks. Other API failures stay closed.
+      slug=${url#*github.com}; slug=${slug#[:/]}; slug=${slug%.git}
+      case "$slug" in */*/*|/*|*/|' '|''|*[!A-Za-z0-9._/-]*) return 0 ;; esac
+      gh=$(command -v gh 2>/dev/null) || { [ -x /opt/homebrew/bin/gh ] && gh=/opt/homebrew/bin/gh; } || { [ -x /usr/local/bin/gh ] && gh=/usr/local/bin/gh; } || return 0
+      if command -v timeout >/dev/null 2>&1; then
+        head_error="$(GH_PROMPT_DISABLED=1 timeout 20 "$gh" api "repos/$slug/commits/$head/pulls" --jq '[.[] | select(.state == "open")] | length' 2>&1)" && head_result="$head_error"
+      else
+        head_error="$(GH_PROMPT_DISABLED=1 perl -e 'alarm 20; exec @ARGV' "$gh" api "repos/$slug/commits/$head/pulls" --jq '[.[] | select(.state == "open")] | length' 2>&1)" && head_result="$head_error"
+      fi
+      if [ -z "${head_result:-}" ]; then
+        case "$head_error" in *'HTTP 422:'*|*'HTTP 422 '*|*'status: 422'*) continue ;; *) return 0 ;; esac
+      fi
+      n="$head_result"
+      head_result=""
+    else
+      n="$(rmd_gh_commit_pulls "$wt" "$tip" '[.[] | select(.state == "open")] | length')" || return 0
+    fi
     case "$n" in ''|*[!0-9]*) return 0 ;; esac
     [ "$n" -gt 0 ] && return 0
   done < <(printf '%s\n' "$tips" | sort -u)
@@ -1024,6 +1043,7 @@ retire_orphan_home_tree() {
   act rm -rf -- "$wt" && tally "home-orphan ${wt%/*}" "$bytes"
 }
 sweep_home_clone_worktrees() {
+  local IDLE_MINUTES=$(( HELD_WORKTREE_DAYS * 1440 ))
   local clone list line wt first gitdir d
   while IFS= read -r clone; do
     clone="${clone%/}"
