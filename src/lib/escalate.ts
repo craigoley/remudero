@@ -2485,9 +2485,12 @@ export function issueIsCodeRepositorys(issue: Pick<OpenIssue, "title" | "body">,
  *  it names, in its body or title, must not be another repository's. A legacy issue recording none is judged by the
  *  PR it names, as the routed gateway's listing judges it. A listing that is not routed applies no such rule. */
 export function pooledIssueIsCodeRepositorys(issue: Pick<OpenIssue, "title" | "body">, codeRepository: string): boolean {
+  const recorded = escalationCodeRepository(issue.body);
+  // The machine field is the issue's ownership record. Its PR links can point elsewhere (for
+  // example, a routed grill about a public PR); use those links only for pre-field legacy issues.
+  if (recorded !== undefined) return recorded.toLowerCase() === codeRepository.toLowerCase();
   const same = (named: string | undefined) => named === undefined || named.toLowerCase() === codeRepository.toLowerCase();
-  return same(escalationCodeRepository(issue.body))
-    && same(prReferentRepositoryFromIssueText(issue.body)) && same(prReferentRepositoryFromIssueText(issue.title));
+  return same(prReferentRepositoryFromIssueText(issue.body)) && same(prReferentRepositoryFromIssueText(issue.title));
 }
 
 /** W1-T14998 — whether `gateway` lists the escalation issues of `owner/repo` from a routed pool: a real gateway

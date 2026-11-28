@@ -419,8 +419,8 @@ test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery close
   await green();
   assert.deepEqual(logged.filter((row) => row.step === "main.health.resolved").map((row) => row.issue_url), [siteUrl]);
   assert.deepEqual(gh.issues.map((issue) => [issue.url, issue.state]), [[coreUrl, "open"], [siteUrl, "closed"]]);
-  // Core's reconciler, over the routed ops pool, never takes site's PR-45 ask (or one naming site's PR) for core's PR #45;
-  // a legacy issue recording no repository is judged by the PR it names, as the routed listing judges it.
+  // Core's reconciler, over the routed ops pool, follows an explicit code-repository field even if a grill cites a
+  // different PR. For legacy issues without that field, it still judges by the PR repository as the listing does.
   const askedPrs: number[] = [];
   const github = { prByRef: (n: number) => (askedPrs.push(n), { number: n, url: `https://github.com/${code}/pull/${n}`, state: "MERGED" }),
     prByTrailer: () => undefined, mergedNewestFirst: () => [] };
@@ -439,9 +439,9 @@ test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery close
       { issues: { listOpen: () => pool }, github: github as never, evidenceRootFor: () => undefined, routed })
       .map((c) => [c.issueNumber, c.derived.merged]);
   };
-  assert.deepEqual(reconcile(true), [[4, true], [6, true], [7, true], [8, true]],
-    "core judges its own, recorded or legacy, and never one recording or naming site");
-  assert.deepEqual(askedPrs, [44, 46, 47, 48], "site's PR-45 is never resolved on core");
+  assert.deepEqual(reconcile(true), [[4, true], [5, true], [6, true], [7, true], [8, true]],
+    "an explicit core ownership field wins; unrecorded legacy issues still follow their PR repository");
+  assert.deepEqual(askedPrs, [44, 45, 46, 47, 48]);
   assert.deepEqual(reconcile().map(([n]) => n), [3, 4, 5, 6, 7, 8, 9], "control: a listing that is not routed applies no pool rule");
   // A routed gateway is read as routed; one filing in its own code repository, or a fake, is not.
   assert.equal(escalationListingIsRouted(CODE.owner, CODE.repo, core), true);
@@ -451,7 +451,7 @@ test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery close
   const rest = JSON.stringify(pool.map((issue) => ({ number: issue.number, html_url: issue.url, title: issue.title, body: issue.body })));
   const ports = withEnv(OPS, () => productionIssueRevalidationPorts({ ...CODE, stateDir: tmpdir(), repoRoot: tmpdir(), log: () => {},
     referentVerdicts: async () => new Map(), hasReferent: () => false, judgeText: async () => "", readText: async () => rest } as never));
-  assert.deepEqual((await ports.listOpenIssues()).map((issue) => issue.number), [4, 6, 7, 8]);
+  assert.deepEqual((await ports.listOpenIssues()).map((issue) => issue.number), [4, 5, 6, 7, 8]);
 });
 
 test("W1-T14998 criterion 4: unrouted public and private managed repositories file in themselves" +
@@ -516,7 +516,8 @@ test("W1-T14998 criterion 4: unrouted public and private managed repositories fi
 });
 
 /** An owner-reply reader over `pool`'s open issues: each has one owner comment answering `re-review`. */
-function poolReader(t: TestContext, pool: string, codeRepository: string | undefined, issues: Array<{ number: number; body: string }>) {
+function poolReader(t: TestContext, pool: string, codeRepository: string | undefined,
+  issues: Array<{ number: number; body: string; reactions?: Array<{ id: number; content: string; login: string }> }>) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14998-answers-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const reads: string[] = [];
@@ -534,7 +535,13 @@ function poolReader(t: TestContext, pool: string, codeRepository: string | undef
       return JSON.stringify([{ id: Number(comments[1]) * 100, body: "re-review", user: { login: owner, type: "User" },
         author_association: "OWNER", updated_at: "2026-11-27T08:00:00Z" }]);
     }
-    if (at.includes("/reactions") || at.includes("/issues/comments?")) return "[]";
+    const reactions = new RegExp(`^repos/${pool}/issues/(\\d+)/reactions\\?per_page=100$`).exec(at);
+    if (reactions) {
+      const issue = issues.find((entry) => entry.number === Number(reactions[1]));
+      return JSON.stringify((issue?.reactions ?? []).map((reaction) => ({ id: reaction.id, content: reaction.content,
+        user: { login: reaction.login, type: "User" }, created_at: "2026-11-27T08:00:00Z" })));
+    }
+    if (at.includes("/issues/comments?")) return "[]";
     throw new Error(`unrouted read ${at}`);
   }, undefined, undefined, ...(codeRepository === undefined ? [] : [codeRepository]));
   gateway.reactPlusOne = (id) => void reacted.push(id);
@@ -561,11 +568,15 @@ test("W1-T14998 criterion 5: an owner reply on another repository's pooled issue
     { number: 1, body: withCodeRepositoryField(answerable("W1-T15500"), "craigoley/site") },
     { number: 2, body: answerable("W1-T15500", { summary: `PR ${SITE_PR} needs a review`, detail: `Review of ${SITE_PR} stalled.` }) },
     { number: 3, body: withCodeRepositoryField(answerable("W1-T15500"), CORE_REPO) },
+    { number: 4, body: withCodeRepositoryField(answerable("W1-T15501", {
+      summary: `PR ${SITE_PR} needs a review`, detail: `Review of ${SITE_PR} stalled.`,
+    }), CORE_REPO), reactions: [{ id: 401, content: "+1", login: "craigoley" }] },
   ]);
   const { result, stored, ignored } = await core.read();
-  assert.deepEqual(stored, [["W1-T15500", "issue#3:comment:300"]], "only core's own issue lands an answer");
-  assert.deepEqual(core.reacted, [300], "and only its reply is acknowledged");
-  assert.equal(result.accepted, 1);
+  assert.deepEqual(stored, [["W1-T15500", "issue#3:comment:300"], ["W1-T15501", "issue#4:comment:400"],
+    ["W1-T15501", "issue#4:reaction:401"]], "the recorded owner field wins over an unrelated PR link");
+  assert.deepEqual(core.reacted, [300, 400, 4], "accepted comments and reactions are acknowledged");
+  assert.equal(result.accepted, 3);
   assert.deepEqual(ignored, [], "another repository's issue writes no refusal row");
   assert.equal(core.reads.some((at) => /\/issues\/[12]\//.test(at)), false, "another repository's issue is never read");
   // The ops daemon reads its own repository, which is also the pool: an issue recording another code repository is skipped.
@@ -578,7 +589,7 @@ test("W1-T14998 criterion 5: an owner reply on another repository's pooled issue
   assert.deepEqual([ops.reacted, opsRead.ignored], [[400], []]);
 });
 
-test("W1-T14998 criterion 6: an owner reply on this repository's own issue lands as before", async (t) => {
+test("W1-T14998 criterion 6: owner comments and reactions on this repository's legacy issue still land", async (t) => {
   // A routed reader answers its own recorded issue and a legacy one recording none and naming no other repository's PR.
   const routed = poolReader(t, OPS, CORE_REPO, [
     { number: 3, body: withCodeRepositoryField(answerable("W1-T15500"), CORE_REPO) },
@@ -587,14 +598,18 @@ test("W1-T14998 criterion 6: an owner reply on this repository's own issue lands
   const routedRead = await routed.read();
   assert.deepEqual(routedRead.stored, [["W1-T15500", "issue#3:comment:300"], ["W1-T15501", "issue#5:comment:500"]]);
   assert.deepEqual([routed.reacted, routedRead.result.accepted], [[300, 500], 2]);
-  // An unrouted reader over its own code repository answers every issue there, legacy and recorded, as origin/main does.
+  // An unrouted reader over its own code repository answers every issue there, legacy and recorded, as origin/main did
+  // before this pool filter existed. This pre-field issue deliberately quotes site's PR: the owner comment and reaction
+  // must still land exactly as they did on main because the issue itself lives in core.
   const own = poolReader(t, CORE_REPO, undefined, [
-    { number: 6, body: answerable("W1-T15503") },
+    { number: 6, body: answerable("W1-T15503", { summary: `PR ${SITE_PR} needs a review`, detail: `Review of ${SITE_PR} stalled.` }),
+      reactions: [{ id: 601, content: "+1", login: "craigoley" }] },
     { number: 7, body: withCodeRepositoryField(answerable("W1-T15504"), CORE_REPO) },
   ]);
   const ownRead = await own.read();
-  assert.deepEqual(ownRead.stored, [["W1-T15503", "issue#6:comment:600"], ["W1-T15504", "issue#7:comment:700"]]);
-  assert.deepEqual([own.reacted, ownRead.ignored], [[600, 700], []]);
+  assert.deepEqual(ownRead.stored, [["W1-T15503", "issue#6:comment:600"], ["W1-T15503", "issue#6:reaction:601"],
+    ["W1-T15504", "issue#7:comment:700"]]);
+  assert.deepEqual([own.reacted, ownRead.result.accepted, ownRead.ignored], [[600, 6, 700], 3, []]);
 });
 
 test("W1-T14998: routed answers include legacy code-repository issues and scope refusal alarms to their owner", async (t) => {
