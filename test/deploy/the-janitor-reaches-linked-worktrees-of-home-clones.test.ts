@@ -144,6 +144,7 @@ test("W1-T14929 a diverged same-named origin tip with an open PR keeps the home 
     git(wt, "commit", "--amend", "--no-edit", "-q", "-m", "rebased unpublished head");
     const amendedHead = git(wt, "rev-parse", "HEAD").trim();
     assert.notEqual(amendedHead, publishedTip, "the local branch diverges from its published PR tip");
+    stubUnpublishedHead(r, amendedHead);
     age(wt, 10 * DAY_HOURS);
 
     const out = pass(r, { GH_OPEN: "1" });
