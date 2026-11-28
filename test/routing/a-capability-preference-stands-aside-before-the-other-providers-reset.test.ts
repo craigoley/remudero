@@ -186,7 +186,7 @@ const PREFERENCES = TABLE?.providerPreference;
 const ROLES = TABLE?.rolePreference;
 
 test("W1-T14298 criterion 1: Claude's final rung stands a balanced build's Codex preference aside, and 30 hours out it does not", async (t) => {
-  assert.deepEqual(PREFERENCES, { frontier: "claude", balanced: "codex" }, "the committed capability preferences");
+  assert.deepEqual(PREFERENCES, { frontier: "claude", balanced: "codex", economy: "claude" }, "the committed capability preferences");
   assert.ok(COMMITTED.includes("    balanced: codex\n"));
   const committed = checkout(t);
   const before = checkout(t, COMMITTED.replace("    balanced: codex\n", ""));
