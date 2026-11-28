@@ -2107,8 +2107,7 @@ export interface ParsedDraft {
   stampLine: string;
 }
 
-/** The draft as the rung lints and caches it: its blocked tasks queued and the harness's STAMP composed from the model's
- *  summary. The in-spawn evaluation judges this same draft, so its verdict matches the rung's. */
+/** The draft the rung lints and caches (blocked tasks queued, STAMP composed); the in-spawn eval judges it too. */
 export function composeDraftStamp(proposalId: string, draft: ParsedDraft, clock?: Clock): ParsedDraft {
   if (draft.releaseTaskId !== undefined) return draft;
   const fragmentYaml = queueDraftedBlockedTasks(draft.fragmentYaml);
@@ -2875,10 +2874,8 @@ export interface RepairedDraftLint {
   repaired: string[];
 }
 
-/** Lint a drafted fragment and, when it is dirty, repair it ONCE and lint it again: {@link repairDraftedFragment}'s
- *  fixes, then the repairs `rmd approve` would make anyway ({@link repairRatificationFragment}), last, so the result is
- *  their fixed point and approve's own pass over it changes nothing. A repair that would bring in a check the first
- *  lint did not raise is dropped whole, so a repaired draft is never worse than the model's. */
+/** Lint a fragment; when dirty, repair ONCE ({@link repairDraftedFragment}, then {@link repairRatificationFragment})
+ *  and lint again. A repair raising a check the first lint did not is dropped whole, so it never worsens a draft. */
 export function lintDraftedFragmentWithRepair(fragmentYaml: string, proposalId: string, stampLine: string,
   facts?: DraftRepoFacts, autofix = true): RepairedDraftLint {
   const moduleExists = facts?.moduleExists ?? HARNESS_FACTS.moduleExists;
@@ -2997,8 +2994,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
   const requestHistory = (lane === undefined ? undefined : CASH_DRAFT_REQUEST_HISTORY.get(lane)) ?? [];
   if (lane !== undefined) CASH_DRAFT_REQUEST_HISTORY.set(lane, requestHistory);
   const draftOne = async (proposal: Proposal, snapshot?: InboxDraftSnapshot): Promise<DraftRungOutcome> => {
-    // ONE repair pass per drafted answer, before its violations may spend a redraft; a repaired fragment replaces the
-    // model's, so a fully repaired draft caches exactly as a lint-clean one does.
+    // ONE repair pass per answer, before its violations spend a redraft; a fully repaired draft caches as a clean one.
     const lintAndRepair = (draft: ParsedDraft, attempt: number): { parsed: ParsedDraft; violations: DraftLintViolation[] } => {
       if (draft.releaseTaskId) return { parsed: draft, violations: [] };
       const linted = lintDraftedFragmentWithRepair(draft.fragmentYaml, proposal.id, draft.stampLine, deps.repoFacts, deps.draftAutofix !== false);
