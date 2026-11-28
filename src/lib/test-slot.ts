@@ -661,6 +661,11 @@ export interface ReservedTreeProbeHost {
   ownerUid?: number;
 }
 
+/** W1-T15112: the kernel's fixed inode for the initial pid namespace (PROC_PID_INIT_INO, 0xEFFFFFFC), as
+ *  `readlink /proc/self/ns/pid` prints it. Only a waiter here can see every namespace's members and starts. A one-entry
+ *  NSpid is not enough: NSpid counts from the namespace of the /proc mount, so any container with its own /proc reads
+ *  one entry while seeing nothing of its siblings. */
+export const INITIAL_PID_NAMESPACE = "pid:[4026531836]";
 const goneProcess = (error: unknown): boolean => ["ENOENT", "ESRCH"].includes(String((error as NodeJS.ErrnoException)?.code));
 const nsPids = (status: string): string[] | undefined => /^NSpid:[ \t]*([0-9]+(?:[ \t]+[0-9]+)*)[ \t]*$/m.exec(status)?.[1]?.split(/[ \t]+/);
 /** Field 22 of a /proc/<pid>/stat line: kernel start ticks since boot, one clock for every pid namespace. */
@@ -689,7 +694,10 @@ export function probeRecordedPidNamespace(held: TestSlotHolder, host: ReservedTr
       `namespace init ${pid} start ${start} ${BigInt(start!) > ownerStart ? ">" : "<="} owner start ${ownerStart}`);
   };
   try {
-    if (read("/proc/self/ns/pid") === held.pidNs) return judgeInit("1");
+    const waiterNs = read("/proc/self/ns/pid");
+    if (waiterNs === held.pidNs) return judgeInit("1");
+    // W1-T15112: a container with its own /proc reads a one-entry NSpid too, yet sees none of a sibling's members.
+    if (waiterNs !== INITIAL_PID_NAMESPACE) return unknown(`waiter is not in the initial pid namespace (${waiterNs}): another namespace's members are invisible from here`);
     const nspid = nsPids(read("/proc/self/status"));
     if (nspid?.length !== 1) return unknown("waiter is not an ancestor of the recorded pid namespace");
     const pids = (host.list ?? (() => readdirSync("/proc")))().filter(name => /^[0-9]+$/.test(name));
@@ -726,8 +734,10 @@ export type ProcessStartScan = { complete: true; starts: ReadonlySet<string> } |
 export function scanProcessStarts(host: ReservedTreeProbeHost = {}): ProcessStartScan {
   const unknown = (reason: string): ProcessStartScan => ({ complete: false, reason });
   if ((host.platform ?? process.platform) !== "linux") return unknown("process start scan requires linux");
-  const read = host.read ?? ((path: string) => readFileSync(path, "utf8"));
+  const read = host.read ?? ((path: string) => path.endsWith("/ns/pid") ? readlinkSync(path) : readFileSync(path, "utf8"));
   try {
+    // W1-T15112: only the initial namespace sees every start on the boot; a sibling container's own /proc does not.
+    if (read("/proc/self/ns/pid") !== INITIAL_PID_NAMESPACE) return unknown("waiter is not in the initial pid namespace");
     if (nsPids(read("/proc/self/status"))?.length !== 1) return unknown("waiter is not in the initial pid namespace");
     const pids = (host.list ?? (() => readdirSync("/proc")))().filter(name => /^[0-9]+$/.test(name));
     // A hidepid mount hides other users' processes, pid 1 among them: an absence there proves nothing.
@@ -1444,7 +1454,9 @@ export function testSlotExecutionAllowed(lease: TestSlotLease): boolean {
   return lease.executionAllowed !== false;
 }
 
-function sleepSync(ms: number): void {
+/** The blocking poll sleep a synchronous admission waits with; also the per-worktree typecheck lock's (W1-T15169), whose
+ *  only caller is `npm run typecheck`'s own process (scripts/typecheck.mjs), never the daemon loop or a serve route. */
+export function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 

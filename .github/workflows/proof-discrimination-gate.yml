@@ -9,11 +9,20 @@ on:
 permissions:
   contents: read
 
+# W1-T15177: a push and a body edit seconds apart start two runs on one head. The newer cancels the
+# older, as ci.yml and ci-gate.yml already do, so the two never race one 10-minute bound and ci-gate's
+# latest-run-per-name rule reads the run that matters.
+concurrency:
+  group: proof-discrimination-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   proof-discrimination:
     name: proof-discrimination
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    # W1-T15177: 20, not 10. The proofs run one at a time at head and merge base, and a body with 17 whole-suite
+    # proofs (#20913, 2026-11-27) was cancelled at 10 minutes twice, once running alone.
+    timeout-minutes: 20
     steps:
       # GitHub's default pull_request checkout is the synthetic merge commit.  The reviewer judges
       # the head, so pin this checkout to the event's head SHA and retain history for merge-base.

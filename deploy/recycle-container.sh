@@ -2623,7 +2623,7 @@ move_inflight_lock_aside() {
     fi
   fi
   mv "${f}" "${reclaimed_path}"
-  printf 'reclaimed by recycle-container.sh (W1-T2556/W1-T3611/W1-T12316) pid %s at %s\nhost: %s\nverdict: %s\n%s' \
+  printf 'reclaimed by recycle-container.sh (W1-T2556/W1-T3611/W1-T12316/W1-T14947) pid %s at %s\nhost: %s\nverdict: %s\n%s' \
     "$$" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${host}" "${verdict}" "${extra}" > "${reclaimed_path}.reason"
   echo "  moved aside to ${reclaimed_path} (reason recorded alongside it) — recycle proceeds" >&2
 }
@@ -2805,6 +2805,83 @@ holder_worktrees() {
 
 # Attribute only by cwd in a counted lock's worktree, never by the lock's pid: it may be the
 # daemon, whose other children (reviews included) still need to block independently.
+# W1-T14947: a review holds state/inflight/reviews/<id>.lock from its claim to its result, between and
+# after its reviewer worker attempts too. Print each such lock that a live review in the TARGET container
+# holds, one path per line. A lock written by another container (one an earlier recycle replaced, whose
+# pid number the new container may have reused), one whose pid is gone, and one the frozen-daemon proof
+# reclaimed print nothing and so never block the drain.
+# W1-T14947: the start time, in epoch seconds, of `pid` inside the target container, read from the container's own
+# /proc (its pids are not this host's). Prints nothing when it cannot be read.
+container_pid_start_epoch() {
+  docker exec "${CONTAINER_NAME}" sh -c '
+    b=$(awk "\$1 == \"btime\" { print \$2 }" /proc/stat 2>/dev/null)
+    t=$(sed -E "s/^.*\) //" "/proc/$1/stat" 2>/dev/null | awk "{ print \$20 }")
+    h=$(getconf CLK_TCK 2>/dev/null)
+    case "$b:$t:$h" in *[!0-9:]*|:*|*::*|*:) exit 0 ;; esac
+    [ "$h" -gt 0 ] && echo $((b + t / h))' sh "$1" 2>/dev/null | head -n 1 || true
+}
+
+live_review_locks() {
+  local f pid host target_host lock_epoch start_epoch
+  [ -d "${INFLIGHT_DIR}/reviews" ] || return 0
+  # Each poll's count first moves aside the review locks the target container proves dead or reused, so a
+  # refused blocker the supervisor waits on disappears; it runs here, not as its own loop step, so the loop's
+  # top-level reclaim stays the one step W1-T2556's falsifier removes.
+  reclaim_dead_review_locks
+  target_host="$(docker inspect --format '{{.Config.Hostname}}' "${CONTAINER_NAME}" 2>/dev/null | head -n 1 || true)"
+  for f in "${INFLIGHT_DIR}/reviews"/*.lock; do
+    [ -e "${f}" ] || continue
+    pid="$(lock_pid_field "${f}")"
+    host="$(lock_host_field "${f}")"
+    printf '%s' "${pid}" | grep -Eq '^[0-9]+$' || continue
+    # No readable target hostname or lock host means this run cannot tie the lock to the target: not counted.
+    [ -n "${target_host}" ] && [ -n "${host}" ] && [ "${host}" = "${target_host}" ] || continue
+    docker exec "${CONTAINER_NAME}" kill -0 "${pid}" >/dev/null 2>&1 || continue
+    # A process that started after the lock was written holds a reused pid, not this review (an in-place restart
+    # killed the review and left its lock): not counted. An unreadable start time keeps the lock counted, and the
+    # drain's own wait still bounds it.
+    lock_epoch="$(epoch_of_started_at "$(lock_started_at_field "${f}")")"
+    start_epoch="$(container_pid_start_epoch "${pid}")"
+    if printf '%s' "${lock_epoch}:${start_epoch}" | grep -Eq '^[0-9]+:[0-9]+$' && [ "$((start_epoch - lock_epoch))" -gt 2 ]; then
+      continue
+    fi
+    printf '%s\n' "${f}"
+  done
+  return 0
+}
+
+# A review can die after a previous drain refusal named its lock. Merely omitting that lock from
+# the next in-flight count is not enough: the supervisor also waits for the refused blocker file
+# to disappear. Move aside only when the target container itself proves the pid absent (or proves
+# it is a reused pid), and retain the original lock and reason for forensics.
+reclaim_dead_review_locks() {
+  local f pid host target_host probe lock_epoch start_epoch identity
+  [ -d "${INFLIGHT_DIR}/reviews" ] || return 0
+  target_host="$(docker inspect --format '{{.Config.Hostname}}' "${CONTAINER_NAME}" 2>/dev/null | head -n 1 || true)"
+  [ -n "${target_host}" ] || return 0
+  for f in "${INFLIGHT_DIR}/reviews"/*.lock; do
+    [ -e "${f}" ] || continue
+    identity="$(inflight_lock_identity "${f}")" || continue
+    pid="$(lock_pid_field "${f}")"
+    host="$(lock_host_field "${f}")"
+    printf '%s' "${pid}" | grep -Eq '^[1-9][0-9]*$' || continue
+    [ "${host}" = "${target_host}" ] || continue
+    probe="$(docker exec "${CONTAINER_NAME}" sh -c '[ -e "/proc/$1" ] && echo PRESENT || echo ABSENT' sh "${pid}" 2>/dev/null | head -n 1 || true)"
+    if [ "${probe}" = ABSENT ]; then
+      move_inflight_lock_aside "${f}" "${host}" "review owner pid ${pid} is absent in the target container (W1-T14947)" \
+        "pid: ${pid}\nreview lock owner is absent from the target container\n" "${identity}" || true
+      continue
+    fi
+    [ "${probe}" = PRESENT ] || continue
+    lock_epoch="$(epoch_of_started_at "$(lock_started_at_field "${f}")")"
+    start_epoch="$(container_pid_start_epoch "${pid}")"
+    if printf '%s' "${lock_epoch}:${start_epoch}" | grep -Eq '^[0-9]+:[0-9]+$' && [ "$((start_epoch - lock_epoch))" -gt 2 ]; then
+      move_inflight_lock_aside "${f}" "${host}" "review owner pid ${pid} was reused after the lock (W1-T14947)" \
+        "pid: ${pid}\nlock epoch: ${lock_epoch}\nprocess start epoch: ${start_epoch}\n" "${identity}" || true
+    fi
+  done
+}
+
 worker_lane() {
   local cwd="$1" f tree
   [ -n "${cwd}" ] || return 0
@@ -2856,7 +2933,8 @@ reclaim_frozen_daemon_holdings() {
   fi
 
   echo "recycle-container: STALLED verdict (${RECYCLE_VERDICT}) — drain.lock holder pid ${dpid} on ${dhost} is the target daemon and wrote no ledger row in ${STALL_BOUND_S}s: FROZEN (W1-T6597)." >&2
-  for f in "${INFLIGHT_DIR}"/*.lock; do
+  # W1-T14947: an in-process review's lock is the frozen daemon's own too, so it is reclaimed the same way.
+  for f in "${INFLIGHT_DIR}"/*.lock "${INFLIGHT_DIR}"/reviews/*.lock; do
     [ -e "${f}" ] || continue
     [ "$(lock_pid_field "${f}")" = "${dpid}" ] && [ "$(lock_host_field "${f}")" = "${dhost}" ] || continue
     echo "  RECLAIMING ${f} — the frozen daemon's own; printed in full before it is moved, never deleted:" >&2
@@ -2976,6 +3054,21 @@ drain_blockers_json() {
       out="${out:+${out},}{\"kind\":\"lock\",\"task_id\":\"$(json_escape "${task_id}")\",\"run_id\":\"$(json_escape "$(lock_run_id_field "${f}")")\",\"age_s\":${age}}"
     done
   fi
+  # W1-T14947: a live review lock is a blocker too. Its task_id is its path under state/inflight, so the supervisor's
+  # settlement read (readLockHolder on <inflight>/<task_id>.lock) sees it go when the review ends.
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    task_id="reviews/$(basename "${f}" .lock)"
+    age=0
+    started_at="$(lock_started_at_field "${f}")"
+    if [ -n "${started_at}" ] && [ -n "${now_epoch}" ]; then
+      started_epoch="$(epoch_of_started_at "${started_at}")"
+      [ -z "${started_epoch}" ] || age=$((now_epoch - started_epoch))
+    fi
+    out="${out:+${out},}{\"kind\":\"lock\",\"task_id\":\"$(json_escape "${task_id}")\",\"run_id\":\"$(json_escape "$(lock_run_id_field "${f}")")\",\"age_s\":${age}}"
+  done <<REVIEW_BLOCKERS
+${review_locks:-}
+REVIEW_BLOCKERS
   while read -r wpid wage wlane wargs; do
     [ -n "${wpid:-}" ] || continue
     [ "${wlane}" = "lane-less" ] || continue
@@ -3082,6 +3175,15 @@ while :; do
     n=$((n + 1))
     counted_locks="${counted_locks}${f}"$'\n'
   done
+  # W1-T14947: a live review is in flight like a lane, so the same bounded wait covers it.
+  review_locks="$(live_review_locks)"
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    n=$((n + 1))
+    counted_locks="${counted_locks}${f}"$'\n'
+  done <<REVIEW_LOCKS
+${review_locks}
+REVIEW_LOCKS
 
   # Lane-less workers, split by age. `busy` blocks the recycle exactly like a lock does; `hung` does
   # not, because it never will.
@@ -3160,6 +3262,13 @@ WORKERS
         sed 's/^/    /' "${f}" 2>/dev/null >&2 || true
       done
     fi
+    while IFS= read -r f; do
+      [ -n "${f}" ] || continue
+      echo "  reviews/$(basename "${f}") (a live review, W1-T14947):" >&2
+      sed 's/^/    /' "${f}" 2>/dev/null >&2 || true
+    done <<REVIEW_LOCKS
+${review_locks}
+REVIEW_LOCKS
     if [ -n "${busy_worker_lines}" ]; then
       echo "  in-flight worker trees — busy, not hung (lane workers are included in their lock count):" >&2
       printf '%s' "${busy_worker_lines}" >&2

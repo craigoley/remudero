@@ -18,7 +18,7 @@ import { clockFromMillisFn, loopAvailableDeadline, systemClock } from "./clock.j
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { RmdError } from "./errors.js";
 import { brokerGhRead, ghBrokerClientSpawn, ghBrokerRouteFor, type GhBrokerClass, type GhBrokerResult } from "./gh-read-broker-client.js";
-import { refreshInstallationToken, type EnsureFreshOutcome, type HeldTokenState } from "./github-app.js";
+import { heldTokenDeadlineMs, refreshInstallationToken, type EnsureFreshOutcome, type HeldTokenState } from "./github-app.js";
 import { createInstallationBudget, installationBudgetForThread, type InstallationBudget, type InstallationBudgetThreadInput, type GithubBudgetThrottledRow } from "./github-installation-budget.js";
 import { ghArgvNeedsNoCredential, githubRepoOfGhArgv, resolveGithubCredential, type GithubCredentialResolution } from "./github-credential.js";
 import {
@@ -231,6 +231,19 @@ export class GhTokenExpiredRefusal extends RmdError {
     super("github", 1, `gh ${args.slice(0, 2).join(" ")} refused: token_expired (its App token expired and was not renewed; no request was sent)`,
       { reason: "token_expired" });
     this.name = "GhTokenExpiredRefusal";
+  }
+}
+
+export class GhReadWaitOutlivesTokenRefusal extends RmdError {
+  readonly reason = "token_life" as const;
+  readonly waitMs: number;
+  readonly remainingMs: number;
+  constructor(waitMs: number, remainingMs: number) {
+    super("github", 1, `gh read cadence refused: token_life (a ${Math.ceil(waitMs / 1000)}s wait with ` +
+      `${Math.max(0, Math.floor(remainingMs / 1000))}s left on its token would outlive it; no request was sent)`, { reason: "token_life" });
+    this.name = "GhReadWaitOutlivesTokenRefusal";
+    this.waitMs = waitMs;
+    this.remainingMs = remainingMs;
   }
 }
 
@@ -808,8 +821,10 @@ async function admitInstallationReadAsync(args: readonly string[]): Promise<void
   }
 }
 
+const notedSecondaryLimitRefusals = new WeakSet<object>();
+
 function noteInstallationRefusal(err: unknown): void {
-  const failure = err as { stdout?: string | Buffer; stderr?: string | Buffer } | null | undefined;
+  const failure = err as { stdout?: string | Buffer; stderr?: string | Buffer; status?: number; message?: string } | null | undefined;
   if (failure?.stdout !== undefined) {
     const stdout = String(failure.stdout);
     githubInstallationBudget().record(parseGhRateLimitHeaders(splitGhHeaderBlock(stdout, stdout.startsWith("[")).headers));
@@ -817,6 +832,11 @@ function noteInstallationRefusal(err: unknown): void {
   // The transport cannot import status.ts without a dependency cycle; match its primary-limit signal.
   const text = failure?.stderr === undefined ? (err instanceof Error ? err.message : String(err)) : String(failure.stderr);
   if (/rate limit|quota/i.test(text)) githubInstallationBudget().noteThrottle("refused");
+  if (err !== null && (typeof err === "object" || typeof err === "function") &&
+    !notedSecondaryLimitRefusals.has(err as object) && ghErrorIsSecondaryLimit(err)) {
+    notedSecondaryLimitRefusals.add(err as object);
+    recordGhSecondaryLimitRefusal();
+  }
 }
 
 export interface GhCallPacer {
@@ -1000,7 +1020,10 @@ export const DEFAULT_GH_REFUSAL_BACKOFF_JITTER_FRACTION = 0.25;
 
 export function defaultGhRetryAfterSeconds(err: unknown): number | undefined {
   const e = err as { stderr?: string | Buffer; message?: string } | null | undefined;
-  const text = `${e?.stderr ?? ""}\n${e?.message ?? ""}`;
+  return retryAfterSecondsIn(`${e?.stderr ?? ""}\n${e?.message ?? ""}`);
+}
+
+function retryAfterSecondsIn(text: string): number | undefined {
   const match = /retry-after\s*:?\s*(\d+)/i.exec(text);
   if (!match) return undefined;
   const seconds = Number(match[1]);
@@ -1059,6 +1082,7 @@ export function paceGhEntry<T>(
     } catch (err) {
       const limited = isRateLimited(err);
       pacer.recordResult(limited);
+      if (limited && ghErrorIsSecondaryLimit(err)) recordGhSecondaryLimitRefusal();
       if (!limited || attempt + 1 >= maxAttempts) throw err;
       pacer.sleepSync?.(ghRefusalBackoffMs(attempt, err, { retryAfterSeconds, floorMs, random }));
       attempt += 1;
@@ -1091,6 +1115,7 @@ export async function paceGhEntryAsync<T>(
     } catch (err) {
       const limited = isRateLimited(err);
       pacer.recordResult(limited);
+      if (limited && ghErrorIsSecondaryLimit(err)) recordGhSecondaryLimitRefusal();
       if (!limited || attempt + 1 >= maxAttempts) throw err;
       await (pacer.sleepAsync ?? defaultTimerSleep)(ghRefusalBackoffMs(attempt, err, { retryAfterSeconds, floorMs, random }));
       attempt += 1;
@@ -1133,6 +1158,58 @@ function resolveGhSharedReadGapMs(env: NodeJS.ProcessEnv): { gapMs: number; loop
  * 32 separates the measured 12-read verb from loops of hundreds, with healthy growth room;
  * fitting the bound to 12 would refuse the next healthy caller that needs one more read. */
 export const DEFAULT_GH_READ_BURST = 32;
+
+export function ghSecondaryLimitStatePath(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const stamp = ghReadCadenceStampPath(env);
+  return stamp === undefined ? undefined : `${stamp}.secondary`;
+}
+
+export function ghLearnedGatedFloorMs(opts: { refusalsMs: readonly number[]; nowMs: number; fullMs: number; gapMs: number }): number {
+  const refusals = opts.refusalsMs.filter((ms) => Number.isFinite(ms)).sort((a, b) => a - b);
+  const last = refusals[refusals.length - 1];
+  if (last === undefined) return Math.min(opts.gapMs, opts.fullMs);
+  let first = last;
+  for (let i = refusals.length - 2; i >= 0 && first - refusals[i]! <= opts.fullMs; i -= 1) first = refusals[i]!;
+  const cleanMs = Math.max(opts.fullMs, 2 * (last - first));
+  const sinceMs = opts.nowMs - last;
+  if (sinceMs < cleanMs) return opts.fullMs;
+  return Math.min(opts.fullMs, Math.max(opts.gapMs, opts.fullMs / 2 ** Math.floor(sinceMs / cleanMs)));
+}
+
+export function readGhSecondaryLimitRefusals(path: string | undefined): number[] {
+  const text = readGhStampText(path);
+  if (text === undefined) return [];
+  return text.split("\n").map((line) => Number(line.trim())).filter(isRefusalTime);
+}
+
+function isRefusalTime(ms: number): boolean {
+  return Number.isFinite(ms) && ms > 0;
+}
+
+export function recordGhSecondaryLimitRefusal(env: NodeJS.ProcessEnv = process.env, atMs: number = systemClock.now()): void {
+  const path = ghSecondaryLimitStatePath(env);
+  if (path === undefined) return;
+  stampGhRead(path, `${[...readGhSecondaryLimitRefusals(path), Math.round(atMs)].slice(-64).join("\n")}\n`, atMs);
+}
+
+export function ghErrorIsSecondaryLimit(err: unknown): boolean {
+  const e = err as { status?: number; stdout?: string | Buffer; stderr?: string | Buffer; message?: string } | null | undefined;
+  if (e === null || e === undefined) return false;
+  const stderr = String(e.stderr ?? "");
+  const text = stderr.trim() === "" ? String(e.message ?? "") : stderr;
+  const refusal = ghStdoutRefusal(e.stdout);
+  if (/secondary rate|abuse detection/i.test(`${text}\n${refusal?.body ?? ""}`)) return true;
+  const shaped = e.status === 403 || e.status === 429 || refusal !== undefined || ghErrorTextLooksRateLimited(err);
+  return shaped && retryAfterSecondsIn(`${refusal?.headers ?? ""}\n${text}`) !== undefined;
+}
+
+function ghStdoutRefusal(stdout: string | Buffer | undefined): { headers: string; body: string } | undefined {
+  const out = String(stdout ?? "");
+  const blocks = [...out.matchAll(/(HTTP\/[0-9.]+ ([0-9]{3})[^\r\n]*\r?\n(?:[A-Za-z0-9-]+:[^\r\n]*\r?\n)*)/g)];
+  const last = blocks.at(-1);
+  if (last === undefined || (last[2] !== "403" && last[2] !== "429")) return undefined;
+  return { headers: last[1]!, body: out.slice(last.index! + last[0].length) };
+}
 
 /** The `search` limiter — a separate bucket with its own, far lower ceiling. */
 export const GH_SEARCH_BUCKET = "search";
@@ -1501,6 +1578,7 @@ export interface GhReadTicket {
   host: string;
   createdMs: number;
   refreshedMs: number;
+  staleAfterMs?: number;
   /** A reader has already given this ticket its reserved slot; nobody yields to it again. */
   yielded: boolean;
 }
@@ -1732,6 +1810,8 @@ export interface GhReadCadenceDeps {
    *  the installation token, it must stamp the APP bucket, never whatever bucket the argv alone
    *  would have implied (e.g. `search`), or the two budgets would bleed into each other. */
   bucketOverride?: string;
+  readSecondaryRefusals?(path: string | undefined): number[];
+  tokenDeadlineMs?(): number | undefined;
   /** W1-T4085: mints the installation token `routeInteractiveGhRead` rides; ignored by the cadence
    *  itself. Injectable so a test drives every branch with no network and no real private key. */
   mint?: GhAppTokenMinter;
@@ -1888,6 +1968,7 @@ interface GhReadCadencePlan {
   addPause(ms: number, lock?: boolean): void;
   /** Prints the read's closing wait line, in wait mode, once its turn has come. */
   reportWait(): void;
+  assertWaitWithinTokenLife(waitMs: number): void;
 }
 
 function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): GhReadCadencePlan {
@@ -1905,10 +1986,19 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
   const isWrite = ghArgvIsWrite(args);
   const isExempt = ghArgvIsCadenceExempt(args);
   const cooldown = env.RMD_GH_COOLDOWN_S;
-  const windowS = cooldown !== undefined && /^[0-9]+$/.test(cooldown) ? Number(cooldown) : DEFAULT_GH_READ_CADENCE_S;
-  const windowMs = windowS * 1000;
+  const explicitWindowS = cooldown !== undefined && /^[0-9]+$/.test(cooldown) ? Number(cooldown) : undefined;
+  const fullWindowS = explicitWindowS ?? DEFAULT_GH_READ_CADENCE_S;
+  let windowS = fullWindowS;
+  let windowMs = windowS * 1000;
   const { gapMs: sharedReadGapMs, loopBoundMs: sharedReadGapLoopBoundMs } = resolveGhSharedReadGapMs(env);
   let mode = resolveGhTransportFloorMode(env);
+  const readSecondaryRefusals = deps.readSecondaryRefusals ?? readGhSecondaryLimitRefusals;
+  const chooseWindow = (nowMs: number): void => {
+    windowS = gatedFirst && mode === "wait" && explicitWindowS === undefined
+      ? ghLearnedGatedFloorMs({ refusalsMs: readSecondaryRefusals(ghSecondaryLimitStatePath(env)), nowMs, fullMs: fullWindowS * 1000, gapMs: sharedReadGapMs }) / 1000
+      : fullWindowS;
+    windowMs = windowS * 1000;
+  };
   /** An invocation's first read under enforce or wait: floored from the counted stamps; stamps `.gated`. */
   let gatedFirst = false;
   /** A gated first read in wait mode that must wait: its floor, or a ticket queued ahead of it. */
@@ -1954,7 +2044,8 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     const host = hostname();
     return readGhReadTickets(stampPath).filter((t) => {
       if (t.id === ticket?.id) return true;
-      const dead = nowMs - t.refreshedMs > windowMs + GH_CADENCE_LOCK_STALE_MS || (sameHost(t.host, host) && !pidAlive(t.pid));
+      const dead = nowMs - t.refreshedMs > (t.staleAfterMs ?? DEFAULT_GH_READ_CADENCE_S * 1000 + GH_CADENCE_LOCK_STALE_MS) ||
+        (sameHost(t.host, host) && !pidAlive(t.pid));
       if (dead) removeGhReadTicket(stampPath, t.id);
       return !dead;
     });
@@ -2006,6 +2097,7 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     mode = resolveGhTransportFloorMode(env);
     const nowMs = now();
     gatedFirst = !isWrite && !isExempt && !burstAllowed && mode !== "advisory";
+    chooseWindow(nowMs);
     // An advisory read gates nothing; its notice still reports the cadence from the NEWEST stamp.
     const lastReadMs = gatedFirst ? countedFloorMs() : readStampMs(stampPath);
     const decision = ghReadCadenceDecision({
@@ -2065,7 +2157,8 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
           ? {
             id: `${pid}-${nowMs}-${randomUUID().slice(0, 8)}`, rank: ghReadTicketRank(callerActor()), actor: callerActor(),
             seq: tickets.reduce((max, t) => Math.max(max, t.seq), 0) + 1, pid, host: hostname(),
-            createdMs: nowMs, refreshedMs: nowMs, yielded: false,
+            createdMs: nowMs, refreshedMs: nowMs,
+            staleAfterMs: fullWindowS * 1000 + GH_CADENCE_LOCK_STALE_MS, yielded: false,
           }
           : { ...mine, refreshedMs: nowMs, yielded: onDisk?.yielded ?? mine.yielded };
         writeGhReadTicket(stampPath, ticket);
@@ -2111,6 +2204,13 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     },
     addPause,
     reportWait,
+    assertWaitWithinTokenLife: (waitMs) => {
+      if (!waiter || waitMs <= 0) return;
+      const deadline = deps.tokenDeadlineMs ? deps.tokenDeadlineMs() : heldTokenDeadlineMs(env.GH_TOKEN);
+      if (deadline === undefined) return;
+      const remainingMs = deadline - now();
+      if (waitMs >= remainingMs) throw new GhReadWaitOutlivesTokenRefusal(waitMs, remainingMs);
+    },
   };
 }
 
@@ -2195,7 +2295,10 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
     let waitMs: number;
     do {
       waitMs = ownAsyncLock ? turn() : withGhCadenceLock(stampPath, lockSleepSync, turn);
-      if (waitMs > 0) sleepSync(waitMs);
+      if (waitMs > 0) {
+        plan.assertWaitWithinTokenLife(waitMs);
+        sleepSync(waitMs);
+      }
     } while (waitMs > 0);
     plan.reportWait();
     if (ownAsyncLock) {
@@ -2234,7 +2337,10 @@ export async function applyGhReadCadenceAsync(
           decision ??= plan.evaluate();
           return await ghReadCadenceTurn(plan, stampPath, cadenceSleep);
         });
-        if (waitMs > 0) await cadenceSleep(waitMs);
+        if (waitMs > 0) {
+          plan.assertWaitWithinTokenLife(waitMs);
+          await cadenceSleep(waitMs);
+        }
       } while (waitMs > 0);
       plan.reportWait();
       return decision!;
@@ -2259,6 +2365,7 @@ export interface GhAppTokenMint {
   ok: boolean;
   /** Present only when `ok`. */
   token?: string;
+  expiresAtMs?: number;
 }
 
 /** Injectable so a test drives every branch with no network and no real private key. */
@@ -2270,7 +2377,9 @@ export type GhAppTokenMinter = (env: NodeJS.ProcessEnv) => Promise<GhAppTokenMin
 async function defaultMintGhAppToken(env: NodeJS.ProcessEnv): Promise<GhAppTokenMint> {
   const scratch: NodeJS.ProcessEnv = { ...env };
   const result = await refreshInstallationToken({ env: scratch });
-  return result.ok && scratch.GH_TOKEN ? { ok: true, token: scratch.GH_TOKEN } : { ok: false };
+  return result.ok && scratch.GH_TOKEN
+    ? { ok: true, token: scratch.GH_TOKEN, ...(result.expiresAtMs === undefined ? {} : { expiresAtMs: result.expiresAtMs }) }
+    : { ok: false };
 }
 
 export interface InteractiveGhReadRoute {
@@ -2304,7 +2413,8 @@ export async function routeInteractiveGhRead(
   if (!minted.ok || !minted.token) {
     return { usesAppToken: false, envOverlay: {}, decision: await applyGhReadCadenceAsync(args, deps) };
   }
-  const decision = await applyGhReadCadenceAsync(args, { ...deps, bucketOverride: GH_APP_READ_BUCKET });
+  const tokenDeadlineMs = deps.tokenDeadlineMs ?? (() => minted.expiresAtMs);
+  const decision = await applyGhReadCadenceAsync(args, { ...deps, bucketOverride: GH_APP_READ_BUCKET, tokenDeadlineMs });
   return { usesAppToken: true, envOverlay: { GH_TOKEN: minted.token }, decision };
 }
 
