@@ -170,7 +170,9 @@ HOME_CLONES="${RMD_CLEANUP_HOME_CLONES-$LIVE_CHECKOUTS}"
 # W1-T14891: worktree roots on the state disk that a container bind mount shadows (the daemon mounts the scratch-disk
 # copy over its worktrees folder), so no container reaches them. Empty off the host layout.
 if [ -n "${RMD_CLEANUP_SHADOWED_WORKTREE_ROOTS+x}" ]; then SHADOWED_WORKTREE_ROOTS="$RMD_CLEANUP_SHADOWED_WORKTREE_ROOTS"
-elif [ "${RMD_CLEANUP_ROOT_FS:-/}" = / ] || [ -n "${RMD_CLEANUP_STATE_DISK+x}" ]; then SHADOWED_WORKTREE_ROOTS="$STATE_DISK/state2/worktrees"
+# Every instance folder on the state disk (state2, remudero-console-state, ...) may hold a worktrees folder that a
+# container's deeper scratch bind hides; each is a candidate, and container_reaches_root judges each one.
+elif [ "${RMD_CLEANUP_ROOT_FS:-/}" = / ] || [ -n "${RMD_CLEANUP_STATE_DISK+x}" ]; then SHADOWED_WORKTREE_ROOTS="$STATE_DISK/*/worktrees"
 else SHADOWED_WORKTREE_ROOTS=""; fi
 # W1-T9617: with the hot checkouts on scratch (deploy/scratch-mounts.sh), each daemon's own checkout
 # and serve's code dir live at <scratch>/rmd/<key>/remudero and .../serve-repo. They are live
@@ -1248,7 +1250,18 @@ sweep_shadowed_worktree_roots() {
       SHADOWED_GITDIR=""; SHADOWED_GITWORKTREE=""
       HOME_LINKED_TREE=""; SHADOWED_UNREACHED=""
     done
-  done < <(printf '%s\n' "$SHADOWED_WORKTREE_ROOTS" | tr ':' '\n' | awk 'NF && !seen[$0]++')
+  done < <(shadowed_root_candidates)
+}
+# The configured roots, each glob (the default "$STATE_DISK/*/worktrees") expanded to the folders that exist.
+shadowed_root_candidates() {
+  local entry path
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      *[*?[]*) for path in $entry; do [ -d "$path" ] && printf '%s\n' "$path"; done ;;
+      *) printf '%s\n' "$entry" ;;
+    esac
+  done < <(printf '%s\n' "$SHADOWED_WORKTREE_ROOTS" | tr ':' '\n') | awk 'NF && !seen[$0]++'
 }
 sweep_home_clone_worktrees() {
   local IDLE_MINUTES=$(( HELD_WORKTREE_DAYS * 1440 ))

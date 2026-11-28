@@ -292,3 +292,32 @@ exec "${realStat}" "$@"
   assert.equal(existsSync(wt), false, out);
   assert.ok(copies(r, wt)[0], out);
 });
+
+test("W1-T14891 a shadowed state-disk worktree is preserve-retired: every instance folder's worktrees root is judged", () => {
+  const r = rig();
+  const { wt: state2Tree } = shadowedTree(r, "run-W1-T9013-1");
+  const consoleRoot = join(r.state, "remudero-console-state", "worktrees");
+  mkdirSync(consoleRoot, { recursive: true });
+  const consoleTree = join(consoleRoot, "run-W1-T9014-1");
+  git(r.clone, "worktree", "add", "-q", "-b", "run/console", consoleTree, "main");
+  writeFileSync(join(consoleTree, "README"), "edited, not committed\n");
+  age(consoleTree, 10 * DAY_HOURS);
+  const siteRoot = join(r.state, "remudero-site-state", "worktrees");
+  mkdirSync(siteRoot, { recursive: true });
+  const siteTree = join(siteRoot, "run-W1-T9015-1");
+  git(r.clone, "worktree", "add", "-q", "-b", "run/site", siteTree, "main");
+  writeFileSync(join(siteTree, "README"), "edited, not committed\n");
+  age(siteTree, 10 * DAY_HOURS);
+
+  // The site instance's worktrees root is mounted by a running container; the other two are reached by none.
+  const out = pass(r, { RMD_CLEANUP_DOCKER: container(r, [[siteRoot, "/home/node/Remudero/worktrees"]]) });
+  for (const root of [r.root, consoleRoot]) {
+    assert.match(out, new RegExp(`shadowed worktree root ${root} \\(no running container reaches it\\)`));
+  }
+  for (const gone of [state2Tree, consoleTree]) {
+    assert.equal(existsSync(gone), false, `${gone} is retired:\n${out}`);
+    assert.ok(copies(r, gone)[0], out);
+  }
+  assert.match(out, new RegExp(`KEEP ${siteRoot}: a running container reaches this worktree root`));
+  assert.equal(existsSync(siteTree), true, out);
+});
