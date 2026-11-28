@@ -1308,6 +1308,8 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: 
     unfinished: (inv) => inv.candidates.some((a) => a.class === "defuse"),
     metric: (inv, actionClass) => actionClass === "false-positive" ? inv.repairTally ?? { trials: 0, successes: 0 } : inv.tally,
     candidates: (inv) => inv.candidates,
+    // W1-T15073: a crossing inside the census margin is a deadline, so its defuse acts whatever the classes drew.
+    preempt: (a) => a.edit.kind === "defuse" && a.edit.urgent,
     scorecard: (inv, plan) => ({ candidates: inv.candidates.length, tally: inv.tally, proposed: plan.actions.length }),
     prepare: (ws, plan, async) => {
       const actions = plan.acting[0] !== undefined && FOLLOW_UP_CLASSES.has(plan.acting[0]) ? plan.actions : [];

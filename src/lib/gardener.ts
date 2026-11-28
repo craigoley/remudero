@@ -959,6 +959,9 @@ export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W ex
   metric?: (inventory: I, actionClass: C) => Outcome;
   /** Every action any class could take now. Called after the class draws, with the same rng. */
   candidates: (inventory: I, rng: () => number, declined?: readonly DeclinedGardenTarget<string>[]) => A[];
+  /** W1-T15073: an action that cannot wait on a draw (a deadline, not a preference). When a candidate
+   *  satisfies it, that candidate's class acts this pass whatever the classes drew. */
+  preempt?: (action: A) => boolean;
   /** The targets a landed PR records on its pending, which its close declines; absent, a close remembers none. */
   pendingTargets?(plan: GardenPlan<C, A>): GardenTarget<C>[];
   scorecard: (inventory: I, plan: GardenPlan<C, A>) => Record<string, unknown>;
@@ -1139,7 +1142,8 @@ function metricOf<C extends string, I>(spec: { name: string; metric?: (inventory
 /**
  * Every class draws from its record; of those that drew at least even odds, the ONE with the highest
  * draw and something to do acts this pass, so each outcome is credited to exactly one class. The
- * draws come before `candidates` is called, so both share one seeded sequence.
+ * draws come before `candidates` is called, so both share one seeded sequence. W1-T15073: a candidate
+ * `preempt` accepts (in a class not switched off) makes its class act instead; with none, the draw decides.
  */
 export function planGarden<C extends string, A extends GardenAction<C>>(opts: {
   classes: readonly C[];
@@ -1147,11 +1151,17 @@ export function planGarden<C extends string, A extends GardenAction<C>>(opts: {
   rng: () => number;
   candidates: () => A[];
   switchedOff?: (c: C) => boolean;
+  preempt?: (action: A) => boolean;
 }): GardenPlan<C, A> {
   const draws = opts.classes.map((c) => ({ c, draw: opts.switchedOff?.(c) ? -1 : sampleBeta({ ...opts.state.classes[c], mean: 0 }, opts.rng) }));
   const eligible = draws.filter((d) => d.draw >= 0.5).sort((a, b) => b.draw - a.draw).map((d) => d.c);
   const all = opts.candidates();
-  const chosen = eligible.find((c) => all.some((a) => a.class === c));
+  // A refused urgent action does not preempt: its class would act on nothing and starve the rest.
+  const refused = opts.state.refusedActions ?? {};
+  const urgent = opts.preempt
+    ? all.find((a) => opts.preempt!(a) && !opts.switchedOff?.(a.class) && refused[gardenActionKey(a)] === undefined)
+    : undefined;
+  const chosen = urgent ? urgent.class : eligible.find((c) => all.some((a) => a.class === c));
   return { actions: chosen ? all.filter((a) => a.class === chosen) : [], acting: chosen ? [chosen] : [] };
 }
 
@@ -1606,6 +1616,7 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
         rng,
         candidates: () => (seen = spec.candidates(inventory, rng, state.declinedTargets ?? [])),
         switchedOff: (c) => existsSync(join(deps.stateDir, `${spec.name.toUpperCase()}_OFF-${c}`)),
+        preempt: spec.preempt,
       });
   // W1-T12834: a refused finding no candidate names any longer has left the inventory, and its id goes back.
   const findingIds = state.refusedFindingIds ?? {};
