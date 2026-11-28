@@ -4,6 +4,7 @@ import { join, posix } from "node:path";
 
 import { backlogEvidence, backlogLandingGuard, judgeBacklog, ownProofsHoldOnMain, satisfiedByMainFromRows, type BacklogDisposition } from "./backlog-gardener.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import type { TaskFileInput } from "./feedback-landing.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { gardenLedgerBucket, gardenStatePath, readGardenState, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { readMainHistory } from "./hot-file-gardener.js";
@@ -11,7 +12,8 @@ import { readOriginMainSha } from "./inbox.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardFilingRefusal, reparkStaleRuling } from "./machine-filing.js";
 import { parseTasksFromYaml, type Task } from "./plan.js";
-import { grepProofHeldAt, planCheapFingerprint, planInventory, type PlanInventory } from "./plan-gardener.js";
+import { grepProofHeldAt, planCheapFingerprint, planInventory, type PlanGardenOps, type PlanInventory, type PlanOpsCatalog, type PlanOpsRead } from "./plan-gardener.js";
+import { escapeGrepLiteral } from "./plan-pr-emitter.js";
 import { PR_OPEN_SATISFIED_BY_MAIN_STEP } from "./pr-open.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import { INSTRUMENT_SURFACE, commentOnlyGrepProofRefusal, isDialectPrefixed } from "./review.js";
@@ -101,7 +103,7 @@ export interface RedesignInventory {
 export interface RedesignSources {
   clock: Clock;
   plan: () => PlanInventory;
-  readShard: (rel: string) => string;
+  readShard: (rel: string, taskId?: string) => string;
   /** Rows of exactly the named steps since `sinceIso`. */
   ledger: (steps: readonly string[], sinceIso: string) => readonly Row[];
   /** What the repo path is: a directory would grant every file under it, so only a file or a new test is declared. */
@@ -110,7 +112,7 @@ export interface RedesignSources {
   judgeText: (prompt: string) => Promise<string>;
   /** The landing guard's verdict on the edited shard, checked before an amend is accepted, so an amendment the guard
    *  would refuse is a recorded refusal rather than a filing that fails on every pass. */
-  landingRefusal: (rel: string, text: string) => string | undefined;
+  landingRefusal: (rel: string, text: string, pinnedBase?: string) => string | undefined;
   /** Signatures a landed PR carried, an open PR carries, or an operator's close declined: none is asked again. */
   settled: () => ReadonlySet<string>;
   /** A repo file's text at the Architect's head, or undefined when it is absent; lets the edit guard read a grep proof's
@@ -178,7 +180,7 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
     // refusal-amendment.ts appends each run's pointer above `status:`, so a shard can hold several: every one is
     // evidence, and the NEWEST stamp is when the lane last stood down. A pointer set younger than the fix lane's hour,
     // or one with no stamp to age, is not yet the Architect's.
-    const pointers = [...sources.readShard(rel).matchAll(POINTER)].map((m) => m[0]);
+    const pointers = [...sources.readShard(rel, id).matchAll(POINTER)].map((m) => m[0]);
     const stamps = pointers.map((p) => Date.parse(POINTER_STAMP_RE.exec(p)?.[1] ?? ""));
     if (pointers.length > 0 && stamps.every(Number.isFinite) && now - Math.max(...stamps) >= REDESIGN_AFTER_MS) {
       add(id, `refusal-amendment pointer in the shard:\n${pointers.map((p) => p.trim()).join("\n")}`);
@@ -195,7 +197,7 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
   const out: RedesignCandidate[] = [];
   for (const [id, unordered] of evidence) {
     const shard = plan.shards.get(id)!;
-    const text = sources.readShard(shard);
+    const text = sources.readShard(shard, id);
     const lines = [...unordered].sort();
     const signature = signatureOf(id, lines);
     const keys = lines.map((line) => signatureOf(id, [line]));
@@ -376,12 +378,13 @@ export async function redesignInventory(sources: RedesignSources, deps: Gardener
   for (const candidate of candidates.slice(0, REDESIGN_MAX_PER_PASS)) {
     const parsed = parseRedesignAnswer(await sources.judgeText(redesignPrompt(candidate)));
     const action = { target: candidate.id, shard: candidate.shard, signature: candidate.signature, keys: candidate.keys };
+    const pinnedBase = plan.ops?.shards.has(candidate.id) ? candidate.text : undefined;
     let outcome: RedesignInventory["outcomes"][number];
     if (parsed.verdict === "amend") {
       const task = plan.open.find((t) => t.id === candidate.id)!;
       const dryRun = applyRedesignEdit(candidate.text, candidate.shard, parsed.edit, candidate.signature, "0000-00-00");
       const refused = redesignEditRefusal(task, parsed.edit, sources.pathKind, sources.readTarget) ??
-        ("refused" in dryRun ? dryRun.refused : sources.landingRefusal(candidate.shard, dryRun.text));
+        ("refused" in dryRun ? dryRun.refused : sources.landingRefusal(candidate.shard, dryRun.text, pinnedBase));
       outcome = refused === undefined
         ? { task_id: candidate.id, outcome: "amend", reason: parsed.edit.reason }
         : { task_id: candidate.id, outcome: "refused", reason: refused };
@@ -390,7 +393,7 @@ export async function redesignInventory(sources: RedesignSources, deps: Gardener
       const draft = applyRedesignRetirement(candidate.text, candidate.shard, parsed.edit, candidate.signature);
       const confirmation = "refused" in draft ? undefined : retirementConfirmation(draft.task, candidate.shard, sources, deps.repoRoot);
       const refused = "refused" in draft ? draft.refused : confirmation === undefined
-        ? "origin/main does not confirm the task is done or overtaken" : sources.landingRefusal(candidate.shard, draft.text);
+        ? "origin/main does not confirm the task is done or overtaken" : sources.landingRefusal(candidate.shard, draft.text, pinnedBase);
       if (refused === undefined && confirmation !== undefined) {
         actions.push({ ...action, class: "retire", reason: parsed.edit.reason, edit: parsed.edit, confirmation, original: candidate.text });
       }
@@ -407,11 +410,16 @@ export async function redesignInventory(sources: RedesignSources, deps: Gardener
   return { candidates: candidates.length, actions, outcomes };
 }
 
-export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<RedesignSources> = {}): RedesignSources {
+export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<RedesignSources> = {}, opsRead?: PlanOpsRead): RedesignSources {
+  const ops = opsRead?.outcome === "ok" ? opsRead : undefined;
+  const readPublicShard = overrides.readShard ?? ((rel) => readFileSync(join(deps.repoRoot, rel), "utf8"));
   const sources: Omit<RedesignSources, "settled"> = {
     clock: deps.clock ?? systemClock,
-    plan: () => planInventory(deps.repoRoot, deps.stateDir),
-    readShard: (rel) => readFileSync(join(deps.repoRoot, rel), "utf8"),
+    plan: () => {
+      const inv = planInventory(deps.repoRoot, deps.stateDir, ops);
+      if (inv.ops) inv.shards = new Map([...inv.shards, ...inv.ops.shards]);
+      return inv;
+    },
     ledger: (steps, sinceIso) => {
       const read = readLedgerUnionRecordsSync(deps.stateDir, { step: [...steps], refuseIncomplete: true, sinceTs: sinceIso });
       if (!read.ok) throw new Error(`redesign: incomplete ledger union: ${read.unread.join(", ")}`);
@@ -434,10 +442,10 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
     judgeText: () => Promise.reject(new Error("the redesign Architect's spawn is not wired")),
     // backlogLandingGuard's two arms over the drafted text: a machine record is linted whole with admission, any
     // other record only for block violations its base did not already have.
-    landingRefusal: (rel, text) => {
+    landingRefusal: (rel, text, pinnedBase) => {
       const exists = (p: string) => existsSync(join(deps.repoRoot, p));
       const head = parseTasksFromYaml(text, rel);
-      const base = parseTasksFromYaml(readFileSync(join(deps.repoRoot, rel), "utf8"), rel);
+      const base = parseTasksFromYaml(pinnedBase ?? readFileSync(join(deps.repoRoot, rel), "utf8"), rel);
       const sharedProofs = head.flatMap((task) => {
         const prior = base.find((b) => b.id === task.id);
         return promoteIntroducedPlanOnlyDiagnostics(
@@ -455,6 +463,7 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
       return reasons.length > 0 ? reasons.join("; ") : undefined;
     },
     ...overrides,
+    readShard: (rel, id) => id !== undefined && ops?.shards.get(id) === rel ? ops.sources.get(rel)! : readPublicShard(rel, id),
   };
   return {
     ...sources,
@@ -469,10 +478,24 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
   };
 }
 
+function redesignLandingClaim(action: RedesignAction): string {
+  return `${action.target} carries the Architect's ${action.class === "retire" ? "retirement" : "amendment"}`;
+}
+
+function opsRedesignLandingProof(action: RedesignAction, original: string, edited: string): string | undefined {
+  // The sealed landing checks the body proof against the pin and the edited shard. The signature is a YAML comment.
+  const prior = new Set(original.split("\n").map((line) => line.trimEnd()));
+  const line = action.class === "retire" ? `  retirement: ${action.edit.retirement}` :
+    edited.split("\n").map((raw) => raw.trimEnd()).find((text) => text !== "" && !text.trimStart().startsWith("#") && !prior.has(text));
+  return line === undefined ? undefined : `grep: ^${escapeGrepLiteral(line)}[[:space:]]*$ in ${action.shard}`;
+}
+
 export function redesignGardenSpec(
-  deps: GardenerDeps, overrides: Partial<RedesignSources> = {},
+  deps: GardenerDeps, overrides: Partial<RedesignSources> = {}, opsSeam?: Pick<PlanGardenOps, "read" | "land">,
 ): GardenSpec<RedesignClass, RedesignInventory, RedesignAction, GardenCheckout> {
   const sources = buildRedesignSources(deps, overrides);
+  let readOps: PlanOpsCatalog | undefined;
+  const isPublic = (action: RedesignAction) => readOps === undefined || !readOps.shards.has(action.target);
   return {
     name: REDESIGN_NAME,
     classes: REDESIGN_CLASSES,
@@ -483,26 +506,34 @@ export function redesignGardenSpec(
     landingRefusal: backlogLandingGuard(deps),
     cheapFingerprint: () => `${planCheapFingerprint(deps.repoRoot, deps.stateDir)}:${gardenLedgerBucket(sources.clock)}`,
     inventory: () => { throw new Error("the redesign Architect answers asynchronously: drive it with runGardenAsync"); },
-    inventoryAsync: () => redesignInventory(sources, deps),
+    inventoryAsync: async () => {
+      const snapshot = await opsSeam?.read();
+      readOps = snapshot?.outcome === "ok" ? snapshot : undefined;
+      return redesignInventory(readOps ? buildRedesignSources(deps, overrides, snapshot) : sources, deps);
+    },
     fingerprint: (i) => i.actions.map((a) => a.signature).join(",") || "none",
     unfinished: (i) => i.actions.length > 0,
     candidates: (i, _rng, declined = []) => {
       const no = new Set(declined.map((d) => d.target));
       return i.actions.filter((a) => !no.has(a.signature) && !a.keys.every((k) => no.has(k)));
     },
-    pendingTargets: (plan) => plan.actions.flatMap((a) => [a.signature, ...a.keys].map((target) => ({ class: a.class, target }))),
+    pendingTargets: (plan) => plan.actions.filter(isPublic).flatMap((a) => [a.signature, ...a.keys].map((target) => ({ class: a.class, target }))),
     scorecard: (i, plan) => {
-      const card = { candidates: i.candidates, outcomes: i.outcomes, acting: plan.acting, signatures: plan.actions.map((a) => a.signature),
-        evidence_keys: plan.actions.flatMap((a) => a.keys) };
+      // The framework attaches the public PR's URL to this card. Its decision covers only those signatures.
+      const publicActions = plan.actions.filter(isPublic);
+      const card = { candidates: i.candidates, outcomes: i.outcomes, acting: plan.acting, signatures: publicActions.map((a) => a.signature),
+        evidence_keys: publicActions.flatMap((a) => a.keys) };
       deps.log(REDESIGN_SCORECARD_STEP, card);
       return card;
     },
     apply: (ws, plan) => {
       const date = sources.clock.date().toISOString().slice(0, 10);
       const landed: RedesignAction[] = [];
+      const opsInputs: TaskFileInput[] = [];
       for (const action of plan.actions) {
+        const opsPath = readOps?.shards.get(action.target);
         const abs = join(ws.root, action.shard);
-        const original = readFileSync(abs, "utf8");
+        const original = opsPath === undefined ? readFileSync(abs, "utf8") : readOps!.sources.get(opsPath)!;
         if (action.class === "retire" && original !== action.original) {
           deps.log(REDESIGN_JUDGED_STEP, { task_id: action.target, outcome: "refused", reason: "the shard changed after retirement was confirmed",
             signature: action.signature, evidence_keys: action.keys, retryable: true });
@@ -512,9 +543,20 @@ export function redesignGardenSpec(
           ? applyRedesignRetirement(original, action.shard, action.edit, action.signature)
           : applyRedesignEdit(original, action.shard, action.edit, action.signature, date);
         if ("refused" in edited) { deps.log(REDESIGN_JUDGED_STEP, { task_id: action.target, outcome: "refused", reason: edited.refused, signature: action.signature, evidence_keys: action.keys }); continue; }
-        writeAtomic(abs, edited.text);
-        landed.push(action);
+        if (opsPath === undefined) {
+          writeAtomic(abs, edited.text);
+          landed.push(action);
+        } else {
+          const proof = opsRedesignLandingProof(action, original, edited.text);
+          if (proof === undefined) {
+            deps.log(REDESIGN_JUDGED_STEP, { task_id: action.target, outcome: "refused", reason: "the ops edit adds no data line for its landing proof",
+              signature: action.signature, evidence_keys: action.keys });
+            continue;
+          }
+          opsInputs.push({ relPath: opsPath, content: edited.text, claim: redesignLandingClaim(action), proof });
+        }
       }
+      if (opsSeam && readOps && opsInputs.length > 0) opsSeam.land(opsInputs, readOps.pin);
       if (landed.length === 0) return undefined;
       const retiring = landed[0]!.class === "retire";
       return {
@@ -538,7 +580,7 @@ export function redesignGardenSpec(
             ]),
           ].join("\n")),
           "", "## Acceptance",
-          ...landed.map((a) => `- claim: ${a.target} carries the Architect's ${a.class === "retire" ? "retirement" : "amendment"}\n  proof: "grep: # redesign: signature=${a.signature} in ${a.shard}"`),
+          ...landed.map((a) => `- claim: ${redesignLandingClaim(a)}\n  proof: "grep: # redesign: signature=${a.signature} in ${a.shard}"`),
         ].join("\n"),
       };
     },

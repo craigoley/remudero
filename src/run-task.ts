@@ -29490,7 +29490,9 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "redesign": {
       const d = deps("redesign", raiseDuplicate);
       const judge = issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log });
-      return gardenPass(redesignGardenSpec(d, { judgeText: (prompt) => judge.judgeText(prompt, 0) }), d);
+      const ops = productionPlanGardenOps({ repoRoot, stateDir, stateRoot: config.root, log });
+      const pass = gardenPass(redesignGardenSpec(d, { judgeText: (prompt) => judge.judgeText(prompt, 0) }, ops), d);
+      return withDue(async () => { await pass(); await ops.settled(); }, pass.due!);
     }
     case "queue-judge": {
       const d = deps("queue-judge", raiseDuplicate);
