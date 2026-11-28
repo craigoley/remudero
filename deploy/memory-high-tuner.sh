@@ -15,6 +15,7 @@
 #   SHRINK  host pressure (thin headroom plus rising swap-in, a PSI full stall or global reclaim; or
 #           MemAvailable under one reserve): the container furthest above its policy gives back a
 #           quantum; under severe pressure every one gives back half its excess. NEVER below policy.
+#           Hold for hot file cache; at the swap cap, budget reclaim from inactive file pages alone.
 #   RESTORE the learned value after a revive from policy or a reverted write.
 # The learned value lives in <state>/memory-high-tuned-<container>.json: resource-policy.sh starts the
 # next recycle from it and the W1-T4267 drift check accepts it. Every adjustment appends a
@@ -168,6 +169,49 @@ mht_stat() { awk -v k="$1" '$1 == k { print $2; found = 1 } END { exit found ? 0
 mht_meminfo_mib() { awk -v k="$1:" '$1 == k { printf "%d", $2 / 1024; found = 1 } END { exit found ? 0 : 1 }' "${RMD_MEMINFO_PATH:-/proc/meminfo}" 2>/dev/null; }
 mht_bytes_mib() { case "$1" in ''|max|*[!0-9]*) return 1 ;; esac; printf '%s' $(($1 / 1048576)); }
 
+# Apply the live reclaim constraints to a proposed tier-2 or tier-3 shrink. Compare bytes before rounding.
+mht_guard_shrink() {
+  local cg="$1" file_bytes="$2" refault_bytes="$3" current inactive swap swap_max capped=1 v working floor target reclaim
+  current="$(cat "${cg}/memory.current" 2>/dev/null)" || current=""
+  inactive="$(mht_stat inactive_file "${cg}/memory.stat")" || inactive=""
+  swap="$(cat "${cg}/memory.swap.current" 2>/dev/null)" || swap=""
+  swap_max="$(cat "${cg}/memory.swap.max" 2>/dev/null)" || swap_max=""
+  if [ "${swap_max}" = max ]; then capped=0; swap_max=0; fi
+  for v in "${current}" "${inactive}" "${swap}" "${swap_max}"; do
+    case "${v}" in
+      ''|*[!0-9]*)
+        MH_ACTION=hold MH_TARGET_MIB="${MH_LIVE_MIB}"
+        MH_REASON="tier ${MH_TIER} (${MH_TIER_WHY}); a shrink counter is unreadable"
+        return 0 ;;
+    esac
+  done
+
+  target="${MH_TARGET_MIB}"
+  if [ "${capped}" -eq 1 ] && [ "${swap}" -ge "${swap_max}" ]; then
+    # Full swap leaves only inactive file pages to give back. Keep a quantum above the working set.
+    working=$((current > inactive ? current - inactive : 0))
+    floor="$(mht_round_up $(((working + 1048575) / 1048576 + $(mht_step))))"
+    if [ "${floor}" -ge "${MH_LIVE_MIB}" ]; then
+      MH_ACTION=hold MH_TARGET_MIB="${MH_LIVE_MIB}"
+      MH_REASON="tier ${MH_TIER} (${MH_TIER_WHY}); swap at cap, inactive file floor ${floor} MiB; ${MH_REFAULT_MIB} MiB file refaults per 5 min"
+      return 0
+    fi
+    [ "${target}" -ge "${floor}" ] || target="${floor}"
+  fi
+  # Only usage above the target creates reclaim, and file reclaim cannot exceed the file cache.
+  reclaim=$((current - target * 1048576))
+  [ "${reclaim}" -le "${file_bytes}" ] || reclaim="${file_bytes}"
+  if [ "${reclaim}" -gt 0 ] && [ "${refault_bytes}" -ge "${reclaim}" ]; then
+    MH_ACTION=hold MH_TARGET_MIB="${MH_LIVE_MIB}"
+    MH_REASON="tier ${MH_TIER} (${MH_TIER_WHY}); ${MH_REFAULT_MIB} MiB file refaults per 5 min cover the file cache this shrink would reclaim"
+    return 0
+  fi
+  if [ "${target}" -gt "${MH_TARGET_MIB}" ]; then
+    MH_TARGET_MIB="${target}"
+    MH_REASON="${MH_REASON}; swap at cap, inactive file floor ${target} MiB"
+  fi
+}
+
 # The cgroup directory of container id $1 (systemd driver first, then cgroupfs).
 mht_cgroup_dir() {
   local d
@@ -313,7 +357,7 @@ memory_high_tune() {
   done
   [ -n "${container}" ] && [ -n "${state_root}" ] || { echo "memory-high-tuner: --container and --state-dir are required" >&2; return 2; }
   local state="${state_root}/state" id cg unit now high_b max_b events refault pswpin zswpin stall psi_full avail
-  local sample prev v pts pid pev prf psw pst prate rate interval x anon file shmem refanon pra own net
+  local sample prev v pts pid pev prf psw pst prate rate interval x anon file shmem refanon pra own net refault_pages
   # shellcheck disable=SC2034 # read by resource-policy.sh's resource_policy_tuned_file
   STATE_DIR="${state_root}"
   MHT_FLEET_LISTED=""
@@ -373,13 +417,18 @@ memory_high_tune() {
     return 0
   fi
   MH_HIGH_EVENTS=$((events - pev))
-  MH_REFAULT_MIB=$(((refault - prf) * 4 * 300 / 1024 / interval))
+  refault_pages=$((refault - prf))
+  MH_REFAULT_MIB=$((refault_pages * 4 * 300 / 1024 / interval))
   MH_SWAPIN_RATE="${rate}" MH_PREV_SWAPIN_RATE="${prate}" MH_OWN_SWAPIN_RATE="${own}"
-  MH_ANON_MIB=$((anon / 1048576)) MH_FILE_MIB=$(((file > shmem ? file - shmem : 0) / 1048576))
+  file=$((file > shmem ? file - shmem : 0))
+  MH_ANON_MIB=$((anon / 1048576)) MH_FILE_MIB=$((file / 1048576))
   MH_ALLOCSTALL=$((stall - pst)); [ "${MH_ALLOCSTALL}" -ge 0 ] || MH_ALLOCSTALL=0
   MH_PSI_FULL10="${psi_full:-0}" MH_AVAIL_MIB="${avail}" MH_RESERVE_MIB="${RMD_HOST_RESERVE_MIB}"
   mht_peer_order "${container}" "${id}"
   memory_high_decide
+  if [ "${MH_ACTION}" = shrink ]; then
+    mht_guard_shrink "${cg}" "${file}" $((refault_pages * 4096))
+  fi
   if [ "${MH_ACTION}" = hold ]; then
     echo "memory-high-tuner: ${container} — hold at ${MH_LIVE_MIB} MiB (policy ${MH_POLICY_MIB}): ${MH_REASON}"
     return 0
