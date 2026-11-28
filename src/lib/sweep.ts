@@ -22951,12 +22951,15 @@ export function createSweepFixAdmissionController(input: {
   // the reservation terms and rungs read, exposed exactly when origin/main read it.
   let reading: FixAdmissionResidents;
   // W1-T15115: each reservation and the live fix entries that cannot be its child's: those there at its claim or
-  // hand-off. Its child is the first entry seen since (pair by count, in claim order), which then carries its charge.
+  // hand-off. Its child is an entry seen since (pair by count), which then carries its charge.
   type HeldReservation = { baseline?: ReadonlySet<string>; matched?: string; handed: boolean };
+  // Every reservation until its own release, a hand-off its child's entry carries included: a release or abandonment
+  // then drops exactly its own reservation, never one another hand-off's entry was standing in for.
   const held: HeldReservation[] = [];
-  // The entries reservations are matched to. A matched hand-off leaves `held`, but its entry stays its child's: a later
-  // reservation must wait for its own (two fixes handed off in one light pass, the first child visible first).
+  // The entries reservations are matched to on this reading: each carries one reservation.
   const paired = new Set<string>();
+  // The reservations still charged a whole estimate (`pending_reservations`): all but the hand-offs an entry carries.
+  const pendingCount = (): number => held.filter((r) => !(r.handed && r.matched !== undefined)).length;
   let seenFixIds: ReadonlySet<string> = new Set(); // The live fix entries at the last refresh that read them.
   let liveFixChargeMib = 0;
   let unclaimedOwnMib = 0; // A run child's own resident while its claim is still to come.
@@ -22966,30 +22969,44 @@ export function createSweepFixAdmissionController(input: {
     return fixes === undefined ? undefined : new Set(fixes.map((child) => child.id));
   };
   // W1-T15115: a held reservation is charged through an entry only while that entry is live and still charged: one gone,
-  // or waiting on CI, charges it whole again. A handed-off reservation ends once its child's entry is visible.
+  // or waiting on CI, charges it whole again. A handed-off reservation is carried while an entry seen since its hand-off
+  // is live; it stays held until its own release.
   const matchLiveEntries = (): void => {
     const fixes = liveFixes();
     // A run child's own reservation is carried by its own entry (`ownFix`), never by a sibling's.
     if (fixes === undefined || reading?.ownFix !== undefined) return;
     const ids = new Set(fixes.map((child) => child.id));
     const carrying = new Set(fixes.filter((child) => !child.chargeReleased).map((child) => child.id));
+    // The hand-offs are paired afresh on every reading. Which of their children an entry is cannot be read, only how
+    // many are visible, so no pairing outlives the reading it was made on: when a child ends, its entry and its own
+    // reservation go, and the hand-offs still live are re-paired with the entries still live.
+    for (const r of held) {
+      if (!r.handed || r.matched === undefined) continue;
+      paired.delete(r.matched);
+      r.matched = undefined;
+    }
     for (const r of held) {
       const lost = r.matched;
-      if (lost !== undefined && !carrying.has(lost)) {
-        paired.delete(lost);
-        r.matched = undefined;
-        // An entry already seen while the lost one carried this charge is another worker's.
-        r.baseline = new Set([...(r.baseline ?? []), ...seenFixIds].filter((id) => id !== lost));
-      }
-      if (r.matched !== undefined || r.baseline === undefined) continue;
-      const id = [...(r.handed ? ids : carrying)].find((candidate) => !r.baseline!.has(candidate) && !paired.has(candidate));
+      if (r.handed || lost === undefined || carrying.has(lost)) continue;
+      paired.delete(lost);
+      r.matched = undefined;
+      // An entry already seen while the lost one carried this charge is another worker's.
+      r.baseline = new Set([...(r.baseline ?? []), ...seenFixIds].filter((id) => id !== lost));
+    }
+    const candidates = (r: HeldReservation): string[] =>
+      [...(r.handed ? ids : carrying)].filter((id) => !r.baseline!.has(id) && !paired.has(id));
+    // The fewest candidates first (the latest hand-off, whose baseline holds the earlier children): the most hand-offs
+    // carried, so none stays charged whole while an entry that could only be its child's goes unpaired.
+    const handed = held.filter((r) => r.handed && r.baseline !== undefined)
+      .map((r) => ({ r, n: candidates(r).length })).sort((x, y) => x.n - y.n).map(({ r }) => r);
+    for (const r of [...handed, ...held.filter((h) => !h.handed && h.matched === undefined && h.baseline !== undefined)]) {
+      const id = candidates(r)[0];
       if (id === undefined) continue;
       r.matched = id;
       paired.add(id);
     }
     seenFixIds = ids;
-    for (let i = held.length - 1; i >= 0; i--) if (held[i]!.handed && held[i]!.matched !== undefined) held.splice(i, 1);
-    reservations = held.length;
+    reservations = pendingCount();
   };
   // W1-T15115: a handed-off child spawns after this, so no entry already there is its own, matched before now or not.
   // With no entries ever read to watch for, the hand-off is origin/main's release.
@@ -23000,7 +23017,7 @@ export function createSweepFixAdmissionController(input: {
     if (r.matched !== undefined) paired.delete(r.matched);
     r.matched = undefined;
     r.handed = true;
-    reservations = held.length;
+    reservations = pendingCount();
   };
   // W1-T13879: absent, false or a throw is not calm, so a reading without the calm reader reads as before this rung.
   const fixMemoryCalm = (live: NonNullable<FixAdmissionResidents>): boolean => {
@@ -23200,7 +23217,7 @@ export function createSweepFixAdmissionController(input: {
       }
       const mine: HeldReservation = { baseline: liveFixIds(), handed: false };
       held.push(mine);
-      reservations = held.length;
+      reservations = pendingCount();
       fixesAdmitted++;
       clearRepairMemoryDemand(pr.prNumber); // W1-T9706: an admission ends this repair's wait for memory.
       compute();
@@ -23208,19 +23225,23 @@ export function createSweepFixAdmissionController(input: {
       emit(order());
       ahead = undefined;
       let state: "held" | "handed" | "gone" = "held";
+      // W1-T15115: this reservation leaves, and only it: an entry that carried it carries none now, so the hand-offs still
+      // held are re-paired with the entries still live on the next reading.
       const drop = (): void => {
         const at = held.indexOf(mine);
         if (at >= 0) held.splice(at, 1);
-        reservations = held.length;
+        if (mine.matched !== undefined) paired.delete(mine.matched);
+        mine.matched = undefined;
+        reservations = pendingCount();
       };
       return { admitted: true, release: standIn ? undefined : () => {
         if (state === "gone") return;
-        // W1-T15115: a hand-off its child's entry already carries has nothing left here to give back, so its settlement
-        // reads and emits nothing; one never matched (a child that ended unseen) gives its charge back now.
-        const carried = state === "handed" && !held.includes(mine);
+        // W1-T15115: a hand-off an entry carried on the last reading was charged nothing whole, so its settlement drops it
+        // and emits nothing; one never carried (a child that ended unseen, or one abandoned) gives its charge back now.
+        const carried = state === "handed" && mine.matched !== undefined;
         state = "gone";
-        if (carried) return;
         drop();
+        if (carried) return;
         refresh();
         emit();
       }, handOff: standIn ? undefined : () => {

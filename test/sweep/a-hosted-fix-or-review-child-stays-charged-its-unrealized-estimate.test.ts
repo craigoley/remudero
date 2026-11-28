@@ -235,6 +235,54 @@ test("W1-T15115 criterion 2: two fixes handed off together each stay charged unt
   assert.equal(done.live_child_charge_mib, 2 * (FIX_MIB - 100));
 });
 
+/** Two fixes admitted and handed off back to back, with room for exactly two (2 x 2,076 + 50 MiB) and no child yet. */
+function twoHandedOff() {
+  const box = container();
+  const rows: Row[] = [];
+  const c = controller({ rows, headroomMib: 2 * FIX_MIB + 50, residents: () => box.residents() });
+  const a = c.claim(pr);
+  const b = c.claim(pr);
+  assert.ok(a.admitted && b.admitted, "two fit");
+  a.handOff?.();
+  b.handOff?.();
+  return { box, rows, c, a, b };
+}
+
+test("W1-T15115 criterion 2: a hand-off whose child ends gives back only its own charge, whichever entry appeared first", () => {
+  // The review's shape at dc6f80f3f8: hand off A then B; B's entry is visible first; B's child ends and its settlement
+  // releases B. A is still spawning, so it is still charged one whole estimate: one more fix fits, never two.
+  const { box, rows, c, b } = twoHandedOff();
+  box.live.push({ id: "fix-b", workerClass: "fix", pid: 5_000_202, mib: 100 });
+  assert.equal(c.claim(pr).admitted, false, "B's child visible, A's not: both still charged");
+  assert.equal(rows.at(-1)!.fix_charge_mib, FIX_MIB, "one hand-off still waits for its child");
+  box.live.pop(); // B's child ends: the host releases its entry, then settles it.
+  if (b.admitted) b.release?.();
+  const first = c.claim(pr);
+  assert.equal(first.admitted, true, "B's end frees B's room");
+  assert.equal(rows.at(-1)!.fix_charge_mib, 2 * FIX_MIB, "A, still spawning, is charged whole beside the new claim");
+  assert.equal(c.claim(pr).admitted, false, "A stays charged: B's end gave back B's charge, not A's too");
+  assert.equal(rows.at(-1)!.fix_admissions_available, 0, "available never rises past the room");
+
+  // A's own child appears and ends in turn: only then is A's charge gone.
+  box.live.push({ id: "fix-a", workerClass: "fix", pid: 5_000_201, mib: 100 });
+  assert.equal(c.claim(pr).admitted, false, "A carried by its entry, the new claim whole");
+  assert.equal(rows.at(-1)!.fix_charge_mib, FIX_MIB);
+  assert.equal(rows.at(-1)!.live_child_charge_mib, FIX_MIB - 100);
+});
+
+test("W1-T15115 criterion 2: an abandoned hand-off gives back its own charge and leaves the live child charged once", () => {
+  // Hand off A then B; B's entry is visible first; A's admission is then abandoned (spawnRunChild's wait), so no child
+  // of A's ever launches. B is charged once, through its entry: never its entry's unrealized estimate and a whole one.
+  const { box, rows, c, a } = twoHandedOff();
+  box.live.push({ id: "fix-b", workerClass: "fix", pid: 5_000_302, mib: 100 });
+  assert.equal(c.claim(pr).admitted, false);
+  if (a.admitted) a.release?.(); // hostFixDispatch: no child launched, so the handed-off charge goes back now.
+  assert.equal(c.claim(pr).admitted, true, "B charged once (1,976 MiB) leaves room for one: 4,202 - 1,976 = 2,226");
+  const after = rows.at(-1)!;
+  assert.equal(after.live_child_charge_mib, FIX_MIB - 100, "B's entry carries B");
+  assert.equal(after.fix_charge_mib, FIX_MIB, "only the new claim is charged whole; B is not charged again");
+});
+
 /** A hosted child's own admission (run-task.ts): a controller in its run-child context, over its own entry. */
 function inRunChild<T>(reservationId: string, run: () => T): T {
   return withRunChildReservation({ schema: RUN_CHILD_SCHEMA, taskId: "W1-T15115", runId: `work-${reservationId}`,
