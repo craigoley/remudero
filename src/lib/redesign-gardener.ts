@@ -4,6 +4,7 @@ import { join, posix } from "node:path";
 
 import { backlogEvidence, backlogLandingGuard, judgeBacklog, ownProofsHoldOnMain, satisfiedByMainFromRows, type BacklogDisposition } from "./backlog-gardener.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { landTaskFilesAsync, type LandTaskFilesOpts, type TaskFileInput, type TaskFilesLandingResult } from "./feedback-landing.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { gardenLedgerBucket, gardenStatePath, readGardenState, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { readMainHistory } from "./hot-file-gardener.js";
@@ -11,11 +12,13 @@ import { readOriginMainSha } from "./inbox.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardFilingRefusal, reparkStaleRuling } from "./machine-filing.js";
 import { parseTasksFromYaml, type Task } from "./plan.js";
-import { grepProofHeldAt, planCheapFingerprint, planInventory, type PlanInventory } from "./plan-gardener.js";
+import { grepProofHeldAt, planCheapFingerprint, planInventory, type PlanGardenOps, type PlanInventory, type PlanOpsCatalog, type PlanOpsRead } from "./plan-gardener.js";
+import { escapeGrepLiteral, planPrPreflightAtCommitAsync } from "./plan-pr-emitter.js";
 import { PR_OPEN_SATISFIED_BY_MAIN_STEP } from "./pr-open.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import { INSTRUMENT_SURFACE, commentOnlyGrepProofRefusal, isDialectPrefixed } from "./review.js";
 import { lintTask, promoteIntroducedPlanOnlyDiagnostics, sharedProofViolations } from "./task-linter.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 /**
  * The redesign gardener lets the plan Architect amend a held task or propose retirement backed by main.
@@ -36,6 +39,12 @@ export const REDESIGN_CLASSES: readonly RedesignClass[] = ["amend", "retire"];
 export const REDESIGN_NAME = "redesign";
 export const REDESIGN_JUDGED_STEP = "redesign.judged";
 const REDESIGN_SCORECARD_STEP = `${REDESIGN_NAME}.scorecard`;
+export const REDESIGN_OPS_LANDING_STEP = `${REDESIGN_NAME}.ops_landing_submitted`;
+export const REDESIGN_OPS_LANDING_RESULT_STEP = `${REDESIGN_NAME}.ops_landing_result`;
+/** A submitted ops record no landing result answered for this long was lost (a restart, a skipped landing), so is released. */
+export const REDESIGN_OPS_LANDING_LOST_MS = 2 * 60 * 60_000;
+/** A refusal that judged nothing about the record's bytes: another edit holds the path, or main moved under it. */
+const UNJUDGED_REFUSAL = /^(?:another edit of .+ waits for its landing|origin\/main (?:does not hold|changed) )/;
 /** A hold younger than this is left to the fix lane's own next pass; an hour also bounds re-asking on a flapping hold. */
 export const REDESIGN_AFTER_MS = 60 * 60_000;
 /** BACKSTOP on spend: how many tasks one pass asks about. Each answer is one Architect spawn, and each landing is one
@@ -101,7 +110,7 @@ export interface RedesignInventory {
 export interface RedesignSources {
   clock: Clock;
   plan: () => PlanInventory;
-  readShard: (rel: string) => string;
+  readShard: (rel: string, taskId?: string) => string;
   /** Rows of exactly the named steps since `sinceIso`. */
   ledger: (steps: readonly string[], sinceIso: string) => readonly Row[];
   /** What the repo path is: a directory would grant every file under it, so only a file or a new test is declared. */
@@ -110,7 +119,7 @@ export interface RedesignSources {
   judgeText: (prompt: string) => Promise<string>;
   /** The landing guard's verdict on the edited shard, checked before an amend is accepted, so an amendment the guard
    *  would refuse is a recorded refusal rather than a filing that fails on every pass. */
-  landingRefusal: (rel: string, text: string) => string | undefined;
+  landingRefusal: (rel: string, text: string, pinnedBase?: string) => string | undefined;
   /** Signatures a landed PR carried, an open PR carries, or an operator's close declined: none is asked again. */
   settled: () => ReadonlySet<string>;
   /** A repo file's text at the Architect's head, or undefined when it is absent; lets the edit guard read a grep proof's
@@ -126,6 +135,114 @@ const rowKeys = (r: Row, signatures: unknown): string[] => [
   ...(Array.isArray(signatures) ? signatures.map(String) : typeof signatures === "string" ? [signatures] : []),
   ...(Array.isArray(r.evidence_keys) ? r.evidence_keys.map(String) : []),
 ];
+
+/** One submitted ops record, keyed by its path and bytes: the edit carries its signature marker, so the bytes name it. */
+const opsRecordKey = (path: string, content: string) => ({ path, content_sha: createHash("sha256").update(content).digest("hex").slice(0, 16) });
+
+export interface RedesignOpsRecordOutcome { path: string; content_sha: string; outcome: "held" | "released"; reason: string }
+
+/**
+ * W1-T14882: what one landing call did with one submitted ops record, read from that record's own entries in the
+ * result, never from the queue's counts (they cover every staged file of the repository). A record the landing
+ * carries, queues, or refused on its own bytes (a preflight red main does not share, the same bytes set aside, a
+ * closed landing PR) stays held: it is in flight or declined. A record the landing never judged is released for
+ * another attempt: the preflight timed out, main was red or its probe could not run, another edit or main moved under
+ * it, or nothing was staged for it at all.
+ */
+export function redesignOpsRecordOutcome(result: TaskFilesLandingResult, input: Pick<TaskFileInput, "relPath" | "content">): RedesignOpsRecordOutcome {
+  const key = opsRecordKey(input.relPath, input.content);
+  const refusal = [...result.refused, ...result.setAside].find((r) => r.path === input.relPath);
+  if (refusal !== undefined) {
+    const unjudged = refusal.timedOut === true || refusal.mainRed === true || refusal.mainRedProbeError !== undefined ||
+      UNJUDGED_REFUSAL.test(refusal.reason);
+    return { ...key, outcome: unjudged ? "released" : "held", reason: refusal.reason };
+  }
+  if (result.landed.includes(input.relPath)) return { ...key, outcome: "held", reason: `carried by ${result.prUrl ?? "the landing pull request"}` };
+  if (result.waiting.includes(input.relPath)) return { ...key, outcome: "held", reason: result.error ?? "staged behind the landing" };
+  return { ...key, outcome: "released", reason: result.error ?? "the landing staged nothing for it" };
+}
+
+/**
+ * W1-T14882: the sealed landing the redesign pass's ops edits go through (productionPlanGardenOps' `landTaskFiles`),
+ * recording each submitted record's own outcome so the next pass holds or releases exactly that record's signatures.
+ */
+export function redesignOpsLandTaskFiles(
+  log: GardenerDeps["log"], land: typeof landTaskFilesAsync = landTaskFilesAsync, mainProbe?: RedesignOpsMainProbe,
+): typeof landTaskFilesAsync {
+  return async (root, inputs, opts) => {
+    let result: TaskFilesLandingResult;
+    try {
+      result = await land(root, inputs, mainProbe === undefined ? opts : { ...opts, planPrPreflight: mainProbePreflight(root, opts.planPrPreflight, mainProbe, log) });
+    } catch (error) {
+      // The owner logs the throw too; here it only releases the records it never judged.
+      const reason = `the landing threw: ${String((error as Error)?.message ?? error)}`;
+      log(REDESIGN_OPS_LANDING_RESULT_STEP, { records: inputs.map((i) => ({ ...opsRecordKey(i.relPath, i.content), outcome: "released", reason })) });
+      throw error;
+    }
+    // A record an earlier call left waiting or carried can be set aside by this call (origin/main changed it): its path,
+    // with no bytes, releases it, so it never stays held on a result that is no longer true.
+    const own = new Set(inputs.map((i) => i.relPath));
+    const later = [...result.refused, ...result.setAside].filter((r) => !own.has(r.path))
+      .map((r) => ({ path: r.path, outcome: "released" as const, reason: r.reason }));
+    log(REDESIGN_OPS_LANDING_RESULT_STEP, { pr_url: result.prUrl ?? null, records: [...inputs.map((input) => redesignOpsRecordOutcome(result, input)), ...later] });
+    return result;
+  };
+}
+
+/** The plan PR preflight the ops landing's main-red probe runs on ops main itself, and the public code root it reads. */
+export interface RedesignOpsMainProbe {
+  codeRoot: string;
+  inner?: typeof planPrPreflightAtCommitAsync;
+}
+
+/**
+ * W1-T14882: the ops landing's preflight with its main-red probe let through the unmoved-records guard. The guard
+ * judges a candidate by its parent; the probe's commit is ops main itself, whose parent at ops main == pin is older
+ * than the pin, so the guard threw and every own-red refusal came back unjudged. Main overwrites nothing of its own,
+ * so a commit equal to the checkout's origin/main runs the plan preflight directly; every other commit keeps the guard.
+ */
+function mainProbePreflight(
+  root: string, guarded: LandTaskFilesOpts["planPrPreflight"], probe: RedesignOpsMainProbe, log: GardenerDeps["log"],
+): LandTaskFilesOpts["planPrPreflight"] {
+  if (guarded === undefined) return undefined;
+  const inner = probe.inner ?? planPrPreflightAtCommitAsync;
+  return async (sha, pr) => {
+    let main: string;
+    try { main = (await hostWorktreeGitAsync(root, ["rev-parse", "--verify", "origin/main^{commit}"])).trim(); }
+    catch { return guarded(sha, pr); /* an unreadable main leaves every commit to the guard */ }
+    return sha === main ? inner(root, sha, { ...pr, codeRoot: probe.codeRoot, bodyProofRoot: "plan" }, { log }) : guarded(sha, pr);
+  };
+}
+
+/**
+ * W1-T14882: the signatures and evidence keys ops landings still hold. Each submitted record is answered by the first
+ * result naming its path and bytes after it: held stays held, released frees it. A later result naming only the path
+ * (another call set the waiting or carried file aside) releases it too. One no result answered is in flight
+ * until REDESIGN_OPS_LANDING_LOST_MS, after which it was lost. Rows tie on `ts` in ledger order.
+ */
+export function redesignOpsHeld(rows: readonly Row[], now: number): string[] {
+  const records = new Map<string, { keys: string[]; at: number; outcome?: unknown }>();
+  const ordered = rows.map((row, index) => ({ row, index }))
+    .sort((a, b) => String(a.row.ts ?? "").localeCompare(String(b.row.ts ?? "")) || a.index - b.index);
+  for (const { row } of ordered) {
+    if (!Array.isArray(row.records)) continue;
+    for (const entry of row.records as unknown[]) {
+      if (entry === null || typeof entry !== "object") continue;
+      const record = entry as Row;
+      // A later call's set-aside names only the path: it releases every record held there, whatever its bytes.
+      if (row.step === REDESIGN_OPS_LANDING_RESULT_STEP && record.content_sha === undefined && record.outcome === "released") {
+        for (const [key, held] of records) if (key.startsWith(`${String(record.path)}\0`) && held.outcome !== "released") held.outcome = "released";
+        continue;
+      }
+      const id = `${String(record.path)}\0${String(record.content_sha)}`;
+      if (row.step === REDESIGN_OPS_LANDING_STEP) records.set(id, { keys: rowKeys(record, record.signatures), at: Date.parse(String(row.ts)) });
+      const submitted = records.get(id);
+      if (row.step === REDESIGN_OPS_LANDING_RESULT_STEP && submitted !== undefined && submitted.outcome === undefined) submitted.outcome = record.outcome;
+    }
+  }
+  return [...records.values()].filter((r) => r.outcome === "held" ||
+    (r.outcome === undefined && Number.isFinite(r.at) && now - r.at <= REDESIGN_OPS_LANDING_LOST_MS)).flatMap((r) => r.keys);
+}
 
 /** The tasks a person was asked to redesign and has not: a refusal-amendment pointer, or a PR the sweep holds. */
 export function redesignCandidates(sources: RedesignSources): RedesignCandidate[] {
@@ -178,7 +295,7 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
     // refusal-amendment.ts appends each run's pointer above `status:`, so a shard can hold several: every one is
     // evidence, and the NEWEST stamp is when the lane last stood down. A pointer set younger than the fix lane's hour,
     // or one with no stamp to age, is not yet the Architect's.
-    const pointers = [...sources.readShard(rel).matchAll(POINTER)].map((m) => m[0]);
+    const pointers = [...sources.readShard(rel, id).matchAll(POINTER)].map((m) => m[0]);
     const stamps = pointers.map((p) => Date.parse(POINTER_STAMP_RE.exec(p)?.[1] ?? ""));
     if (pointers.length > 0 && stamps.every(Number.isFinite) && now - Math.max(...stamps) >= REDESIGN_AFTER_MS) {
       add(id, `refusal-amendment pointer in the shard:\n${pointers.map((p) => p.trim()).join("\n")}`);
@@ -195,7 +312,7 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
   const out: RedesignCandidate[] = [];
   for (const [id, unordered] of evidence) {
     const shard = plan.shards.get(id)!;
-    const text = sources.readShard(shard);
+    const text = sources.readShard(shard, id);
     const lines = [...unordered].sort();
     const signature = signatureOf(id, lines);
     const keys = lines.map((line) => signatureOf(id, [line]));
@@ -376,12 +493,13 @@ export async function redesignInventory(sources: RedesignSources, deps: Gardener
   for (const candidate of candidates.slice(0, REDESIGN_MAX_PER_PASS)) {
     const parsed = parseRedesignAnswer(await sources.judgeText(redesignPrompt(candidate)));
     const action = { target: candidate.id, shard: candidate.shard, signature: candidate.signature, keys: candidate.keys };
+    const pinnedBase = plan.ops?.shards.has(candidate.id) ? candidate.text : undefined;
     let outcome: RedesignInventory["outcomes"][number];
     if (parsed.verdict === "amend") {
       const task = plan.open.find((t) => t.id === candidate.id)!;
       const dryRun = applyRedesignEdit(candidate.text, candidate.shard, parsed.edit, candidate.signature, "0000-00-00");
       const refused = redesignEditRefusal(task, parsed.edit, sources.pathKind, sources.readTarget) ??
-        ("refused" in dryRun ? dryRun.refused : sources.landingRefusal(candidate.shard, dryRun.text));
+        ("refused" in dryRun ? dryRun.refused : sources.landingRefusal(candidate.shard, dryRun.text, pinnedBase));
       outcome = refused === undefined
         ? { task_id: candidate.id, outcome: "amend", reason: parsed.edit.reason }
         : { task_id: candidate.id, outcome: "refused", reason: refused };
@@ -390,7 +508,7 @@ export async function redesignInventory(sources: RedesignSources, deps: Gardener
       const draft = applyRedesignRetirement(candidate.text, candidate.shard, parsed.edit, candidate.signature);
       const confirmation = "refused" in draft ? undefined : retirementConfirmation(draft.task, candidate.shard, sources, deps.repoRoot);
       const refused = "refused" in draft ? draft.refused : confirmation === undefined
-        ? "origin/main does not confirm the task is done or overtaken" : sources.landingRefusal(candidate.shard, draft.text);
+        ? "origin/main does not confirm the task is done or overtaken" : sources.landingRefusal(candidate.shard, draft.text, pinnedBase);
       if (refused === undefined && confirmation !== undefined) {
         actions.push({ ...action, class: "retire", reason: parsed.edit.reason, edit: parsed.edit, confirmation, original: candidate.text });
       }
@@ -407,11 +525,16 @@ export async function redesignInventory(sources: RedesignSources, deps: Gardener
   return { candidates: candidates.length, actions, outcomes };
 }
 
-export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<RedesignSources> = {}): RedesignSources {
+export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<RedesignSources> = {}, opsRead?: PlanOpsRead): RedesignSources {
+  const ops = opsRead?.outcome === "ok" ? opsRead : undefined;
+  const readPublicShard = overrides.readShard ?? ((rel) => readFileSync(join(deps.repoRoot, rel), "utf8"));
   const sources: Omit<RedesignSources, "settled"> = {
     clock: deps.clock ?? systemClock,
-    plan: () => planInventory(deps.repoRoot, deps.stateDir),
-    readShard: (rel) => readFileSync(join(deps.repoRoot, rel), "utf8"),
+    plan: () => {
+      const inv = planInventory(deps.repoRoot, deps.stateDir, ops);
+      if (inv.ops) inv.shards = new Map([...inv.shards, ...inv.ops.shards]);
+      return inv;
+    },
     ledger: (steps, sinceIso) => {
       const read = readLedgerUnionRecordsSync(deps.stateDir, { step: [...steps], refuseIncomplete: true, sinceTs: sinceIso });
       if (!read.ok) throw new Error(`redesign: incomplete ledger union: ${read.unread.join(", ")}`);
@@ -434,10 +557,10 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
     judgeText: () => Promise.reject(new Error("the redesign Architect's spawn is not wired")),
     // backlogLandingGuard's two arms over the drafted text: a machine record is linted whole with admission, any
     // other record only for block violations its base did not already have.
-    landingRefusal: (rel, text) => {
+    landingRefusal: (rel, text, pinnedBase) => {
       const exists = (p: string) => existsSync(join(deps.repoRoot, p));
       const head = parseTasksFromYaml(text, rel);
-      const base = parseTasksFromYaml(readFileSync(join(deps.repoRoot, rel), "utf8"), rel);
+      const base = parseTasksFromYaml(pinnedBase ?? readFileSync(join(deps.repoRoot, rel), "utf8"), rel);
       const sharedProofs = head.flatMap((task) => {
         const prior = base.find((b) => b.id === task.id);
         return promoteIntroducedPlanOnlyDiagnostics(
@@ -455,6 +578,7 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
       return reasons.length > 0 ? reasons.join("; ") : undefined;
     },
     ...overrides,
+    readShard: (rel, id) => id !== undefined && ops?.shards.get(id) === rel ? ops.sources.get(rel)! : readPublicShard(rel, id),
   };
   return {
     ...sources,
@@ -464,15 +588,33 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
       // row, which only a filed PR carries a url on, is what keeps that PR's signatures from a second PR.
       const landed = sources.ledger([REDESIGN_SCORECARD_STEP], fixedClock(0).iso())
         .filter((r) => typeof r.pr_url === "string" && Array.isArray(r.signatures)).flatMap((r) => rowKeys(r, r.signatures));
-      return new Set([...(state.pending?.targets ?? []), ...(state.declinedTargets ?? [])].map((t) => t.target).concat(landed));
+      // Ops landings have their own PR lifecycle and are deliberately absent from the public scorecard: a submitted ops
+      // record's signatures and evidence keys are held only while its own landing outcome holds them (redesignOpsHeld),
+      // and the public PR never settles them on the ops catalog's behalf.
+      const ops = redesignOpsHeld(sources.ledger([REDESIGN_OPS_LANDING_STEP, REDESIGN_OPS_LANDING_RESULT_STEP], fixedClock(0).iso()), sources.clock.now());
+      return new Set([...(state.pending?.targets ?? []), ...(state.declinedTargets ?? [])].map((t) => t.target).concat(landed, ops));
     }),
   };
 }
 
+function redesignLandingClaim(action: RedesignAction): string {
+  return `${action.target} carries the Architect's ${action.class === "retire" ? "retirement" : "amendment"}`;
+}
+
+function opsRedesignLandingProof(action: RedesignAction, original: string, edited: string): string | undefined {
+  // The sealed landing checks the body proof against the pin and the edited shard. The signature is a YAML comment.
+  const prior = new Set(original.split("\n").map((line) => line.trimEnd()));
+  const line = action.class === "retire" ? `  retirement: ${action.edit.retirement}` :
+    edited.split("\n").map((raw) => raw.trimEnd()).find((text) => text !== "" && !text.trimStart().startsWith("#") && !prior.has(text));
+  return line === undefined ? undefined : `grep: ^${escapeGrepLiteral(line)}[[:space:]]*$ in ${action.shard}`;
+}
+
 export function redesignGardenSpec(
-  deps: GardenerDeps, overrides: Partial<RedesignSources> = {},
+  deps: GardenerDeps, overrides: Partial<RedesignSources> = {}, opsSeam?: Pick<PlanGardenOps, "read" | "land">,
 ): GardenSpec<RedesignClass, RedesignInventory, RedesignAction, GardenCheckout> {
   const sources = buildRedesignSources(deps, overrides);
+  let readOps: PlanOpsCatalog | undefined;
+  const isPublic = (action: RedesignAction) => readOps === undefined || !readOps.shards.has(action.target);
   return {
     name: REDESIGN_NAME,
     classes: REDESIGN_CLASSES,
@@ -483,26 +625,34 @@ export function redesignGardenSpec(
     landingRefusal: backlogLandingGuard(deps),
     cheapFingerprint: () => `${planCheapFingerprint(deps.repoRoot, deps.stateDir)}:${gardenLedgerBucket(sources.clock)}`,
     inventory: () => { throw new Error("the redesign Architect answers asynchronously: drive it with runGardenAsync"); },
-    inventoryAsync: () => redesignInventory(sources, deps),
+    inventoryAsync: async () => {
+      const snapshot = await opsSeam?.read();
+      readOps = snapshot?.outcome === "ok" ? snapshot : undefined;
+      return redesignInventory(readOps ? buildRedesignSources(deps, overrides, snapshot) : sources, deps);
+    },
     fingerprint: (i) => i.actions.map((a) => a.signature).join(",") || "none",
     unfinished: (i) => i.actions.length > 0,
     candidates: (i, _rng, declined = []) => {
       const no = new Set(declined.map((d) => d.target));
       return i.actions.filter((a) => !no.has(a.signature) && !a.keys.every((k) => no.has(k)));
     },
-    pendingTargets: (plan) => plan.actions.flatMap((a) => [a.signature, ...a.keys].map((target) => ({ class: a.class, target }))),
+    pendingTargets: (plan) => plan.actions.filter(isPublic).flatMap((a) => [a.signature, ...a.keys].map((target) => ({ class: a.class, target }))),
     scorecard: (i, plan) => {
-      const card = { candidates: i.candidates, outcomes: i.outcomes, acting: plan.acting, signatures: plan.actions.map((a) => a.signature),
-        evidence_keys: plan.actions.flatMap((a) => a.keys) };
+      // The framework attaches the public PR's URL to this card. Its decision covers only those signatures.
+      const publicActions = plan.actions.filter(isPublic);
+      const card = { candidates: i.candidates, outcomes: i.outcomes, acting: plan.acting, signatures: publicActions.map((a) => a.signature),
+        evidence_keys: publicActions.flatMap((a) => a.keys) };
       deps.log(REDESIGN_SCORECARD_STEP, card);
       return card;
     },
     apply: (ws, plan) => {
       const date = sources.clock.date().toISOString().slice(0, 10);
       const landed: RedesignAction[] = [];
+      const opsInputs: Array<{ input: TaskFileInput; action: RedesignAction }> = [];
       for (const action of plan.actions) {
+        const opsPath = readOps?.shards.get(action.target);
         const abs = join(ws.root, action.shard);
-        const original = readFileSync(abs, "utf8");
+        const original = opsPath === undefined ? readFileSync(abs, "utf8") : readOps!.sources.get(opsPath)!;
         if (action.class === "retire" && original !== action.original) {
           deps.log(REDESIGN_JUDGED_STEP, { task_id: action.target, outcome: "refused", reason: "the shard changed after retirement was confirmed",
             signature: action.signature, evidence_keys: action.keys, retryable: true });
@@ -512,8 +662,38 @@ export function redesignGardenSpec(
           ? applyRedesignRetirement(original, action.shard, action.edit, action.signature)
           : applyRedesignEdit(original, action.shard, action.edit, action.signature, date);
         if ("refused" in edited) { deps.log(REDESIGN_JUDGED_STEP, { task_id: action.target, outcome: "refused", reason: edited.refused, signature: action.signature, evidence_keys: action.keys }); continue; }
-        writeAtomic(abs, edited.text);
-        landed.push(action);
+        if (opsPath === undefined) {
+          writeAtomic(abs, edited.text);
+          landed.push(action);
+        } else {
+          const proof = opsRedesignLandingProof(action, original, edited.text);
+          if (proof === undefined) {
+            deps.log(REDESIGN_JUDGED_STEP, { task_id: action.target, outcome: "refused", reason: "the ops edit adds no data line for its landing proof",
+              signature: action.signature, evidence_keys: action.keys });
+            continue;
+          }
+          opsInputs.push({ input: { relPath: opsPath, content: edited.text, claim: redesignLandingClaim(action), proof }, action });
+        }
+      }
+      if (opsSeam && readOps && opsInputs.length > 0) {
+        // Only the records this landing carries are submitted; each is answered by its own outcome (redesignOpsHeld).
+        const records = opsInputs.map(({ input, action }) => ({ ...opsRecordKey(input.relPath, input.content), signatures: [action.signature], evidence_keys: action.keys }));
+        deps.log(REDESIGN_OPS_LANDING_STEP, {
+          pin: readOps.pin,
+          paths: opsInputs.map(({ input }) => input.relPath),
+          signatures: opsInputs.map(({ action }) => action.signature),
+          evidence_keys: opsInputs.flatMap(({ action }) => action.keys),
+          records,
+        });
+        try {
+          opsSeam.land(opsInputs.map(({ input }) => input), readOps.pin);
+        } catch (error) {
+          const reason = `the landing threw: ${String((error as Error)?.message ?? error)}`;
+          deps.log(REDESIGN_OPS_LANDING_RESULT_STEP, {
+            failure: true, error: String((error as Error)?.message ?? error),
+            records: records.map(({ path, content_sha }) => ({ path, content_sha, outcome: "released", reason })),
+          });
+        }
       }
       if (landed.length === 0) return undefined;
       const retiring = landed[0]!.class === "retire";
@@ -538,7 +718,7 @@ export function redesignGardenSpec(
             ]),
           ].join("\n")),
           "", "## Acceptance",
-          ...landed.map((a) => `- claim: ${a.target} carries the Architect's ${a.class === "retire" ? "retirement" : "amendment"}\n  proof: "grep: # redesign: signature=${a.signature} in ${a.shard}"`),
+          ...landed.map((a) => `- claim: ${redesignLandingClaim(a)}\n  proof: "grep: # redesign: signature=${a.signature} in ${a.shard}"`),
         ].join("\n"),
       };
     },

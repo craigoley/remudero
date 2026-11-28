@@ -404,7 +404,7 @@ import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOvers
 import { assertOpsCheckoutAtPin, opsPlanLandingPreflight, planGardenSpec, productionPlanGardenOps } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
 import { queueJudgeGardenSpec, queueJudgeRouteWindow, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
-import { redesignGardenSpec } from "./lib/redesign-gardener.js";
+import { redesignGardenSpec, redesignOpsLandTaskFiles } from "./lib/redesign-gardener.js";
 import { SCOUT_WINDOW_MS, scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, randomisedRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
@@ -29496,7 +29496,10 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "redesign": {
       const d = deps("redesign", raiseDuplicate);
       const judge = issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log });
-      return gardenPass(redesignGardenSpec(d, { judgeText: (prompt) => judge.judgeText(prompt, 0) }), d);
+      // W1-T14882: the plan case's ops source; its sealed landing records each redesign record's own outcome.
+      const ops = productionPlanGardenOps({ repoRoot, stateDir, stateRoot: config.root, log, landTaskFiles: redesignOpsLandTaskFiles(log, undefined, { codeRoot: repoRoot }) });
+      const pass = gardenPass(redesignGardenSpec(d, { judgeText: (prompt) => judge.judgeText(prompt, 0) }, ops), d);
+      return withDue(async () => { await pass(); await ops.settled(); }, pass.due!);
     }
     case "queue-judge": {
       const d = deps("queue-judge", raiseDuplicate);
