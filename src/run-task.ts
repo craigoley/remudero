@@ -28618,10 +28618,13 @@ export function fleetLaneSamenessJudge(
           ...buildInboxDraftSpawnArgs({ cwd: config.root, settingsFile, mount, config, prompt, disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS }),
           onSelectionAssignment: undefined,
         });
+        // W1-T14916: a judge a retired daemon withheld answered nothing; the pass stops rather than file both findings.
+        if (result.notStarted !== undefined) throw new WorkerNotStartedError(result.notStarted);
         const answer = /\{[^{}]*\}/.exec(result.text)?.[0];
         const parsed = answer === undefined ? undefined : (JSON.parse(answer) as { answer?: unknown }).answer;
         return parsed === "same" || parsed === "distinct" ? parsed : "unavailable";
       } catch (e) {
+        if (e instanceof WorkerNotStartedError) throw e;
         log("fleet_lane.sameness_judge_failed", { error: String((e as Error)?.message ?? e) });
         return "unavailable";
       }

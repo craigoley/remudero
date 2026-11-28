@@ -39,7 +39,8 @@ import { proofDebtPopulationPermit, readInboxGardenerStore, stampMechanicalAsk, 
 import { fixedClock } from "#src/lib/clock.js";
 
 // The shared run-task test helper, not a direct src/run-task.ts import (the affected-suite reach ratchet bounds direct importers).
-import { buildSweepEffects, codeScanningJudgeDeps, dispatchAlertFixRun, dispatchMainRepairFixRun, mainRepairLaneFor, runFixRung, runReview, type AlertFixDispatchDeps } from "#test/helpers/run-task-test.js";
+import { buildSweepEffects, codeScanningJudgeDeps, fleetLaneSamenessJudge, dispatchAlertFixRun, dispatchMainRepairFixRun, mainRepairLaneFor, runFixRung, runReview, type AlertFixDispatchDeps } from "#test/helpers/run-task-test.js";
+import { readFleetLaneStore, triageFleetLaneAsync, writeClassificationSnapshot } from "#src/lib/fleet-lane.js";
 import { CODE_SCANNING_FIX_STEP, runSweep, type SweepDeps } from "#test/helpers/sweep-test.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 
@@ -810,4 +811,38 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   for (let i = 0; i < 10; i++) await new Promise<void>((r) => setImmediate(r));
   assert.equal(judged, 1, "control: the successor judges the same head");
   assert.deepEqual(armed, [`${CS_N}@${CS_HEAD}`], "control: the successor's ruling decides the head");
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and a fleet-lane sameness judge it withheld stores no verdict and files nothing", async (t: TestContext) => {
+  const root = ownedFixtureDir(t, "retired-fleet-lane").dir;
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const ledgerPath = join(stateDir, "ledger.ndjson");
+  const proposals = ["explain the worker timeout", "document how long the worker waits"].map((summary, i) => ({
+    id: `followup:W1-T96001-run:2026-11-27T05:0${i}:00.000Z:0`, summary, evidenceAnchors: [] }));
+  writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals }));
+  const clock = fixedClock(Date.parse("2026-11-27T06:00:00.000Z"));
+  writeClassificationSnapshot(stateDir, proposals.map(({ id }) => ({ proposalId: id, state: "ready" })), clock);
+  const config = { root, installRoot: REPO_ROOT, claudeBin: "/unused", dailyCapUsd: 25 } as never;
+  const logged: string[] = [];
+  const judge = (answer: WorkerResult) => fleetLaneSamenessJudge(config, (step) => logged.push(step), async () => answer)!;
+  const withheld = { notStarted: "admission-abandoned", subtype: "admission_abandoned", text: "", blocks: [] } as unknown as WorkerResult;
+  const approved: string[] = [];
+  const deps = (sameFinding: ReturnType<typeof judge>) => ({ stateDir, ledgerPath, clock, mergedLastDay: () => 5,
+    approve: (id: string) => { approved.push(id); }, sameFinding });
+
+  // The production port: a withheld start throws instead of reading as "unavailable".
+  await assert.rejects(judge(withheld)("a", "b"), WorkerNotStartedError);
+  // The pass: it stops, so neither follow-up is merged or filed and no verdict or unavailable row is written.
+  await assert.rejects(triageFleetLaneAsync(deps(judge(withheld))), WorkerNotStartedError);
+  assert.deepEqual(approved, []);
+  assert.equal(Object.keys(readFleetLaneStore(stateDir)).includes("fleet-lane:sameness"), false, "no verdict is stored");
+  const steps = existsSync(ledgerPath) ? readLedgerLines(ledgerPath).map((row) => String(row.step)) : [];
+  assert.equal(steps.includes("fleet_lane.sameness_unavailable"), false, steps.join(", "));
+  assert.equal(logged.includes("fleet_lane.sameness_judge_failed"), false, "a withheld judge is not a failed judge");
+
+  // Control: the successor's judge answers, and the same pair is judged and merged.
+  const answered = { text: JSON.stringify({ answer: "same" }), blocks: [] } as unknown as WorkerResult;
+  assert.deepEqual((await triageFleetLaneAsync(deps(judge(answered)))).merged, [proposals[0]!.id]);
 });
