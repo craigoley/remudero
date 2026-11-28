@@ -35,6 +35,11 @@ Only positively verified ignored paths can skip CodeQL. Unknown API/format/corpu
 results publish an actionable `error`, not success or indefinite pending. CodeQL
 events retry without a recurring PR monitor or a runner polling loop.
 
+A pull request reaches the producer through `workflow_run` when CodeQL or Semgrep runtime
+compatibility is requested, runs or finishes, never through pull_request_target, which GitHub
+blocks by default in public repositories from 2026-12-02. Semgrep runtime compatibility has no
+path filter, so every pull request to main is covered; sweep backfills through `workflow_dispatch`.
+
 Merge groups currently publish explicit UNKNOWN: native code-scanning rulesets do
 not cover them. Do not require this context on a queue branch until group evidence
 has been independently qualified. Low/medium and quality-only output grammar has
