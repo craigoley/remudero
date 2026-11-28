@@ -26,6 +26,7 @@ import {
   type OpenPrView,
 } from "#src/lib/sweep.js";
 import { withTempDir } from "#src/lib/tmp.js";
+import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
 import { drainDetachedSweepActions, runSweep } from "#test/helpers/sweep-test.js";
 
 const MIN = 60_000;
@@ -441,6 +442,10 @@ async function daemonShed(ledger: readonly Record<string, unknown>[], base: numb
       const planPath = join(stateDir, "tasks.yaml");
       writeFileSync(planPath, "- id: A\n  title: a\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n");
       const deps: DaemonDeps = {
+        // W1-T12163: the daemon's own memory governor and heap are pinned; the clock stays live, as the readings and
+        // ledger rows are dated from `base = Date.now()`.
+        ...hostIndependentDaemonDeps(),
+        now: () => new Date(),
         refreshMerged: () => (id) => merged.has(id),
         runOne: async (id) => { await gate; merged.add(id); return { taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }; },
         sweepLight: async () => {},
