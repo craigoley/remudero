@@ -1297,7 +1297,7 @@ test("ghIssueGateway.create: builds the gh issue-create args and returns the tri
       "--title",
       "[BLOCKED] W1-TX: two strikes exhausted",
       "--body",
-      "body text",
+      "**Code-Repository:** craigoley/remudero\nbody text",
       "--label",
       NEEDS_HUMAN_LABEL,
       "--label",
