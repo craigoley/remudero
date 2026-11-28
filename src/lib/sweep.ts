@@ -17923,10 +17923,9 @@ function* fixDispatchHoldAtHeadSteps(
   options: FixDispatchHoldOptions,
 ): Steps<FixDispatchHold | undefined> {
   const atHead = (l: Record<string, unknown>) => l.pr_number === pr.prNumber && l.head_sha === pr.headSha;
-  const shedRunIds = new Set(lines.filter((row) => row.step === "run_child.abort" && row.memory_shed === true &&
-    typeof row.run_id === "string").map((row) => String(row.run_id)));
+  // W1-T15181: a round the container-shed rung ended is no failure of its dispatch, so it neither holds nor paces one.
   const failed = (l: Record<string, unknown>) => (isOwnerClaimDecline(l) || isDetachedFixDispatchFailure(l)) &&
-    !(typeof l.child_run_id === "string" && shedRunIds.has(l.child_run_id));
+    l.memory_shed !== true;
   const history: Record<string, unknown>[] = [];
   for (const row of lines) {
     if (fixDispatchSuccess(row, pr) && row.head_sha === pr.headSha) history.length = 0;
@@ -20062,7 +20061,12 @@ function priorActionsFromLedger(
   const missingTaskTrailerRepairs = new Set<string>();
   const realFixDispatches = new Set<string>();
   const voidedFixes = new Map<string, string>();
+  const shedFixes = new Map<string, string>(); // head sha -> PR@head of a shed round no later round has superseded
   for (const line of lines) {
+    // W1-T15181: a later round's own row at a shed head ends that shed's release of the dedup, applied after the walk.
+    if (line.step === "fix.dispatch" || line.step === "fix.retrigger" || line.step === "fix.stood_down" || line.step === "fix.done") {
+      shedFixes.delete(String(line.head_sha));
+    }
     if (line.step === "sweep.reviewer_freshness_probe" && typeof line.review_key === "string") {
       const refusal = reviewFreshnessRefusals.get(line.review_key);
       const at = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
@@ -20224,6 +20228,11 @@ function priorActionsFromLedger(
       realFixDispatches.add(`${String(line.task_id)}@${line.head_sha}`);
       continue;
     }
+    // W1-T15181: a shed round gives its dedup back even when it wrote fix.dispatch before the shed ended it.
+    if (isDetachedFixDispatchFailure(line) && line.memory_shed === true) {
+      shedFixes.set(String(line.head_sha), `${line.pr_number}@${String(line.head_sha)}`);
+      continue;
+    }
     if (isOwnerClaimDecline(line) || isDetachedFixDispatchFailure(line)) {
       voidedFixes.set(`${line.pr_number}@${line.head_sha}`, `${String(line.task_id)}@${String(line.head_sha)}`);
       continue;
@@ -20283,6 +20292,7 @@ function priorActionsFromLedger(
     }
   }
   for (const [prHead, taskHead] of voidedFixes) if (!realFixDispatches.has(taskHead)) fixed.delete(prHead);
+  for (const prHead of shedFixes.values()) fixed.delete(prHead);
   // W1-T5840 — a delivered FAILURE that a newer GitHub success contradicts is not a standing
   // verdict: release its key so the supersedes demand fires and the claim admits ONE re-review.
   for (const pr of openPrs ?? []) {
@@ -21965,6 +21975,8 @@ export interface ChildWorkRegistration {
   runId: string; kind: string; taskId: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string;
   /** Original run admission recovered from run_child.spawned on boot. */
   admittedAtMs?: number;
+  /** W1-T15181: set when the container-shed rung signalled this child, in this process or before the boot adopting it. */
+  memoryShed?: boolean;
   readPhase?: () => string | undefined;
   planLane?: boolean;
 }
@@ -21979,6 +21991,11 @@ interface RegisteredChildWork extends ChildWorkRegistration {
   settled?: Promise<void>;
 }
 const childWork = new Map<string, RegisteredChildWork>();
+/** W1-T15181: the container-shed rung signalled this child; its settlement's dispatch failure row says so. */
+export function markChildWorkShed(runId: string): void {
+  const work = childWork.get(runId);
+  if (work !== undefined) work.memoryShed = true;
+}
 const settledChildWork = new Set<string>();
 const childWorkSettleKey = (runId: string, headSha?: string): string => `${runId}@${headSha ?? ""}`;
 
@@ -22407,6 +22424,7 @@ export function installedDetachedWorkHost(): DetachedWorkHost | undefined {
 export interface AdoptedWorkChild {
   runId: string; taskId: string;
   admittedAtMs?: number;
+  memoryShed?: boolean;
   work: { kind: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string; planLane?: boolean; inputs?: Record<string, unknown> };
   settled: Promise<unknown>;
   readPhase?: () => string | undefined;
@@ -22426,6 +22444,7 @@ export function adoptChildWork(child: AdoptedWorkChild, log: (step: string, extr
   registerChildWork({
     runId: child.runId, taskId: child.taskId, ...registered, ...(planLane ? { planLane } : {}), readPhase: child.readPhase,
     ...(child.admittedAtMs === undefined ? {} : { admittedAtMs: child.admittedAtMs }),
+    ...(child.memoryShed ? { memoryShed: true } : {}),
   });
   const done = child.settled.then(
     (value) => ({ status: "fulfilled" as const, value }),
@@ -22442,6 +22461,7 @@ export function adoptChildWork(child: AdoptedWorkChild, log: (step: string, extr
       log("sweep.fix.dispatch_failed", {
         pr_number: child.work.prNumber, head_sha: child.work.headSha, child_run_id: child.runId,
         ...(typeof dedupeKey === "string" ? { dedupe_key: dedupeKey } : {}),
+        ...(work?.memoryShed ? { memory_shed: true } : {}),
         error: capStderrExcerpt(String((outcome.reason as Error)?.message ?? outcome.reason), STDERR_EXCERPT_CAP),
       });
     }

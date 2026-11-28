@@ -17,12 +17,16 @@ import {
   MEMORY_SHED_HELD_STEP, MEMORY_SHED_STEP,
   type ContainerShedEndOutcome, type ContainerShedEntry, type ContainerShedReading,
 } from "#src/lib/daemon-memory-policy.js";
-import { containerShedInventory, createContainerShedRung, endRunChildForShed, shedTeardownMs } from "#src/lib/daemon.js";
+import { containerShedInventory, createContainerShedRung, endRunChildForShed, runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
 import { SWAP_STALL_HISTORY_MS, SWAP_STALL_MIN_SAMPLES, SWAP_STALL_WINDOW_MS } from "#src/lib/host-memory-shadow.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   adoptChildWork, childWorkCount, childWorkHoldsReviewKey, fixDispatchHoldAtHead, fixRoundTally, resetChildWork, restartDrainInventory,
+  type OpenPrView,
 } from "#src/lib/sweep.js";
 import { withTempDir } from "#src/lib/tmp.js";
+import { drainDetachedSweepActions, runSweep } from "#test/helpers/sweep-test.js";
 
 const MIN = 60_000;
 const T1016 = Date.parse("2026-11-27T10:16:00Z");
@@ -386,21 +390,189 @@ test("W1-T15181 criterion 5: the daemon ends a child through abortRunChild on it
   });
 });
 
-test("W1-T15181 criterion 5: a shed child's SIGKILL waits the restart's learned teardown, and never comes when that history is unread", async () => {
-  const now = Date.now();
-  const at = (ms: number) => new Date(now - ms).toISOString();
-  // One freshness yield the next run picked up 90 s later: the yield cost run-task.ts gives a build run's abort.
-  const yieldRows = [
-    { ts: at(600_000), run_id: "run-1", task_id: "W1-T1", step: "verdict", reason: "freshness_yield" },
-    { ts: at(510_000), run_id: "run-2", task_id: "W1-T1", step: "run.start" },
-  ].map((row) => JSON.stringify(row)).join("\n") + "\n";
-  await withTempDir("w1-t15181-teardown-", async (stateDir) => {
-    writeFileSync(join(stateDir, "ledger.ndjson"), yieldRows);
-    assert.equal(shedTeardownMs(stateDir, { now: () => now }), 90_000);
-    // The same live rows beside an archive that cannot be read: the history is incomplete, so the teardown is unknown.
-    writeFileSync(join(stateDir, `ledger.${new Date(now - 60 * MIN).toISOString().replace(/[:.]/g, "-")}.ndjson.gz`), "not gzip");
-    assert.equal(shedTeardownMs(stateDir, { now: () => now }), undefined);
+/** The abort seams of one fake child: SIGTERM or SIGKILL (`diesOn`) ends it, and its settlement then rejects. */
+function fakeProcess(diesOn: NodeJS.Signals, reject: () => void) {
+  const signals: NodeJS.Signals[] = [];
+  let dead = false;
+  let clock = 0;
+  let waits = 0;
+  return {
+    signals,
+    ports: {
+      knownPid: () => (dead ? undefined : 4242),
+      kill: (_pgid: number, signal: NodeJS.Signals) => {
+        signals.push(signal);
+        if (signal !== diesOn) return;
+        dead = true;
+        reject();
+      },
+      // An abort that never gets its signal ends here, so a broken path fails its assertions instead of hanging.
+      wait: async () => { if (++waits > 500) dead = true; await flush(); },
+      clock: () => (clock += MIN),
+    },
+  };
+}
+
+const abortError = () => Object.assign(new Error("aborted before the run finished"), { name: "AbortError" });
+
+/** One freshness yield the next run picked up 90 s later: the yield cost run-task.ts gives a build run's abort. */
+const yieldRows = (base: number): Record<string, unknown>[] => [
+  { ts: new Date(base - 600_000).toISOString(), run_id: "run-1", task_id: "W1-T1", step: "verdict", reason: "freshness_yield" },
+  { ts: new Date(base - 510_000).toISOString(), run_id: "run-2", task_id: "W1-T1", step: "run.start" },
+];
+
+/**
+ * runDaemon end to end: boot, one dispatch held open, the real in-flight ticker, the DEFAULT rung over the sweep's real
+ * inventory and abortRunChild. Only the cgroup reading, the process signals and the ledger lines are injected.
+ * `oldEnds` ends the older child at boot, without any shed in this boot.
+ */
+async function daemonShed(ledger: readonly Record<string, unknown>[], base: number, oldEnds = false) {
+  resetChildWork();
+  const rows: Row[] = [];
+  let rejectYoung!: () => void;
+  const young = fakeProcess("SIGKILL", () => rejectYoung());
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let sleeps = 0;
+  let reads = 0;
+  const merged = new Set<string>();
+  try {
+    await withTempDir("w1-t15181-daemon-", async (stateDir) => {
+      const planPath = join(stateDir, "tasks.yaml");
+      writeFileSync(planPath, "- id: A\n  title: a\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n");
+      const deps: DaemonDeps = {
+        refreshMerged: () => (id) => merged.has(id),
+        runOne: async (id) => { await gate; merged.add(id); return { taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }; },
+        sweepLight: async () => {},
+        sleep: async () => {
+          await flush();
+          if (rows.some((r) => r.step === MEMORY_SHED_STEP) || ++sleeps >= 200) release();
+          if (sleeps > 2_000) throw new Error("the daemon never exited");
+        },
+        log: (step, fields = {}) => rows.push({ step, fields }),
+        readLedgerLines: () => ledger.map((row) => JSON.stringify(row)),
+        // Adoption order is the reverse of admission order: the older child is adopted last.
+        adoptRunChildren: () => [
+          { runId: "run-young", taskId: "W1-T900", work: { kind: "fix-dispatch", prNumber: 501, headSha: "h501" },
+            settled: new Promise<never>((_, reject) => { rejectYoung = () => reject(abortError()); }) },
+          { runId: "run-old", taskId: "W1-T901", work: { kind: "fix-dispatch", prNumber: 502, headSha: "h502" },
+            settled: oldEnds ? Promise.reject(abortError()) : new Promise<never>(() => {}) },
+        ] as never,
+        containerShedSeams: {
+          stateDir, abort: young.ports,
+          read: () => {
+            const n = reads++;
+            return { at_ms: base + n * 408_000, events_high: 100 * (n + 1), psi_full_avg60: 40, memory_current_mib: 17_000,
+              memory_high_mib: 16_404, missed_ticks: 1 };
+          },
+        },
+      };
+      await runDaemon(loadPlan(planPath), deps, { max: 1 });
+    });
+  } finally {
+    resetChildWork();
+  }
+  return { rows, signals: young.signals };
+}
+
+test("W1-T15181 criterion 8: runDaemon's in-flight tick sheds the child spawned last, with the teardown learned at boot", async () => {
+  const base = Date.now();
+  const at = (ago: number) => new Date(base - ago).toISOString();
+  const spawned = [
+    { ts: at(7 * MIN), run_id: "run-young", task_id: "W1-T900", step: "run_child.spawned" },
+    { ts: at(50 * MIN), run_id: "run-old", task_id: "W1-T901", step: "run_child.spawned" },
+  ];
+  const { rows, signals } = await daemonShed([...spawned, ...yieldRows(base)], base);
+  assert.deepEqual(rows.filter((r) => r.fields.surface === "container_shed"), [], "the tick consults the rung without throwing");
+  const shed = rows.filter((r) => r.step === MEMORY_SHED_STEP);
+  assert.equal(shed.length, 1);
+  assert.equal(shed[0]!.fields.run_id, "run-young");
+  assert.equal(shed[0]!.fields.age_ms, 408_000 + 7 * MIN, "its age runs from its spawn, not from this boot's adoption");
+  assert.equal(shed[0]!.fields.outcome, "lost");
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+  const aborts = rows.filter((r) => r.step === "run_child.abort");
+  assert.equal(aborts[0]!.fields.teardown_ms, 90_000);
+  assert.equal(aborts[0]!.fields.memory_shed, true);
+  const failure = rows.find((r) => r.step === "sweep.fix.dispatch_failed" && r.fields.child_run_id === "run-young");
+  assert.equal(failure?.fields.memory_shed, true, "the settlement says the round was shed");
+});
+
+test("W1-T15181 criterion 5: with no learned teardown a shed child is signalled once and never killed", async () => {
+  await withTempDir("w1-t15181-noteardown-", async (stateDir) => {
+    const child = fakeProcess("SIGTERM", () => {});
+    const outcome = await endRunChildForShed(stateDir, "run-x", () => {}, undefined, child.ports);
+    assert.deepEqual(outcome, { signalled: true, ended: "lost", killed: false });
+    assert.deepEqual(child.signals, ["SIGTERM"]);
   });
+});
+
+test("W1-T15181 criterion 6: a shed signalled before the boot still marks the adopted child's settlement", async () => {
+  resetChildWork();
+  const rows: Row[] = [];
+  try {
+    await adoptChildWork({ runId: "run-before", taskId: "W1-T900", memoryShed: true,
+      work: { kind: "fix-dispatch", prNumber: 501, headSha: "h501" }, settled: Promise.reject(abortError()) },
+      (step, fields = {}) => rows.push({ step, fields }));
+    assert.equal(rows.find((r) => r.step === "sweep.fix.dispatch_failed")?.fields.memory_shed, true);
+  } finally {
+    resetChildWork();
+  }
+  // The daemon reads that mark off the marked abort row among the lines it boots on.
+  const base = Date.now();
+  const { rows: booted } = await daemonShed([
+    { ts: new Date(base - 7 * MIN).toISOString(), run_id: "run-young", task_id: "W1-T900", step: "run_child.spawned" },
+    { ts: new Date(base - MIN).toISOString(), run_id: "run-old", task_id: "W1-T901", step: "run_child.abort", memory_shed: true },
+    ...yieldRows(base),
+  ], base, true);
+  const old = booted.find((r) => r.step === "sweep.fix.dispatch_failed" && r.fields.child_run_id === "run-old");
+  assert.equal(old?.fields.memory_shed, true);
+});
+
+test("W1-T15181 criterion 6: the next sweep pass re-admits a shed fix round, even one that wrote fix.dispatch at that head", async () => {
+  const now = Date.now();
+  const ago = (ms: number) => new Date(now - ms).toISOString();
+  const head = "h501abcdef";
+  const pr: OpenPrView = {
+    prNumber: 501, prUrl: "https://github.com/craigoley/remudero/pull/501", taskId: "W1-T900", reviewState: "failure",
+    checksState: "green", unmetCriteria: [{ claim: "a criterion", proof: "unit test: x", met: false, reason: "not done", proof_exec: "not_executable" }],
+    priorStrikes: 0, lastActivityAt: ago(60 * MIN), headSha: head, headRefName: "run-W1-T900-1791200000000", autoMergeArmed: false,
+  };
+  const earlierHead = { step: "fix.dispatch", task_id: "W1-T900", head_sha: "81c30d80bb" };
+  const disposed = { step: "sweep.disposed", acted: true, pr_number: 501, head_sha: head, disposition: "blocked-fixable" };
+  const dispatch = { step: "fix.dispatch", task_id: "W1-T900", head_sha: head, round_id: "round-shed", mode: "ci-log", ts: ago(10 * MIN) };
+  const failure = { step: "sweep.fix.dispatch_failed", task_id: "W1-T900", pr_number: 501, head_sha: head,
+    child_run_id: "run-fix-501", error: "aborted before the run finished", ts: ago(MIN) };
+  const shed = { ...failure, memory_shed: true };
+  const pass = (seed: readonly Record<string, unknown>[]) => withTempDir("w1-t15181-sweep-", async (dir) => {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    let dispatched = 0;
+    await runSweep([pr], {
+      arm: () => {}, close: () => {}, escalate: () => {}, runId: "SWEEP-W1-T15181", now: () => now, ledgerPath,
+      readLedger: () => [earlierHead, ...seed, ...readLedgerLines(ledgerPath)],
+      dispatchFix: () => { dispatched++; },
+    });
+    await drainDetachedSweepActions();
+    const row = readLedgerLines(ledgerPath).findLast((l) => l.step === "sweep.disposed");
+    return { dispatched, standDown: String(row?.stand_down_reason) };
+  });
+  const earlierFailure = { ...failure, child_run_id: "run-earlier", ts: ago(90 * MIN) };
+  for (const seed of [
+    [disposed, shed],
+    [disposed, dispatch, shed],
+    [dispatch, disposed, shed],
+    [dispatch, shed, disposed], // the shed round's own pass can write its disposed row after the child settled
+    [earlierFailure, { ...dispatch, round_id: "round-earlier", ts: ago(50 * MIN) }, disposed, dispatch, shed],
+  ]) {
+    const next = await pass(seed);
+    assert.equal(next.dispatched, 1, `${seed.map((r) => r.step).join(" > ")}: ${next.standDown}`);
+  }
+  // Controls: the same rows without the mark stay deduped, and a later round's own dispatch ends the release.
+  const unmarked = { ...failure, ts: ago(30 * MIN) };
+  for (const seed of [[disposed, dispatch, unmarked], [dispatch, shed, disposed, { ...dispatch, round_id: "round-next" }]]) {
+    const next = await pass(seed);
+    assert.equal(next.dispatched, 0);
+    assert.match(next.standDown, /fix already dispatched for this head/);
+  }
 });
 
 test("W1-T15181 criterion 6: a shed fix round counts no strike and frees its PR; a shed review posts no FAIL and frees its key", async () => {
@@ -418,11 +590,8 @@ test("W1-T15181 criterion 6: a shed fix round counts no strike and frees its PR;
     hosted("run-review-502", { kind: "review", prNumber: 502, headSha: "h502", reviewKey: "review-502" });
     // The child ends `aborted` on SIGTERM: its settlement rejects with an AbortError, as run-child-main writes it.
     const inventory = () => restartDrainInventory({ children: true }).filter((e) => e.run_id !== undefined).map((e) => ({
-      ...e, end: async (): Promise<ContainerShedEndOutcome> => {
-        log("run_child.abort", { run_id: e.run_id, memory_shed: true, signal: "SIGTERM" });
-        abort.get(e.run_id!)?.(Object.assign(new Error("aborted before the run finished"), { name: "AbortError" }));
-        return { signalled: true, ended: "terminal", killed: false };
-      },
+      ...e, end: () => endRunChildForShed("/nonexistent-state", e.run_id!, log, undefined,
+        fakeProcess("SIGTERM", () => abort.get(e.run_id!)?.(abortError())).ports),
     }));
     const rung = createContainerShedRung({ read: (atMs, missed) => ({ ...script.shift()!, at_ms: atMs, missed_ticks: missed }), inventory, clock: { now: () => clock }, log });
     let clock = T1016;
@@ -444,19 +613,19 @@ test("W1-T15181 criterion 6: a shed fix round counts no strike and frees its PR;
     await flush();
     await flush();
     assert.equal(childWorkCount("fix-dispatch"), 0, "the fix key is released, so the next pass with capacity may admit the PR");
-    assert.ok(rows.some((r) => r.step === "sweep.fix.dispatch_failed" && r.fields.pr_number === 501), "the dispatch dedup is voided");
+    const failed = rows.find((r) => r.step === "sweep.fix.dispatch_failed" && r.fields.pr_number === 501);
+    assert.equal(failed?.fields.memory_shed, true, "the dispatch dedup is voided, and the row says the round was shed");
     assert.equal(rows.filter((r) => /^fix\./.test(r.step)).length, 0, "the shed writes no fix round outcome of its own");
     const ledger = [
       { task_id: "W1-T900", step: "fix.dispatch", head_sha: "h501", round_id: "round-1", strike: 1, mode: "ci-log" },
       ...rows.map((r) => ({ step: r.step, ...r.fields })),
     ];
     assert.equal(fixRoundTally(ledger, "W1-T900", "h501").strikes, 0, "the shed round is no strike");
-    const shedFailure = { step: "sweep.fix.dispatch_failed", pr_number: 501, head_sha: "h501", child_run_id: "run-fix-501",
-      ts: new Date(T1016 + 4 * MIN).toISOString(), error: "aborted before the run finished" };
-    const shedAbort = { step: "run_child.abort", run_id: "run-fix-501", memory_shed: true };
-    const hold = fixDispatchHoldAtHead({ prNumber: 501, headSha: "h501", taskId: "W1-T900" } as never,
-      [shedAbort, shedFailure]);
-    assert.equal(hold, undefined, "the next sweep can admit the PR as soon as capacity is available");
+    const shedFailure = { step: failed!.step, ...failed!.fields, ts: new Date(T1016 + 4 * MIN).toISOString() };
+    const holdOf = (row: Record<string, unknown>) => fixDispatchHoldAtHead(
+      { prNumber: 501, headSha: "h501", taskId: "W1-T900" } as never, [row], undefined, undefined, { nowMs: T1016 + 4 * MIN });
+    assert.equal(holdOf(shedFailure), undefined, "the next sweep can admit the PR as soon as capacity is available");
+    assert.ok(holdOf({ ...shedFailure, memory_shed: undefined }), "control: an unmarked failure is held");
   } finally {
     for (const reject of abort.values()) reject(new Error("test cleanup"));
     await flush();
