@@ -439,8 +439,10 @@ function decisionShadowRow(row: DecisionAnsweredRow, primaryAnswer: string | nul
     return ["judge_shadow.skipped", { ...spend, ...tuned, distribution, abstained: "below-threshold",
       reason: `abstained (the top option ${top.option} has ${top.probability.toFixed(3)}, below the threshold ${threshold})` }];
   }
+  // W1-T15164: a primary that gave no answer is no disagreement; the row says so and records no agreement.
+  const compared = primaryAnswer === null ? { agreement: null, primary_unanswered: true } : { agreement: primaryAnswer === top.option };
   return ["judge_shadow.compared", { ...spend, ...tuned, distribution, primary_answer: primaryAnswer, shadow_answer: top.option,
-    agreement: primaryAnswer === top.option, ...(answer.cannotTell === undefined ? {} : { cannot_tell: answer.cannotTell }) }];
+    ...compared, ...(answer.cannotTell === undefined ? {} : { cannot_tell: answer.cannotTell }) }];
 }
 
 /** Every step {@link judgeShadowSummary} reads: this task's two and the three of W1-T11075. */
