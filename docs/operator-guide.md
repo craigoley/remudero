@@ -440,6 +440,34 @@ flagged rather than refused. The branch is the only evidence that separates a
 phantom revert from an under-declared `files:`, and is preserved; the overrun
 does not halt the PR or block a merge.
 
+## The inbox draft's depends_on index: full, or a shortlist
+
+Two keys in `~/.config/remudero/config.json` decide what the inbox draft prompt lists for `depends_on`
+grounding (`src/lib/depends-on-candidates.ts`):
+
+- `inboxDraftIndex`: `"full"` (the default) lists every open task, as before; `"topk"` lists the tasks
+  the proposal names, the `inboxDraftTopK` open tasks that score highest against it, and every open task
+  one of those depends on (one hop), and tells the drafter to Grep `plan/tasks.yaml` for any other.
+- `inboxDraftTopK`: a positive integer, default 200. Measured on 2026-11-27's plan (1,027 open tasks, a
+  266K-char full index), the shortlist at 200 with the hop held 0.910 of each task's real open
+  `depends_on` at a 67K-char median.
+
+Both modes log one `inbox.draft_shortlist_recall` row for every lint-clean draft, with `proposal_id`,
+`mode`, `k`, `cited` (the fragment's `depends_on` ids that are real open plan tasks; `NEW-n`
+placeholders, landed ids and ids the plan lacks are left out), `in_shortlist` (how many of those the
+shortlist at `k` holds) and `missed` (the ids it does not hold, at most 20). Under `"full"` the row is
+ground truth for what `"topk"` would have missed; under `"topk"` a miss is a dependency the drafter
+found by its own search. Read it with:
+
+```sh
+rmd inspect --state-dir /absolute/state ledger-grep 'inbox.draft_shortlist_recall'
+```
+
+The bar: flip `inboxDraftIndex` to `"topk"` once 100 or more full-mode rows with `cited` above 0 show
+a summed `in_shortlist` / `cited` of at least 0.95. Below that, raise `inboxDraftTopK` and read again;
+the rows record the `k` they measured, so compare rows at one `k`. To roll back, set
+`inboxDraftIndex` to `"full"` (or delete the key); the next draft rung lists every open task again.
+
 ## An instrument-entangled PR now gets a prerequisite PR, not an escalation issue (W1-T2436)
 
 **What changed for you.** Standing rule 25 refuses a diff that touches both a measurement
@@ -2330,6 +2358,51 @@ head. Two kinds of head now get their status without a model call, and so withou
 To turn the reuse off, create `state/CI_JUDGE_REUSE_OFF`; every changed head is then judged afresh.
 The full-floor skip has no switch of its own: a full floor runs everything whatever the judge says.
 `state/CI_JUDGE_OFF` still turns the whole judge off and wins over both.
+
+### The draft rung repairs what a script can fix before it redrafts
+
+When an inbox draft fails its lint, the draft rung (`runDraftRung` in `src/lib/inbox.ts`) first
+makes one repair pass (`src/lib/draft-repair.ts`) and lints again. Only violations the repair
+leaves spend a redraft. The repair changes a draft only where the violation or the checkout
+decides the answer:
+
+- **Placeholder title** (`draft-placeholder-title`): the task's own id and every `NEW-n` come out
+  of the title.
+- **New test path** (`draft-path-missing`, `draft-test-unplaced`): the task's one new test that is
+  not the slug-named test `placeTest` computes is renamed to it, in `files:`, `design` and the
+  criteria. Two such tests, or the computed test already declared, are left to a redraft.
+- **Verify outside the enum** (`shard-shape`): `auto`, or `human` for a task that names a
+  `.github/workflows/` path, which is the one case the draft prompt allows at `verify: human`.
+- **`DECISIONS.md` or a task record at `verify: auto`** (`ruling-verify`, `rule15-filing`):
+  `verify: human` only for a workflow-path task. Elsewhere `draft-human-ask-repeated` refuses
+  `verify: human` too, so the remedy is a split, and that is left to a redraft.
+- **The repairs `rmd approve` makes anyway**: duplicate unit-test proofs, `band_meaning: span`, and
+  risk raised to high for a sizing violation. These run last, so approve's own pass over a
+  repaired draft changes nothing.
+
+A repair that would raise a check the first lint did not is dropped as a whole. A `type: manual`
+task and a design with no invariant declaration still go back to the model. Each repair that
+changed something writes `inbox.draft_autofixed` with `proposal_id`, `attempt`, `repaired` (one
+`<fix>:<task id>` entry per change) and `remaining`, the count of blocking violations left. A
+draft repaired clean is cached as a lint-clean draft is. The in-spawn evaluation that labels a
+cash answer clean or not clean makes the same repair first.
+
+To turn the repair off, create `state/DRAFT_AUTOFIX_OFF`. The rung then lints each draft as the
+model wrote it, and every blocking violation spends a redraft as before. `rmd inbox-bakeoff`
+reads the same file, so a bake-off replays the rung as production runs it.
+
+### An inbox redraft carries a cited depends_on index
+
+The first draft of a proposal carries the depends_on index of every open task in `plan/tasks.yaml`.
+A redraft is a new session, so it pays for its whole prompt again. A relint retry, the escalation
+after a dirty draft, and a cash resume of a relint therefore carry a cited index instead. It lists
+only the tasks the failed fragment's `depends_on` names and the tasks the proposal names, and it
+tells the worker to Grep `plan/tasks.yaml` for any other dependency. The relint text follows it as
+before. Each `inbox.draft_synthesized` row of a redraft has `retry_index: "cited"` or `"full"`, and
+its `plan_index_chars` counts the index that prompt actually carried.
+
+To send the full index on every redraft again, create `state/DRAFT_RETRY_FULL_INDEX`. The next
+draft batch reads it, and so does `rmd inbox-bakeoff`; delete the file to return to the cited index.
 
 ### One fleet cash cap across core, site, and console
 

@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { buildSweepEffects, fixCommand, routeFix } from "#test/helpers/run-task-test.js";
+import { systemClock } from "#src/lib/clock.js";
 import type { Config } from "#src/lib/config.js";
 import { DEFAULT_SWEEP_POLICY, dispatchFixSpent, runSweep, type OpenPrView } from "#src/lib/sweep.js";
 import { loadPlan } from "#src/lib/plan.js";
@@ -19,9 +20,8 @@ import { originWithClone } from "#test/helpers/git-repo.js";
 
 const TASK = "W1-T12701";
 const PR = 18422;
-/** The PR's last activity, an hour before this run. The verb judges abandonment against its own clock, and a fixed
- *  2026-11-14 stamp crossed the 14-day abandonment threshold as the wall clock moved (W1-T14786). */
-const ACTIVITY_MS = Date.now() - 3_600_000;
+/** Relative to the clock the verb reads, so the fixture PR never ages past the 14-day abandonment threshold. */
+const ACTIVITY_MS = systemClock.now() - 3_600_000;
 const STAMP = new Date(ACTIVITY_MS).toISOString();
 /** The earlier round at this head, three hours before that activity. */
 const PRIOR_ROUND_MS = ACTIVITY_MS - 3 * 3_600_000;

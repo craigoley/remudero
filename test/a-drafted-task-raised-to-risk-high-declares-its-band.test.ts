@@ -78,7 +78,8 @@ test("W1-T8714: the draft lint blocks a risk high task with no band", async () =
   assert.deepEqual(lintDraftedFragment(highDraft(["  band_meaning: span"]), W8502), [], "control: a declared band lints clean");
   assert.deepEqual(inbox.DRAFT_FILING_LINT_OPTIONS, { riskTransition: { baseTask: undefined }, proofSelfPath: "block" });
 
-  // The rung's bounded self-lint: a drafter that never declares the band ends NOT-READY, with the refusal named.
+  // The rung's bounded self-lint, with the draft repair off: a drafter that never declares the band ends NOT-READY, with
+  // the refusal named. With the repair on, the band approve would insert is inserted before a retry (draft-repair.ts).
   const proposal = { id: W8502, summary: "automate W1-T8502", evidenceAnchors: [] } as unknown as Proposal;
   const stamp = `- ${W8502} (automate the verify-human remedy) — RATIFIED 2026-10-12 -> NEW-1.`;
   const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
@@ -88,6 +89,7 @@ test("W1-T8714: the draft lint blocks a risk high task with no band", async () =
       prompts.push(prompt);
       return worker(`=== FRAGMENT START ===\n${highDraft()}=== FRAGMENT END ===\nSTAMP: ${stamp}`);
     },
+    draftAutofix: false,
     log: (step, extra) => events.push({ step, extra }),
   }, "run-8714");
   assert.equal(outcome.ok, true, "a still-dirty draft is cached, NOT-READY");
@@ -96,6 +98,17 @@ test("W1-T8714: the draft lint blocks a risk high task with no band", async () =
   const drafted = events.find((e) => e.step === "inbox.drafted")?.extra;
   assert.equal(drafted?.lint_clean, false);
   assert.ok((drafted?.unresolved_violations as string[]).some((m) => /no band_meaning declared/.test(m)), JSON.stringify(drafted));
+
+  const repairedPrompts: string[] = [];
+  const [repaired] = await runDraftRung([proposal], "- id: W1-T1\n", {
+    spawn: async (_p, prompt) => {
+      repairedPrompts.push(prompt);
+      return worker(`=== FRAGMENT START ===\n${highDraft()}=== FRAGMENT END ===\nSTAMP: ${stamp}`);
+    },
+    log: () => undefined,
+  }, "run-8714-repaired");
+  assert.equal(repairedPrompts.length, 1, "the repair declares the band, so no redraft is spent on it");
+  assert.ok(repaired.ok && repaired.candidate.fragmentYaml.includes("  risk: high\n  band_meaning: span\n"));
 });
 
 test("W1-T8714: the approve repair declares the band on an already high draft", () => {

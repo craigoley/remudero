@@ -164,6 +164,9 @@ SCRATCH_DISK="${RMD_SCRATCH_ROOT:-/mnt/scratch}"
 WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees}"  # 2026-10-01 coordinator: $HOME trees are live checkouts (rmd-mint, rmd-op); never swept
 LIVE_CHECKOUTS="${RMD_CLEANUP_LIVE_CHECKOUTS-$CLEAN_HOME/rmd-mint:$CLEAN_HOME/rmd-op}"
 PROTECTED_WORKTREE_ROOTS="${RMD_CLEANUP_PROTECTED_WORKTREE_ROOTS-$CLEAN_HOME/rmd-serve-repo}"
+# W1-T14929: home clones whose linked worktrees the janitor lists through `git worktree list` (default: the live
+# checkouts). Only their LINKED worktrees are judged; each clone's own checkout is never retired.
+HOME_CLONES="${RMD_CLEANUP_HOME_CLONES-$LIVE_CHECKOUTS}"
 # W1-T9617: with the hot checkouts on scratch (deploy/scratch-mounts.sh), each daemon's own checkout
 # and serve's code dir live at <scratch>/rmd/<key>/remudero and .../serve-repo. They are live
 # checkouts, so each one present is protected exactly like rmd-serve-repo, whatever the list says.
@@ -642,8 +645,11 @@ worktree_saved() {
 }
 # Retirement is reserved for immediate children of configured hand roots. The separate
 # ~/.claude/worktrees scan is cleanup-only and must never opt an agent worktree into preservation.
+HOME_LINKED_TREE=""
 configured_hand_worktree() {
   local wt="$1" root rest
+  # A linked worktree of a home clone, while sweep_home_clone_worktrees judges it.
+  [ -n "$HOME_LINKED_TREE" ] && [ "$wt" = "$HOME_LINKED_TREE" ] && return 0
   while IFS= read -r root; do
     [ -n "$root" ] || continue
     root="${root%/}"
@@ -837,7 +843,7 @@ sweep_worktree() {
   if [ "$orphaned" = 0 ] && [ -f "$gitdir/locked" ]; then prune_held_worktree "$wt" "Git worktree is locked"; return; fi
   # A clean linked worktree whose HEAD GitHub holds and whose pull requests are all merged or closed
   # has no work in progress for the six hours to protect (W1-T12256). Every other test still holds.
-  if [ "$orphaned" = 0 ] && [ "$kind" = "linked worktree" ] && worktree_clean "$wt" && worktree_ignored_safe "$wt" &&
+  if [ -z "$HOME_LINKED_TREE" ] && [ "$orphaned" = 0 ] && [ "$kind" = "linked worktree" ] && worktree_clean "$wt" && worktree_ignored_safe "$wt" &&
      worktree_saved "$wt" && head="$(rgit "$wt" rev-parse --verify HEAD 2>/dev/null)" &&
      rmd_commit_pulls_finished "$wt" "$head"; then
     finished=1
@@ -929,6 +935,158 @@ sweep_worktree() {
   fi
 }
 
+# ── W1-T14929: linked worktrees of home clones ──
+# home_tree_open_pr <worktree>: true when a pull request on GitHub is open for its HEAD or for any published branch
+# tip its HEAD contains, or when that cannot be established. The branch name, a detached HEAD or a missing
+# same-named origin ref does not matter. If HEAD is outside the default branch, query HEAD itself and origin refs
+# that hold it or that it holds outside the default branch. A non-GitHub origin has no pull requests.
+HOME_PR_MAX_LOOKUPS="${RMD_CLEANUP_HOME_PR_MAX_LOOKUPS:-20}"
+home_tree_open_pr() {
+  local wt="$1" url base head tips tip n count=0 head_in_base=1 head_result head_error gh slug branch upstream upstream_tip
+  url="$(rgit "$wt" config --get remote.origin.url 2>/dev/null)" || return 1
+  case "$url" in https://github.com/*|git@github.com:*|ssh://git@github.com/*) ;; *) return 1 ;; esac
+  base="$(rgit "$wt" rev-parse -q --verify refs/remotes/origin/HEAD 2>/dev/null)" ||
+    base="$(rgit "$wt" rev-parse -q --verify refs/remotes/origin/main 2>/dev/null)" || return 0
+  head="$(rgit "$wt" rev-parse -q --verify HEAD 2>/dev/null)" || return 0
+  if rgit "$wt" merge-base --is-ancestor "$head" "$base" 2>/dev/null; then
+    head_in_base=0
+  fi
+  tips="$( {
+    if [ "$head_in_base" = 1 ]; then
+      printf '%s\n' "$head"
+      rgit "$wt" for-each-ref --format='%(objectname)' --contains HEAD refs/remotes/origin
+      rgit "$wt" for-each-ref --format='%(objectname)' --merged HEAD --no-merged "$base" refs/remotes/origin
+    fi
+    # A local branch can be amended or rebased after its published PR tip. That remote tip
+    # is then neither an ancestor of HEAD nor a ref containing HEAD, but its PR still keeps
+    # this worktree. Check the configured upstream and the conventional same-named origin ref.
+    branch="$(rgit "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null)" || branch=""
+    if [ -n "$branch" ]; then
+      upstream="$(rgit "$wt" rev-parse --symbolic-full-name '@{upstream}' 2>/dev/null)" || upstream=""
+      if [ -n "$upstream" ] && upstream_tip="$(rgit "$wt" rev-parse -q --verify "$upstream" 2>/dev/null)"; then
+        printf '%s\n' "$upstream_tip"
+      fi
+      if upstream_tip="$(rgit "$wt" rev-parse -q --verify "refs/remotes/origin/$branch" 2>/dev/null)"; then
+        printf '%s\n' "$upstream_tip"
+      fi
+    fi
+  } 2>/dev/null)" || return 0
+  while IFS= read -r tip; do
+    [ -n "$tip" ] || continue
+    [ "$tip" = "$base" ] && continue
+    count=$(( count + 1 ))
+    [ "$count" -le "$HOME_PR_MAX_LOOKUPS" ] || return 0      # too many to establish: keep
+    if [ "$tip" = "$head" ]; then
+      # A local unpublished HEAD is a normal worktree state. GitHub's commits/pulls endpoint
+      # answers 422 when it has never seen that SHA; that means no PR for this tip, while any
+      # related published tips below still need their own checks. Other API failures stay closed.
+      slug=${url#*github.com}; slug=${slug#[:/]}; slug=${slug%.git}
+      case "$slug" in */*/*|/*|*/|' '|''|*[!A-Za-z0-9._/-]*) return 0 ;; esac
+      gh=$(command -v gh 2>/dev/null) || { [ -x /opt/homebrew/bin/gh ] && gh=/opt/homebrew/bin/gh; } || { [ -x /usr/local/bin/gh ] && gh=/usr/local/bin/gh; } || return 0
+      if command -v timeout >/dev/null 2>&1; then
+        head_error="$(GH_PROMPT_DISABLED=1 timeout 20 "$gh" api "repos/$slug/commits/$head/pulls" --jq '[.[] | select(.state == "open")] | length' 2>&1)" && head_result="$head_error"
+      else
+        head_error="$(GH_PROMPT_DISABLED=1 perl -e 'alarm 20; exec @ARGV' "$gh" api "repos/$slug/commits/$head/pulls" --jq '[.[] | select(.state == "open")] | length' 2>&1)" && head_result="$head_error"
+      fi
+      if [ -z "${head_result:-}" ]; then
+        case "$head_error" in
+          *'HTTP 422:'*|*'HTTP 422 '*|*'status: 422'*|*'No commit found for SHA:'*'(HTTP 422)'*) continue ;;
+          *) return 0 ;;
+        esac
+      fi
+      n="$head_result"
+      head_result=""
+    else
+      n="$(rmd_gh_commit_pulls "$wt" "$tip" '[.[] | select(.state == "open")] | length')" || return 0
+    fi
+    case "$n" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$n" -gt 0 ] && return 0
+  done < <(printf '%s\n' "$tips" | sort -u)
+  return 1
+}
+# retire_orphan_home_tree <clone> <tree>: a linked worktree whose admin directory under the clone is gone. Git no
+# longer resolves it, so it is saved as a tarball (node_modules left out) with a MANIFEST, then removed.
+retire_orphan_home_tree() {
+  local clone="$1" wt="$2" uid bytes name final work found
+  local IDLE_MINUTES=$(( HELD_WORKTREE_DAYS * 1440 ))
+  local PRESERVE_ROOT="$HELD_PRESERVE_ROOT" PRESERVE_MARK_PCT="" PRESERVE_MARK_KB=0
+  if keep_declared "$wt"; then log "KEEP $wt: linked worktree without admin directory; keep marker $KEEP_DECLARED"; return; fi
+  uid="$(owner_uid "$wt")"
+  if [ "$uid" != "$RUN_UID" ]; then log "KEEP $wt: linked worktree without admin directory; foreign owner (uid ${uid:-unknown})"; return; fi
+  if ! scan_find "$wt" ! -user "$RUN_UID" -print -quit; then log "KEEP $wt: ownership scan failed (unknown)"; return; fi
+  [ -z "$SCAN_OUT" ] || { log "KEEP $wt: linked worktree without admin directory; foreign owner (holds ${SCAN_OUT%%$'\n'*})"; return; }
+  if ! found="$(find "$wt" -mindepth 1 -name node_modules -prune -o \( -name .git -o -name '*.bundle' \) ! -path "$wt/.git" -print -quit 2>/dev/null)"; then
+    log "KEEP $wt: payload scan failed (unknown)"; return
+  fi
+  [ -z "$found" ] || { log "KEEP $wt: linked worktree without admin directory; holds a repository or bundle ($found)"; return; }
+  is_worktree_idle "$wt"; case "$?" in
+    0) ;;
+    1) log "KEEP $wt: linked worktree without admin directory; written within $HELD_WORKTREE_DAYS days"; return ;;
+    *) log "KEEP $wt: activity probe failed (unknown)"; return ;;
+  esac
+  if is_open "$wt" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$wt"; then log "KEEP $wt: open, mounted or unverified"; return; fi
+  if [ -L "$PRESERVE_ROOT" ]; then log "KEEP $wt: preserve root $PRESERVE_ROOT is a symbolic link"; return; fi
+  bytes="$(du_bytes "$wt")"
+  name="${wt#/}"; name="${name//\//__}@$PRESERVE_STAMP"; final="$PRESERVE_ROOT/$name.orphan"
+  if [ "$DRY_RUN" = 1 ]; then
+    log "DRYRUN would: save then remove $wt (linked worktree of $clone without admin directory; ${bytes:-unknown} bytes)"
+    tally "home-orphan ${wt%/*}" "$bytes"; return
+  fi
+  if ! mkdir -p -- "$PRESERVE_ROOT" 2>/dev/null || ! chmod 700 "$PRESERVE_ROOT" 2>/dev/null; then log "KEEP $wt: cannot create $PRESERVE_ROOT"; return; fi
+  preserve_root_mark
+  if ! preserve_root_has_room; then log "KEEP $wt: preserve root $PRESERVE_ROOT is past its watched mark"; return; fi
+  if [ -e "$final" ] || [ -L "$final" ]; then log "KEEP $wt: preserve copy $final already exists"; return; fi
+  work="$PRESERVE_ROOT/.incoming-$name.orphan"
+  mkdir -m 700 -- "$work" 2>/dev/null || { log "KEEP $wt: cannot create $work"; return; }
+  if ! ( cd -- "${wt%/*}" && tar -czf "$work/tree.tar.gz" --exclude=node_modules -- "${wt##*/}" ) </dev/null >/dev/null 2>&1 ||
+     ! tar -tzf "$work/tree.tar.gz" >/dev/null 2>&1; then
+    rm -rf -- "$work"; log "KEEP $wt: tarball failed"; return
+  fi
+  {
+    printf 'Preserved by the Azure host janitor (deploy/rmd-host-cleanup.sh, W1-T14929).\n'
+    printf 'path:   %s\nclone:  %s\nreason: linked worktree whose admin directory is gone\nbytes:  %s\npreserved_at: %s\n' \
+      "$wt" "$clone" "${bytes:-unknown}" "$PRESERVE_STAMP"
+    printf 'expires: %s days after preservation (operator ruling 2026-10-23)\n\nRestore:\n  tar -xzf %s/tree.tar.gz -C %s\n' \
+      "$RETAIN_DAYS" "$final" "${wt%/*}"
+  } > "$work/MANIFEST.txt" && mv -- "$work" "$final" || { rm -rf -- "$work"; log "KEEP $wt: manifest or move failed"; return; }
+  log "PRESERVE $wt: copied to $final"
+  snapshot_open; snapshot_docker
+  if ! is_worktree_idle "$wt" || is_open "$wt" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$wt" || keep_declared "$wt"; then
+    log "KEEP $wt: changed or active before remove (copy kept: $final)"; return
+  fi
+  if ! audit_writable; then log "KEEP $wt: audit log unwritable ($AUDIT_LOG; copy kept: $final)"; return; fi
+  log "REMOVE $wt: linked worktree of $clone without admin directory; saved then removed (${bytes:-unknown} bytes; copy: $final)"
+  act rm -rf -- "$wt" && tally "home-orphan ${wt%/*}" "$bytes"
+}
+sweep_home_clone_worktrees() {
+  local IDLE_MINUTES=$(( HELD_WORKTREE_DAYS * 1440 ))
+  local clone list line wt first gitdir d
+  while IFS= read -r clone; do
+    clone="${clone%/}"
+    [ -n "$clone" ] && [ -d "$clone/.git" ] && [ ! -L "$clone" ] && [ ! -L "$clone/.git" ] || continue
+    if ! list="$(rgit "$clone" worktree list --porcelain 2>/dev/null)"; then log "KEEP $clone: worktree list unreadable"; continue; fi
+    first=1
+    while IFS= read -r line; do
+      case "$line" in "worktree "*) ;; *) continue ;; esac
+      wt="${line#worktree }"
+      if [ "$first" = 1 ]; then first=0; continue; fi   # the clone's own checkout
+      [ -d "$wt" ] && [ ! -L "$wt" ] || continue
+      configured_hand_worktree "$wt" && continue        # a sweep root already judged it
+      if is_protected_worktree "$wt"; then log "KEEP $wt: protected by janitor configuration"; continue; fi
+      if home_tree_open_pr "$wt"; then log "KEEP $wt: linked worktree of $clone has an open pull request, or its state is unreadable"; continue; fi
+      HOME_LINKED_TREE="$wt"; sweep_worktree "$wt"; HOME_LINKED_TREE=""
+    done <<< "$list"
+    # Linked worktrees whose admin directory is gone are no longer listed; they sit in the clone's worktree folders.
+    for d in "$clone"/.claude/worktrees/* "$clone"/.worktrees/*; do
+      [ -d "$d" ] && [ ! -L "$d" ] && [ -f "$d/.git" ] && [ ! -L "$d/.git" ] || continue
+      gitdir="$(sed -n '1s/^gitdir: //p' -- "$d/.git" 2>/dev/null)"
+      case "$gitdir" in "$clone/.git/worktrees/"*) ;; *) continue ;; esac
+      [ -e "$gitdir" ] && continue
+      is_protected_worktree "$d" && continue
+      retire_orphan_home_tree "$clone" "$d"
+    done
+  done < <(printf '%s\n' "$HOME_CLONES" | tr ':' '\n' | awk 'NF && !seen[$0]++')
+}
 sweep_live_checkout() {
   local checkout="${1%/}" wt child status top
   [ -d "$checkout/.git" ] || [ -f "$checkout/.git" ] || return
@@ -2416,7 +2574,8 @@ expire_preserved_copies() {
   for root in "${roots[@]}"; do
     [ -d "$root" ] && [ ! -L "$root" ] || continue
     for e in "$root"/*@[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z \
-             "$root"/*@[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z.held "$root"/.incoming-*; do
+             "$root"/*@[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z.held \
+             "$root"/*@[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z.orphan "$root"/.incoming-*; do
       [ -d "$e" ] && [ ! -L "$e" ] || continue
       keep_container_path "$e" && continue
       [ "$(owner_uid "$e")" = "$RUN_UID" ] || continue   # only copies this identity made
@@ -2808,6 +2967,7 @@ if [ "$ONLY_TMP" != 1 ]; then
     done
   done < <(printf '%s\n' "$WORKTREE_ROOTS" | tr ':' '\n')
 
+  sweep_home_clone_worktrees
   while IFS= read -r checkout; do
     [ -n "$checkout" ] && sweep_live_checkout "$checkout"
   done < <(printf '%s\n' "$LIVE_CHECKOUTS" | tr ':' '\n')

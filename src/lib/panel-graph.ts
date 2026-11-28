@@ -1,6 +1,6 @@
 import { INBOX_VERBS, validatedInboxAction, type InboxVerbActions, type InboxVerbActor, type InboxVerbName, type InboxVerbRespond } from "./inbox-verdict-command.js";
 import { expiredSnoozeDetail, INBOX_TERMINAL_VERDICT_HEADER } from "./inbox-cli-serve.js";
-import { readInboxGardenerStore, inboxGardenerPath, inboxRetirementFor, inboxOperatorIntent } from "./inbox-retirement.js";
+import { readInboxGardenerStore, inboxGardenerPath, inboxRetirementFor, inboxOperatorIntent, mechanicalAskPurpose } from "./inbox-retirement.js";
 /** Control-panel plan→task→PR routes (MASTER-PLAN §7B, api-client §7A).
  * Reuse feedback/trace/drain; only the daemon writes durably. `replyTo` files fresh feedback;
  * re-prioritization has no schema support. History: docs/forensics/panel-graph.md. */
@@ -31,7 +31,7 @@ import {
 } from "./plan.js";
 import { loadPlanIndex, type PlanIndex, type PlanIndexEntry } from "./plan-index.js";
 import { threadPlanPin, threadStrictPlan } from "./thread-plan.js";
-import type { PlanSourceOutcome } from "./serve-plan-reload.js";
+import { readBoardCatalogs, type BoardCatalogContext, type PlanSourceOutcome } from "./serve-plan-reload.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import {
   buildLedgerIndex,
@@ -160,6 +160,7 @@ import {
   type PredicateFailure,
   type Proposal,
   releasedHumanTaskIds,
+  deriveTaskReferent,
 } from "./inbox.js";
 import { skillEvalInboxStatus } from "./skill-eval-gate.js";
 
@@ -187,8 +188,10 @@ export interface PanelGraphDeps {
   /** The status-derivation gateway (status.ts's `GitHub`) — a different shape from `github`
    *  above; backs the drain-preview and plan-view merged-set derivation. */
   statusGithub: GitHub;
-  /** W1-T14114: the ok ops catalog's combined plan, for the Inbox's board referents only. */
+  /** W1-T14114: the ok ops catalog's combined plan, for board referents and asks' ops tasks. */
   inboxReferentPlan?: (plan: Plan) => Plan | undefined;
+  /** Catalog read for task referents when the Inbox plan is unwired. */
+  readInboxCatalog?: (readPublic: () => Plan | undefined) => Promise<BoardCatalogContext | undefined>;
   /** config.root holds inbox state (W1-T110); `root` holds the checkout. See serve.ts's
    * `fleetControlRoot` and docs/forensics/panel-graph.md for the split's history. */
   inboxRoot: string;
@@ -1500,13 +1503,10 @@ function incidentField(value: unknown, max = 200): string | undefined {
 }
 
 /**
- * The identity of one observation. Derived only from bounded semantic fields — instance/repository,
- * failure class, scope and the named causal discriminator — never from a title. A missing or ambiguous
- * input yields an UNGROUPABLE identity keyed on the observation's own id, so it stays a card of its own.
- *
- * Release is deliberately not a key part: a resolved incident must be able to regress in a NEWER release,
- * which a release-keyed identity would instead open as an unrelated incident. It rides on the
- * observation and on the resolution, where regression reads it.
+ * Identity uses bounded semantic fields (instance/repository, failure class, scope, discriminator), never title.
+ * Missing or ambiguous input yields an UNGROUPABLE identity keyed by observation id, keeping its own card.
+ * Release is excluded so a resolved incident can regress in a newer release; regression reads release from the
+ * observation and resolution instead.
  */
 export function incidentIdentity(observation: IncidentObservation): IncidentIdentity {
   const own = `ungroupable:${observation.id}`;
@@ -2118,6 +2118,8 @@ function prepareInboxPass(
   boardReferents: ReturnType<typeof inboxBoardReferents>,
   archiveReleases: ReadonlyMap<string, string> = new Map(),
   verdictReceipts: readonly VerdictReceipt[] = readVerdictReceipts(join(deps.inboxRoot, "state")),
+  // W1-T15105: a decline lapses only on the public plan, so an ops task's declined ask holds exactly as on main.
+  lapsePlan: Plan = plan,
 ): InboxPass {
   const { registryPath, draftsPath, inflightPath, adoptionPath } = inboxInputPaths(deps);
   const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
@@ -2159,10 +2161,10 @@ function prepareInboxPass(
     if (!lapseDeclines) return classified;
     const declinedTask = classified.state === "declined" ? /^verify-human:([A-Za-z0-9-]+)$/.exec(proposal.id)?.[1] : undefined;
     const receipt = declinedTask ? newestReceiptOf(proposal.id) : undefined;
-    const task = declinedTask ? plan.byId.get(declinedTask) : undefined;
+    const task = declinedTask ? lapsePlan.byId.get(declinedTask) : undefined;
     if (!receipt || receipt.step !== "panel.proposal_declined" || !task) return classified;
     const deps = task.depends_on ?? [];
-    const depsAllMerged = deps.every((d) => { const t = plan.byId.get(d); return t !== undefined && isMerged(t); });
+    const depsAllMerged = deps.every((d) => { const t = lapsePlan.byId.get(d); return t !== undefined && isMerged(t); });
     const lapse = declineLapse(receipt, currentDeclineState(receipt.observed_state, depsAllMerged), deps);
     // Classified as it would have been before the decline, with the reason it came back.
     return lapse ? { ...classifyWith(proposal, () => undefined), reopenedBecause: lapse.because } as InboxClassification : classified;
@@ -2213,7 +2215,67 @@ export function projectInboxPlan(deps: Pick<PanelGraphDeps, "ledgerPath" | "stat
   const statusDeps = { ledgerPath: deps.ledgerPath, github,
     writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY, ...(ledgerLines === undefined ? {} : { readLedger: () => ledgerLines }) };
   const projection = projectPlan(plan, { ...statusDeps, observeOpenPrCount: rows => { openPrs = rows; } });
-  return { projection, boardReferents: withOpsOwnTaskReferents(deps, plan, projection, openPrs, mergedPrs ?? [], statusDeps, readProposals) };
+  let combined: Plan | undefined | null = null;
+  const referentPlan = deps.inboxReferentPlan && ((p: Plan) => combined === null ? (combined = deps.inboxReferentPlan!(p)) : combined);
+  const referentDeps = { inboxReferentPlan: referentPlan };
+  const boardReferents = withOpsOwnTaskReferents(referentDeps, plan, projection, openPrs, mergedPrs ?? [], statusDeps, readProposals);
+  return { projection, boardReferents, ...opsAskTasks(referentDeps, plan, projection, statusDeps, readProposals) };
+}
+
+/** Add only named ops tasks to the ask plan; retain the public projection. */
+function opsAskTasks(deps: Pick<PanelGraphDeps, "inboxReferentPlan">, plan: Plan, projection: Map<string, StatusProjection>,
+  statusDeps: Parameters<typeof projectPlan>[1], readProposals?: () => readonly Proposal[]):
+  { askPlan: Plan; askProjection: Map<string, StatusProjection> } {
+  const unchanged = { askPlan: plan, askProjection: projection };
+  const referentPlan = deps.inboxReferentPlan;
+  if (!referentPlan || !readProposals) return unchanged;
+  const askPlan = askTaskPlan(plan, readProposals(), () => referentPlan(plan));
+  if (askPlan === plan) return unchanged;
+  const tasks = askPlan.tasks.slice(plan.tasks.length);
+  const rows = projectPlan({ tasks, byId: new Map(tasks.map(task => [task.id, task])) }, {
+    ...statusDeps, skipTasklessEscalations: true, skipUncreditedBuildWarning: true,
+  });
+  return { askPlan, askProjection: new Map([...projection, ...rows]) };
+}
+
+function missingAskTasks(plan: Plan, proposals: readonly Proposal[]): Set<string> {
+  const named = new Set<string>();
+  for (const proposal of proposals) {
+    const id = deriveTaskReferent(proposal.id) ?? mechanicalAskPurpose(proposal)?.taskId;
+    if (id !== undefined && !plan.byId.has(id)) named.add(id);
+  }
+  return named;
+}
+
+/** Compose the public plan with only ops tasks named in the full proposal registry. */
+export function askTaskPlan(plan: Plan, proposals: readonly Proposal[], readCombined: () => Plan | undefined): Plan {
+  const named = missingAskTasks(plan, proposals);
+  if (named.size === 0) return plan;
+  const combined = readCombined();
+  const tasks = combined && combined !== plan ? [...named].sort().flatMap(id => combined.byId.get(id) ?? []) : [];
+  if (tasks.length === 0) return plan;
+  const ids = [...new Set(tasks.map(task => task.id))].sort().join("\0");
+  let byCombined = askTaskPlanMemo.get(plan);
+  if (!byCombined) askTaskPlanMemo.set(plan, byCombined = new WeakMap());
+  let byIds = byCombined.get(combined!);
+  if (!byIds) byCombined.set(combined!, byIds = new Map());
+  const cached = byIds.get(ids);
+  if (cached) return cached;
+  const composed = { tasks: [...plan.tasks, ...tasks], byId: new Map([...plan.byId, ...tasks.map(task => [task.id, task] as const)]) };
+  byIds.set(ids, composed);
+  return composed;
+}
+
+// FragmentMemo keys parsed drafts by Plan identity. Keep the composed identity while every source input is stable.
+const askTaskPlanMemo = new WeakMap<Plan, WeakMap<Plan, Map<string, Plan>>>();
+
+/** Read the catalog only when a classified ask names a task absent from the public plan. */
+export async function readAskTaskPlan(plan: Plan, proposals: readonly Proposal[], stateDir: string,
+  read: NonNullable<PanelGraphDeps["readInboxCatalog"]> = (pub) => readBoardCatalogs(pub, stateDir),
+  judged: readonly Proposal[] = proposals): Promise<Plan> {
+  if (missingAskTasks(plan, judged).size === 0) return plan;
+  const context = await read(() => plan);
+  return askTaskPlan(plan, proposals, () => context?.outcome === "ok" ? context.plan : undefined);
 }
 
 /** Ops-only rows can verify their own board referent and stay local to this pass (W1-T12211). */
@@ -2300,9 +2362,10 @@ function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: strin
   const plan = loadPlanFn(deps.planPath);
   const readProposals = inboxProposalReader(deps);
   const ledgerLines = readLedgerLines(deps.ledgerPath);
-  const { projection, boardReferents } = projectInboxPlan(deps, plan, ledgerLines, readProposals);
+  const { projection, boardReferents, askPlan, askProjection } = projectInboxPlan(deps, plan, ledgerLines, readProposals);
   const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
-  const pass = prepareInboxPass(deps, readProposals(), plan, projection, ledgerLines, anchorGrepFor(deps, sha), boardReferents);
+  const pass = prepareInboxPass(deps, readProposals(), askPlan, askProjection, ledgerLines, anchorGrepFor(deps, sha), boardReferents,
+    undefined, undefined, plan);
   // W1-T13188: a write classifies only the proposal it acts on; `proposals` stays whole for existence checks.
   const classified = only === undefined ? pass.proposals : pass.proposals.filter((p) => p.id === only);
   return { plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: classified.map(p => pass.classifyOne(p, lapseDeclines)), ledgerLines, projection };
@@ -2327,6 +2390,12 @@ function projectionDigest(projection: Map<string, StatusProjection>, boardRefere
 }
 
 
+/** Invalidate asks when a named ops task changes. */
+function askTasksKey(plan: Plan, askPlan: Plan): string[] {
+  if (askPlan === plan) return [];
+  return [createHash("sha256").update(JSON.stringify(askPlan.tasks.slice(plan.tasks.length))).digest("hex")];
+}
+
 /** Every release is already a `ratify.approved` row, so this existing digest also invalidates
  * the inbox memo when one lands; no second scan or release-specific fingerprint is needed. */
 function ledgerVerdictDigest(lines: LedgerLines, receipts: readonly VerdictReceipt[]): string {
@@ -2344,6 +2413,8 @@ interface InboxFingerprint {
   readPlanSnapshot?: () => Plan;
   readProposals: () => Proposal[];
   projection: Map<string, StatusProjection>;
+  askPlan: Plan;
+  askProjection: Map<string, StatusProjection>;
   boardReferents: ReturnType<typeof inboxBoardReferents>;
   ledgerLines: LedgerLines;
   archiveReleases?: ReadonlyMap<string, string>;
@@ -2391,10 +2462,12 @@ function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readP
     plan = last?.planKey !== undefined && last.planKey === planKey ? last.plan : inboxPlan(deps);
   }
   const readProposals = inboxProposalReader(deps);
-  const { projection, boardReferents } = projectInboxPlan(deps, plan, ledgerLines, readProposals);
+  const { projection, boardReferents, askPlan, askProjection } = projectInboxPlan(deps, plan, ledgerLines, readProposals);
   const archiveKey = archiveReleases?.size ? [...archiveReleases].sort(([a], [b]) => a.localeCompare(b)) : null;
-  const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(projection, boardReferents), archiveKey]);
-  return { key, writeKey: inboxWriteKey(inputs), sha, plan, planKey, readPlanSnapshot, readProposals, projection, boardReferents, ledgerLines, archiveReleases, verdictReceipts };
+  const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(askProjection, boardReferents), archiveKey,
+    ...askTasksKey(plan, askPlan)]);
+  return { key, writeKey: inboxWriteKey(inputs), sha, plan, planKey, readPlanSnapshot, readProposals, projection, askPlan, askProjection,
+    boardReferents, ledgerLines, archiveReleases, verdictReceipts };
 }
 
 /**
@@ -2423,12 +2496,10 @@ function holdInboxResult(state: InboxClassifyState, generation: object, fp: Inbo
 }
 
 /**
- * W1-T4261 — THE READ ROUTES' CLASSIFIER. MEASURED 2026-09-23 on the fleet gateway: every GET /v1/inbox pass
- * reclassified 693 proposals synchronously (81% of the serve process's CPU; /v1/status timed out at 15 s on an idle
- * host). This returns the previous pass's result whenever nothing it reads has changed: the four inbox state files
- * (size, mtime, inode), the plan (the process snapshot's identity, or tasks.yaml and its shards' stamps), the
- * ledger's ratify/decline verdicts, the GitHub-derived projection's merged facts, and origin/main's sha. An
- * unresolvable sha never reuses. {@link classifyAllProposalsSliced} is the same memo with a recompute that yields.
+ * W1-T4261: memoize GET /v1/inbox classification; in 2026-09-23 fleet measurements, 693 proposals used 81% of
+ * serve CPU and made /v1/status time out. Reuse only while inbox state-file stamps, plan identity/shard stamps,
+ * ledger verdicts, GitHub projection facts, and origin/main sha are unchanged. An unresolvable sha never reuses.
+ * {@link classifyAllProposalsSliced} uses the same memo with a yielding recompute.
  */
 export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): ClassifiedInbox {
   const state = inboxClassifyState(deps);
@@ -2436,7 +2507,7 @@ export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?
   const reused = reusableResult(state, fp);
   if (reused !== undefined) return reused;
   const generation = state.generation = {};
-  const pass = prepareInboxPass(deps, fp.readProposals(), fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
+  const pass = prepareInboxPass(deps, fp.readProposals(), fp.askPlan, fp.askProjection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts, fp.plan);
   const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(p => pass.classifyOne(p)), ledgerLines: fp.ledgerLines, projection: fp.projection };
   holdInboxResult(state, generation, fp, result);
   return result;
@@ -2456,6 +2527,12 @@ export function peekClassifiedInboxStamped(deps: PanelGraphDeps): { result: Clas
 const INBOX_WRITE_CLASSIFICATION_MAX_AGE_MS = 30_000;
 
 function classifyInboxDecision(deps: PanelGraphDeps, proposalId: string, lapseDeclines = true): ClassifiedInbox {
+  return freshInboxDecision(deps, proposalId, lapseDeclines)
+    ?? classifyAllProposals(deps, undefined, proposalId, lapseDeclines);
+}
+
+/** The already-held Inbox result, only when its normal write freshness checks still pass. */
+function freshInboxDecision(deps: PanelGraphDeps, proposalId: string, lapseDeclines = true): ClassifiedInbox | undefined {
   // Terminal verdicts judge the recorded decline, while the read memo can show it as reopened.
   const held = lapseDeclines ? peekClassifiedInboxStamped(deps) : undefined;
   if (held) {
@@ -2468,7 +2545,7 @@ function classifyInboxDecision(deps: PanelGraphDeps, proposalId: string, lapseDe
       return held.result;
     }
   }
-  return classifyAllProposals(deps, undefined, proposalId, lapseDeclines);
+  return undefined;
 }
 
 /** PRIMARY CONTROL on how long one inbox recompute holds the event loop: proposals classified between yields. Each can
@@ -2511,7 +2588,7 @@ export async function classifyAllProposalsSliced(
   const generation = state.generation = {};
   const warmFailures = new Map<string, unknown>();
   const answers = new Map<string, boolean>();
-  const pass = prepareInboxPass(deps, fp.readProposals(), fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha, warmFailures, answers), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
+  const pass = prepareInboxPass(deps, fp.readProposals(), fp.askPlan, fp.askProjection, fp.ledgerLines, anchorGrepFor(deps, fp.sha, warmFailures, answers), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts, fp.plan);
   const run = async (): Promise<ClassifiedInbox> => {
     await warmInboxAnchors(deps, fp.sha, pass.proposals, warmFailures, answers);
     const classifications: InboxClassification[] = [];
@@ -4356,11 +4433,9 @@ export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: ()
 }
 
 /**
- * W1-T13651: the plan an Approve gates on. Approve must never read a torn working tree (W1-T2220 remedy (c)), so it read
- * the plan at HEAD through git: on the Azure host that git read plus a YAML parse of every shard held serve's request loop
- * for about 25 s (2026-11-18 10:53:55Z, and the Console gave up at 25 s). Serve's board already holds a plan read from a
- * committed ref (plan source "loaded", identity "ref:..."), which is never torn either, so Approve uses it when it is;
- * any other source state keeps the git read at HEAD.
+ * W1-T13651: Approve cannot read a torn working tree (W1-T2220(c)). A git read plus parsing all shards once held
+ * serve's request loop for 25 seconds (2026-11-18). Reuse the board's committed-ref snapshot when available;
+ * otherwise read the plan at HEAD through git.
  */
 export function approvePlanReader(deps: Pick<PanelGraphDeps, "root" | "readPlanSnapshot" | "readPlanSource">): (planPath: string) => Plan {
   const source = deps.readPlanSource?.();
@@ -4385,6 +4460,15 @@ function refuseInformationalProposal(proposals: Proposal[], classifications: Inb
 /** W1-T13235: archive and snooze only need to know the proposal exists: read the registry prepareInboxPass reads, nothing more. */
 function inboxRegistryHas(deps: PanelGraphDeps, proposalId: string): boolean {
   return parseProposalRegistry(readFileIfExists(inboxInputPaths(deps).registryPath)).some((p) => p.id === proposalId);
+}
+
+/** Give approve the same named-task plan as the Inbox. */
+async function askCatalogDeps(deps: PanelGraphDeps, publicPlan: Plan, proposal: Proposal): Promise<PanelGraphDeps> {
+  if (deps.inboxReferentPlan || missingAskTasks(publicPlan, [proposal]).size === 0) return deps;
+  const read = deps.readInboxCatalog ?? ((pub: () => Plan | undefined) => readBoardCatalogs(pub, dirname(deps.ledgerPath)));
+  const context = await read(() => publicPlan);
+  const combined = context?.outcome === "ok" ? context.plan : undefined;
+  return combined ? { ...deps, inboxReferentPlan: () => combined } : deps;
 }
 
 export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxCausalScope): InboxVerbActions {
@@ -4413,7 +4497,11 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       // irreversible spawn, so it alone reads via loadPlanAtRef, "cannot be partial" (W1-T2220).
       // W1-T13605: like every other write, it classifies only the proposal it names. The full pass ran every
       // anchor's git grep on serve's main thread after a cold start: a 123 s loop stall on 2026-11-18.
-      const { proposals, classifications } = classifyAllProposals(deps, approvePlanReader(deps), input.proposalId);
+      const plan = approvePlanReader(deps)(deps.planPath);
+      const readProposals = inboxProposalReader(deps);
+      const proposal = readProposals().find(p => p.id === input.proposalId);
+      const classifiedDeps = proposal ? await askCatalogDeps(deps, plan, proposal) : deps;
+      const { proposals, classifications } = classifyAllProposals(classifiedDeps, () => plan, input.proposalId);
       if (!proposals.some((p) => p.id === input.proposalId)) {
         respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
         return;
@@ -4455,8 +4543,18 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       if (fields.kept !== undefined && typeof fields.kept !== "boolean") return { error: "kept must be a boolean" };
       if (fields.reason !== undefined && typeof fields.reason !== "string") return { error: "reason must be a string" };
       return { ...id, kept: fields.kept !== false, reason: fields.reason as string | undefined };
-    }, (input, actor, respond) => {
-      const classified = classifyInboxDecision(deps, input.proposalId);
+    }, async (input, actor, respond) => {
+      // A fresh Inbox pass already classified this proposal against the same public plan and
+      // named ops tasks. Reuse it when available; cold writes still classify through the
+      // task-aware path below.
+      let classified = freshInboxDecision(deps, input.proposalId);
+      if (!classified) {
+        const plan = (deps.readPlanSnapshot ?? loadPlan)(deps.planPath);
+        const readProposals = inboxProposalReader(deps);
+        const proposalForPlan = readProposals().find(p => p.id === input.proposalId);
+        const classifiedDeps = proposalForPlan ? await askCatalogDeps(deps, plan, proposalForPlan) : deps;
+        classified = classifyAllProposals(classifiedDeps, () => plan, input.proposalId);
+      }
       const proposal = classified.proposals.find(p => p.id === input.proposalId);
       if (!proposal) { respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` }); return; }
       const classification = classified.classifications.find(c => c.proposalId === input.proposalId);

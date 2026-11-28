@@ -104,3 +104,37 @@ test("W1-T4907: a fragment-contract error is counted, never scored as a draft", 
   assert.equal(logged.filter((l) => l.step === "inbox.bakeoff").length, 1, "one row per candidate");
   assert.equal(logged.find((l) => l.step === "inbox.bakeoff")?.extra?.contractErrors, PROPOSALS.length);
 });
+
+test("a bake-off replay honours the draft rung's autofix kill switch", async () => {
+  const fixable = draftFor("P1").replace('title: "Tighten', 'title: "NEW-1: Tighten').replace("verify: auto", "verify: manual");
+  const spawns = async (draftAutofix?: boolean): Promise<number> => {
+    let calls = 0;
+    await runInboxBakeoff({
+      proposals: [PROPOSALS[0]], planText: "- id: W1-T1\n", candidates: [luna], log: () => {},
+      ...(draftAutofix === undefined ? {} : { draftAutofix }),
+      spawnFor: () => async () => { calls++; return worker(fixable, 0.004); },
+    });
+    return calls;
+  };
+  assert.equal(await spawns(), 1, "by default the replay repairs the draft as production does, so it spends no redraft");
+  assert.equal(await spawns(true), 1);
+  assert.ok(await spawns(false) > 1, "with state/DRAFT_AUTOFIX_OFF the replay lints the draft as written and redrafts");
+});
+
+test("a bake-off replay honours the draft rung's full-index rollback on a redraft", async () => {
+  const fixable = draftFor("P1").replace("verify: auto", "verify: manual");
+  const prompts = async (retryFullIndex?: boolean): Promise<string[]> => {
+    const seen: string[] = [];
+    await runInboxBakeoff({
+      proposals: [PROPOSALS[0]], planText: "- id: W1-T1\n  title: an open task no draft cites\n", candidates: [luna], log: () => {},
+      draftAutofix: false,
+      ...(retryFullIndex === undefined ? {} : { retryFullIndex }),
+      spawnFor: () => async (_proposal, prompt) => { seen.push(prompt); return worker(fixable, 0.004); },
+    });
+    return seen;
+  };
+  const rolledBack = await prompts(true);
+  assert.ok(rolledBack.length > 1, "fixture: the draft redrafts");
+  assert.match(rolledBack[1], /W1-T1/, "with state/DRAFT_RETRY_FULL_INDEX the redraft carries the full index again");
+  assert.doesNotMatch((await prompts())[1], /W1-T1/, "by default the redraft carries only the rows the draft cites");
+});

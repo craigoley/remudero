@@ -115,13 +115,20 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   const stateDir = join(deps.inboxRoot, "state");
   if (deps.inboxSourceIdentity) {
     const registryPath = join(stateDir, "inbox-proposals.json");
+    // W1-T15180: an instance that has never written a proposal has no registry file yet. Only ENOENT on the
+    // registry path means an empty inbox; a missing ledger or plan, or a registry that exists but is malformed,
+    // still fails (INVARIANT bad-sources-still-fail).
+    const registryAbsent = (() => {
+      try { statSync(registryPath); return false; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return true; throw error; }
+    })();
     const stamp = JSON.stringify([registryPath, deps.ledgerPath, deps.planPath].map(path => {
+      if (path === registryPath && registryAbsent) return "absent";
       const stat = statSync(path);
       if (!stat.isFile()) throw new Error("instance inbox input is not a regular file");
       return [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs];
     }));
     if (validatedInstanceSources.get(deps) !== stamp) {
-      const registry = parseProposalRegistryResult(readFileSync(registryPath, "utf8"));
+      const registry = registryAbsent ? { kind: "ok" as const, proposals: [] } : parseProposalRegistryResult(readFileSync(registryPath, "utf8"));
       if (registry.kind !== "ok" || !registry.proposals.every(p => p && typeof p.id === "string" && typeof p.summary === "string"))
         throw new Error("instance inbox registry is unavailable");
       const ledger = readFileSync(deps.ledgerPath, "utf8");
