@@ -2684,6 +2684,8 @@ export async function daemonCommand(
     if (standby?.ports && standbyPromotion) logPromoted(standby.ports, standbyPromotion);
     // W1-T14644: the latest refresh's projection phases, held until the selection timing row takes them.
     let pendingRefreshMergedPhases: ProjectPlanPhases | undefined;
+    // W1-T14883: the same read's stage timings, held and taken the same way.
+    let pendingTickReadStages: Readonly<Record<string, number>> | undefined;
     // W1-T14893: the last published tick read, which `invalidate` does not clear, and the refill reader that may reuse it.
     let lastPublishedRead: { atMs: number; merged: ReadonlySet<string> } | undefined;
     const wakeMarkerPath = sweepWakeMarkerPath(config.root);
@@ -2693,6 +2695,7 @@ export async function daemonCommand(
       invalidate: () => { tickReadGeneration = undefined; tickReadStartedAtMs = tickReadClock.now(); },
       publish: (snapshot: ReadGeneration<TickReadFacts>) => {
         tickReadGeneration = snapshot;
+        pendingTickReadStages = snapshot.facts.readStageMs;
         lastRepairSnapshotGeneration = snapshot;
         lastProj = new Map(snapshot.facts.projection);
         boardOpenPrCount.reset();
@@ -2730,6 +2733,7 @@ export async function daemonCommand(
         // W1-T14893: the refill reuses the published tick read unless it is stale or a merge or push wake came since.
         refreshMergedForRefill: refillReader ? (plan) => refillReader.refill(plan) : undefined,
         takeRefreshMergedPhases: () => { const taken = pendingRefreshMergedPhases; pendingRefreshMergedPhases = undefined; return taken; },
+        takeTickReadStages: () => { const taken = pendingTickReadStages; pendingTickReadStages = undefined; return taken; },
         readLoopTelemetry: loopTelemetry.sample,
         readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId, footprint: daemonFootprint }),
         memoryGovernor: daemonMemoryGovernor,

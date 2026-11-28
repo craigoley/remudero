@@ -38,6 +38,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { hostname } from "node:os";
 import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
+import { readReviewTreeResidents, reviewAdmissionCharge } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
@@ -218,6 +219,7 @@ import {
   saveCreditStore,
   taskIdFromRunBranch,
   isGhRateLimitError,
+  prOwningTaskIds,
   TASK_ID_TRAILER_RE,
 } from "./status.js";
 import type { CreditBackfillReceipt, CreditStore } from "./status.js";
@@ -282,7 +284,10 @@ import type {
 import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, readDepReviewHoldState, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { DEP_REVIEW_REFUSED_ASK_RETIRED_STEP, retireDepReviewRefusedAsk } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
-import { readReviewHostObservation, reviewYieldsReReviews, selectRuntimeReviewWidth } from "./review-capacity.js";
+import {
+  readDaemonCgroupMemory, readReviewHostObservation, reviewMemoryHighVerdict, reviewYieldsReReviews, selectRuntimeReviewWidth,
+  type DaemonCgroupMemoryReading,
+} from "./review-capacity.js";
 import {
   flushLateSharedHostMemoryPass, flushSharedHostMemoryPass, openSharedHostMemoryPass, type SharedHostMemoryPass,
 } from "./lane-governor.js";
@@ -4104,8 +4109,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const hosted = mode.kind === "full-review"
           ? await installedWorkHost?.spawnReview({ pr, reviewKey, reviewAttemptId }) : undefined;
         if (hosted !== undefined) {
+          // W1-T15116: the launched child's pid (run-child.ts spawnReview), so memory.high admission reads its own live RSS.
           void adoptChildWork({
-            runId: hosted.runId, taskId: pr.taskId ?? `PR-${pr.prNumber}`,
+            runId: hosted.runId, taskId: pr.taskId ?? `PR-${pr.prNumber}`, pid: hosted.pid,
             work: { kind: "review", prNumber: pr.prNumber, headSha: pr.headSha, reviewKey, planLane: reviewsInPlanLane(pr) },
             settled: hosted.settled, readPhase: hosted.readPhase,
             ...(hosted.acknowledge === undefined ? {} : { acknowledge: hosted.acknowledge }),
@@ -18288,6 +18294,9 @@ export interface SweepDeps {
   };
   /** W1-T3491 — fleet hold checked before review or repair admission; direct CLI/test callers omit it. */
   workerAdmissionHold?: (kind?: "review") => string | undefined;
+  /** W1-T15116 — the readings each full review admission is judged on against the daemon cgroup's memory.high. Absent:
+   *  {@link productionReviewMemoryHighReaders} in a live process, none for a direct CLI or test caller. */
+  reviewMemoryHigh?: ReviewMemoryHighReaders;
   /** Re-read the shared PAUSE ref for a recorded fleet-held fix failure. */
   fixDispatchFleetHold?: () => string | undefined;
   /** W1-T13750: the stuck-state registry's probe for a fix-dispatch cause it names; undefined for any other cause. */
@@ -21850,7 +21859,7 @@ export function restartInterruptibleDetachedActionCount(): number {
 
 /** Reviews in flight in this process. A freshness exit used to wait only for detached actions, so a
  *  review started by a light pass the exit never awaits was killed mid-judgement (PR 6993, 2026-09-24). */
-interface ReviewRegistration { taskId?: string; prNumber?: number; admittedAtMs: number; kind?: string; laneId?: string }
+interface ReviewRegistration { taskId?: string; prNumber?: number; headSha?: string; admittedAtMs: number; kind?: string; laneId?: string }
 const inFlightReviewRuns = new Map<Promise<void>, ReviewRegistration>();
 let reviewLaneSeq = 0;
 
@@ -21954,6 +21963,48 @@ export function inFlightReviewCount(): number {
   return inFlightReviewRuns.size;
 }
 
+/** W1-T15116: this process's admitted full reviews still running, from every pass and surface (a light pass's
+ *  per-PR runSweep included), each of which the memory.high admission charges until it settles. */
+export function inFlightFullReviewCount(): number {
+  // A child-hosted full review is adopted into childWork and then postReview returns, settling its
+  // in-process wrapper while the child continues to consume memory. Count it until child settlement.
+  // During the brief handoff both registries can contain the same review, so deduplicate by PR/head.
+  const running = new Set<string>();
+  let anonymous = 0;
+  const add = (prNumber: number | undefined, headSha: string | undefined): void => {
+    if (prNumber === undefined || headSha === undefined) anonymous++;
+    else running.add(`${prNumber}@${headSha}`);
+  };
+  for (const review of inFlightReviewRuns.values()) {
+    if (review.kind === "full-review") add(review.prNumber, review.headSha);
+  }
+  for (const work of childWork.values()) {
+    if (work.kind === "review") add(work.prNumber, work.headSha);
+  }
+  return running.size + anonymous;
+}
+
+/** W1-T15116: the same deduplicated full-review population, with a process pid only for hosted children. */
+function inFlightFullReviewPids(): Array<number | undefined> {
+  const running = new Map<string, number | undefined>();
+  let anonymous = 0;
+  const add = (prNumber: number | undefined, headSha: string | undefined, pid?: number): void => {
+    if (prNumber === undefined || headSha === undefined) {
+      running.set(`anonymous-${anonymous++}`, pid);
+      return;
+    }
+    const key = `${prNumber}@${headSha}`;
+    if (!running.has(key) || (running.get(key) === undefined && pid !== undefined)) running.set(key, pid);
+  };
+  for (const review of inFlightReviewRuns.values()) {
+    if (review.kind === "full-review") add(review.prNumber, review.headSha);
+  }
+  for (const work of childWork.values()) {
+    if (work.kind === "review") add(work.prNumber, work.headSha, work.pid);
+  }
+  return [...running.values()];
+}
+
 /** W1-T11340: abort this process's in-process review of `prNumber` once it has run `ceilingMs` or longer, returning its
  *  settlement and age. `undefined` when none is registered (a child review, or none) or it is under the ceiling. */
 export function abortInProcessReviewPastCeiling(prNumber: number, ceilingMs: number, now: number):
@@ -22020,7 +22071,7 @@ export async function drainInFlightReviews(opts: {
  *  {@link inFlightReviewRuns} or {@link detachedSweepActions}: those are what a restart WAITS for, and it waits for nothing it
  *  does not own. A posted review frees admission but retains its mutex key until settlement (W1-T11151). */
 export interface ChildWorkRegistration {
-  runId: string; kind: string; taskId: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string;
+  runId: string; kind: string; taskId: string; prNumber?: number; headSha?: string; pid?: number; reviewKey?: string; fixKey?: string;
   /** Original run admission recovered from run_child.spawned on boot. */
   admittedAtMs?: number;
   /** W1-T15181: set when the container-shed rung signalled this child, in this process or before the boot adopting it. */
@@ -22471,9 +22522,10 @@ export function installedDetachedWorkHost(): DetachedWorkHost | undefined {
 /** The child a boot adopted, as the registry takes it: structural, so this module imports nothing from run-child. */
 export interface AdoptedWorkChild {
   runId: string; taskId: string;
+  pid?: number;
   admittedAtMs?: number;
   memoryShed?: boolean;
-  work: { kind: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string; planLane?: boolean; inputs?: Record<string, unknown> };
+  work: { kind: string; prNumber?: number; headSha?: string; pid?: number; reviewKey?: string; fixKey?: string; planLane?: boolean; inputs?: Record<string, unknown> };
   settled: Promise<unknown>;
   readPhase?: () => string | undefined;
   acknowledge?: (outcome: PromiseSettledResult<never>) => void;
@@ -22490,7 +22542,8 @@ export function adoptChildWork(child: AdoptedWorkChild, log: (step: string, extr
   const { inputs, ...registered } = child.work;
   const planLane = registered.planLane ?? (child.work.kind === "review" && inputs?.planOnlyFiling === true);
   registerChildWork({
-    runId: child.runId, taskId: child.taskId, ...registered, ...(planLane ? { planLane } : {}), readPhase: child.readPhase,
+    runId: child.runId, taskId: child.taskId, ...registered, pid: child.pid ?? registered.pid,
+    ...(planLane ? { planLane } : {}), readPhase: child.readPhase,
     ...(child.admittedAtMs === undefined ? {} : { admittedAtMs: child.admittedAtMs }),
     ...(child.memoryShed ? { memoryShed: true } : {}),
   });
@@ -22951,6 +23004,26 @@ export function productionFixAdmissionReaders(deps: Pick<SweepDeps, "readFixPres
     readTypical: (workerClass) => classTypical(workerClass),
     readResidents: () => productionFixAdmissionResidents(dirname(dirname(deps.ledgerPath))),
   };
+}
+
+/** W1-T15116 — what a pass re-reads before each full review it admits: the daemon cgroup and the review class's learned
+ *  peak. */
+export interface ReviewMemoryHighReaders {
+  read: () => DaemonCgroupMemoryReading;
+  estimateMib: () => number;
+  /** Live tree RSS of each admitted review child, read from the pid its launch returned (spawnReview); a pid absent
+   *  from the result is not visible yet, so its review keeps its learned peak charged. */
+  residents: (pids: readonly number[]) => readonly { pid: number; mib: number }[] | undefined;
+}
+
+/** W1-T15116: the production readers, in a live process only (the fix admission readers' rule). A test or CLI caller
+ *  that injects nothing reads no host cgroup. Each review child's RSS is read from its own launched pid, so it is
+ *  attributed to that admitted review alone. */
+export function productionReviewMemoryHighReaders(deps: Pick<SweepDeps, "fixProgressJudge" | "ledgerPath">,
+  live = deps.fixProgressJudge !== undefined): ReviewMemoryHighReaders | undefined {
+  if (!live) return undefined;
+  return { read: () => readDaemonCgroupMemory(), estimateMib: () => classEstimate("review").estimateMib,
+    residents: (pids) => readReviewTreeResidents(pids) };
 }
 
 function sweepActiveWorkerCount(deps: Pick<SweepDeps, "ledgerPath" | "readActiveWorkerCount" | "fixProgressJudge">,
@@ -24078,10 +24151,20 @@ export interface ResequenceCloseLifecycle {
   truncated?: boolean;
 }
 
+/** W1-T15185 — one open pull request as the reversal reads it. */
+export interface ResequenceOpenPullRequest {
+  number: number;
+  headRef: string;
+  body: string;
+}
+
 /** W1-T12891 — the GitHub reads and the one write a reversal takes. A read that throws is unreadable. */
 export interface ResequenceCloseReversalPort {
   readLifecycle: (kept: KeptResequenceClose) => Promise<ResequenceCloseLifecycle>;
   headExists: (kept: KeptResequenceClose) => Promise<boolean>;
+  /** W1-T15185 — the repository's open pull requests: number, head branch and body (the body's `Remudero-Task:`
+   *  trailer owns a PR as much as its head does). Throws when the list is incomplete. */
+  openPullRequests: (kept: KeptResequenceClose) => Promise<ReadonlyArray<ResequenceOpenPullRequest>>;
   reopen: (kept: KeptResequenceClose, comment: string) => void | Promise<void>;
 }
 
@@ -24195,6 +24278,16 @@ export function createResequenceCloseReversalPort(io: {
       if (!Array.isArray(refs)) throw new Error("the matching-refs answer was not a list");
       return refs.some((ref: { ref?: unknown }) => ref?.ref === `refs/heads/${kept.headRef}`);
     },
+    openPullRequests: async (kept) => {
+      const slug = resequenceCloseSlug(kept.prUrl);
+      if (slug === undefined) throw new Error(`the pull request url ${kept.prUrl} names no repository`);
+      const open = await fetchBoardPrsRestAsync(slug.owner, slug.repo, (args) => io.readJson(args, { fresh: true }), undefined, "open");
+      if (open.truncated) throw new Error("the open pull request list is incomplete");
+      return open.rows.map((row) => {
+        if (typeof row.headRefName !== "string" || row.headRefName === "") throw new Error(`open PR #${row.number} has an unreadable head ref`);
+        return { number: row.number, headRef: row.headRefName, body: row.body };
+      });
+    },
     reopen: (kept, comment) => io.ghRun("gh", ["pr", "reopen", kept.prUrl, "--comment", comment]),
   };
 }
@@ -24215,7 +24308,9 @@ export interface ResequenceReversalOutcome {
  * Acts only on a close this sweep kept (only the unmet-dependency resequence close is kept). It holds, writing
  * nothing, while any named dependency is unmerged, indeterminate or unreadable. It drops the close without acting
  * when the task itself merged, the PR is open or merged, or a closed/reopened event follows the sweep's close (a
- * person acted after it). Otherwise the kept file is removed first, so a reopen is attempted once per close: a gone
+ * person acted after it). It holds while the open-PR list is unreadable, and drops the close with a
+ * `sweep.resequence_close_dropped` row when the task has another open PR on another head (W1-T15185).
+ * Otherwise the kept file is removed first, so a reopen is attempted once per close: a gone
  * head or a refused reopen writes `sweep.resequence_close_reverse_failed`, a reopen `sweep.resequence_close_reversed`.
  */
 export async function reverseResequenceCloses(input: {
@@ -24274,6 +24369,27 @@ export async function reverseResequenceCloses(input: {
       : !ownClose ? "no closed event matches the sweep's close" : undefined;
     if (dropReason !== undefined) {
       drop(close, dropReason);
+      continue;
+    }
+    // W1-T15185: no reopen for a task that already has a newer open pull request.
+    let open: ReadonlyArray<ResequenceOpenPullRequest>;
+    try {
+      open = await input.port.openPullRequests(close);
+    } catch (error) {
+      const reason = `the open pull request list was unreadable: ${String(error)}`;
+      held(reason);
+      continue;
+    }
+    // Ownership as the plan's open index reads it: a run head or a body trailer (prOwningTaskIds).
+    const newer = open.find((pr) => pr.number !== close.prNumber && pr.headRef !== close.headRef &&
+      prOwningTaskIds({ headRefName: pr.headRef, body: pr.body }).includes(close.taskId));
+    if (newer !== undefined) {
+      if (!claim(close)) continue;
+      input.appendLine(input.ledgerPath, { run_id: input.runId, task_id: close.taskId, pr_number: close.prNumber,
+        head_ref: close.headRef, closed_at: close.closedAt, step: "sweep.resequence_close_dropped",
+        open_pr_number: newer.number, open_head_ref: newer.headRef });
+      outcomes.push({ prNumber: close.prNumber, outcome: "dropped",
+        reason: `task ${close.taskId} has open pull request #${newer.number}` });
       continue;
     }
     try {
@@ -30672,6 +30788,22 @@ async function runSweepPinned(
   const closeAdmissions = (reason: string): void => {
     admissionStopReason ??= reason;
   };
+  // W1-T15116 — A RUNNING CHARGE, NOT ONE READING. Every full review still running here (this pass's, and any earlier
+  // pass's or light refill's) is charged its learned peak until its tree is visible, then only the peak's unrealized
+  // part: memory.current already includes its RSS. Re-read memory.high and live residents for each admission.
+  // startReview registers synchronously (no pid yet: its learned peak is charged); once spawnReview returns, the
+  // child joins that same PR@head entry with its launched pid, and that pid's own tree RSS is what is read.
+  const memoryHigh = deps.reviewMemoryHigh ?? productionReviewMemoryHighReaders(deps);
+  const reviewMemoryHighHold = (): string | undefined => {
+    if (memoryHigh === undefined) return undefined;
+    const estimateMib = memoryHigh.estimateMib();
+    const admittedPids = inFlightFullReviewPids();
+    const known = admittedPids.filter((pid): pid is number => pid !== undefined);
+    const charge = reviewAdmissionCharge(admittedPids, estimateMib, known.length === 0 ? [] : memoryHigh.residents(known));
+    const verdict = reviewMemoryHighVerdict(memoryHigh.read(), { admitted: admittedPids.length,
+      admittedChargeMib: charge.chargeMib, measured: charge.measured, measuredMib: charge.measuredMib, candidateMib: estimateMib });
+    return verdict.admit ? undefined : verdict.reason;
+  };
 
   const takeNextReview = (lane: ReviewLane): (typeof orderedReviews)[number] | undefined => {
     if (admissionStopReason !== undefined || lane.stop !== undefined) return undefined;
@@ -30699,6 +30831,13 @@ async function runSweepPinned(
     }
     const job = lane.jobs[lane.next];
     if (job === undefined) return undefined;
+    if (job.mode.kind === "full-review") {
+      const held = reviewMemoryHighHold();
+      if (held !== undefined) {
+        closeAdmissions(held);
+        return undefined;
+      }
+    }
     lane.next += 1;
     return job;
   };
@@ -30910,7 +31049,7 @@ async function runSweepPinned(
   // W1-T11340: the review runs inside this lane's view of its PR, so its archive scans stay within the PR's lifetime.
   const startReview = (job: (typeof orderedReviews)[number], onPhase?: (phase: string) => void): Promise<void> => trackInFlightReview(
     () => reviewLanePr.run({ prUrl: job.pr.prUrl, createdAt: job.pr.createdAt }, () => runReview(job, onPhase)), {
-    taskId: job.pr.taskId, prNumber: job.pr.prNumber, kind: job.mode.kind, admittedAtMs: deps.now?.() ?? systemClock.now(),
+    taskId: job.pr.taskId, prNumber: job.pr.prNumber, headSha: job.pr.headSha, kind: job.mode.kind, admittedAtMs: deps.now?.() ?? systemClock.now(),
   });
   const lightAdmitted = deps.repairAdmissionSurface === "light"; // its light pass already bounded and reserved each plan review
   const planBound = planLane.jobs.length === 0 || lightAdmitted ? undefined

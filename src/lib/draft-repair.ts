@@ -46,7 +46,11 @@ const SEPARATORS_AFTER = /^(?:[\s:;,|/\u2013\u2014]|-(?=\s))*/;
 export function titleWithoutOwnId(title: string, taskId: string): string | undefined {
   const removed = [...title.matchAll(TITLE_ID_TOKEN)].filter((m) => m[0] === taskId || m[0].startsWith("NEW-"));
   if (removed.length === 0) return title;
-  if (removed.some((m) => /['\u2019]/.test(title[m.index! - 1] ?? "") || /['\u2019]/.test(title[m.index! + m[0].length] ?? ""))) return title;
+  // A token joined to a word (`NEW-1's`, `NEW-1-style`, `` `NEW-1` ``) or inside a bracket with other words
+  // (`(see NEW-1)`) is part of the title's prose; cutting it would leave `-style` or `(see)`, so the redraft keeps it.
+  const loose = (c: string | undefined): boolean => c === undefined || /[\s:;,|/\u2013\u2014()[\].!?]/.test(c);
+  if (removed.some((m) => !loose(title[m.index! - 1]) || !loose(title[m.index! + m[0].length])
+    || bracketHoldsProse(title, m.index!, m.index! + m[0].length))) return title;
   let out = title;
   for (const m of removed.reverse()) {
     let start = m.index!;
@@ -74,6 +78,15 @@ export function titleWithoutOwnId(title: string, taskId: string): string | undef
   return stripped.length > 0 ? stripped : undefined;
 }
 
+/** True when the token at [start, end) sits inside a bracket that also holds a word that is not an id token. */
+function bracketHoldsProse(title: string, start: number, end: number): boolean {
+  const open = Math.max(title.lastIndexOf("(", start), title.lastIndexOf("[", start));
+  if (open < 0 || /[)\]]/.test(title.slice(open + 1, start))) return false;
+  const close = title.slice(end).search(/[)\]]/);
+  if (close < 0 || /[([]/.test(title.slice(end, end + close))) return false;
+  return title.slice(open + 1, end + close).replace(TITLE_ID_TOKEN, "").replace(/[\s:;,|/\u2013\u2014-]/g, "").length > 0;
+}
+
 /** True when THIS task, not merely some task of the fragment, raises a ruling-verify or rule15-filing the lint reported:
  *  the linter's own predicates on the task's own id, files, verify and status. */
 function raisesRecordCheck(target: Record<string, unknown>, id: string, files: readonly string[], checks: ReadonlySet<string>): boolean {
@@ -93,7 +106,8 @@ function stringOf(node: YAMLMap, key: string): string | undefined {
 }
 
 function pathPattern(path: string): RegExp {
-  return new RegExp(`(?<![\\w./-])${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?!\\.?[\\w/-])`, "g");
+  // A `./test/…` spelling of the same path is the same path.
+  return new RegExp(`(?<![\\w./-])(?:\\./)?${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?!\\.?[\\w/-])`, "g");
 }
 
 /**

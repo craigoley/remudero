@@ -81,6 +81,24 @@ test("repairDraftedFragment moves an unplaced new test, its CREATES line include
   assert.deepEqual(lintDraftedFragment(fixed.fragmentYaml, "P9", STAMP), []);
 });
 
+test("repairDraftedFragment leaves a placeholder inside the title's prose for a redraft", () => {
+  for (const prose of ["Guard (see NEW-1) input", "guard `NEW-1` ids", "NEW-1-style guard", "x-NEW-1 guard"]) {
+    assert.equal(titleWithoutOwnId(prose, "NEW-1"), prose, `cutting the token would break the wording: ${prose}`);
+    const dirty = BASE.replace('title: "Tighten the empty-input guard in parseTasksFromYaml"', `title: ${JSON.stringify(prose)}`);
+    assert.deepEqual(repairDraftedFragment(dirty, checks("draft-placeholder-title"), facts).repaired, [], prose);
+  }
+  assert.equal(titleWithoutOwnId("Guard (NEW-1, NEW-2) the input", "NEW-1"), "Guard the input", "a bracket of placeholders alone still goes");
+});
+
+test("repairDraftedFragment renames a ./test/ spelling of a misnamed new test", () => {
+  const dirty = withFile(BASE, "test/plan/empty-input-guard.test.ts")
+    .replace("  design: |\n", "  design: |\n    Run ./test/plan/empty-input-guard.test.ts alone.\n");
+  const fixed = repairDraftedFragment(dirty, checks("draft-path-missing"), facts);
+  assert.deepEqual(fixed.repaired, ["test-path:NEW-1"]);
+  assert.ok(String(task(fixed.fragmentYaml).design).includes(`Run ${SLUG_TEST} alone.`), "the ./ spelling is the same path");
+  assert.ok(!fixed.fragmentYaml.includes("empty-input-guard.test.ts"), "no dead path is left in the prose");
+});
+
 test("repairDraftedFragment moves the slug-named test with a title it repairs", () => {
   const old = "test/plan/new-1-tighten-the-empty-input-guard-in-parsetasksfromyaml.test.ts";
   const dirty = withFile(BASE.replace('title: "Tighten', 'title: "NEW-1 Tighten'), old);

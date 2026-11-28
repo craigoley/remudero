@@ -1434,7 +1434,7 @@ export interface DetachedWorkChildHost {
     pr: { prNumber: number; headSha: string; taskId?: string; isPlanFiling?: boolean; excludeProviders?: readonly WorkerProviderId[] };
     reviewKey: string;
     reviewAttemptId: string | undefined;
-  }) => Promise<{ runId: string; settled: Promise<unknown>; readPhase?: () => string | undefined; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | undefined>;
+  }) => Promise<{ runId: string; pid?: number; settled: Promise<unknown>; readPhase?: () => string | undefined; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | undefined>;
   /** Starts a fix child, refuses abandoned admission, or returns `undefined` when it stays in process. */
   spawnFix: (input: {
     pr: { prNumber: number; headSha: string; taskId?: string };
@@ -1931,7 +1931,8 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
         plan: async () => ({ plan: { tasks: [] } }), options: options(), log, work,
       });
       if (!launch.started) return undefined;
-      return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge,
+      // W1-T15116: the launched child's pid, so the sweep's memory.high admission reads that child's own tree RSS.
+      return { runId: launch.runId, pid: launch.pid, settled: launch.settled, acknowledge: launch.acknowledge,
         readPhase: () => readOwnedChildPhase(launch.dir, launch.runId) };
     },
     async spawnFix({ pr, fixKey, envelope, onPending }) {
