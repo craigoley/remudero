@@ -4,7 +4,7 @@ import { join, posix } from "node:path";
 
 import { backlogEvidence, backlogLandingGuard, judgeBacklog, ownProofsHoldOnMain, satisfiedByMainFromRows, type BacklogDisposition } from "./backlog-gardener.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import { landTaskFilesAsync, type TaskFileInput, type TaskFilesLandingResult } from "./feedback-landing.js";
+import { landTaskFilesAsync, type LandTaskFilesOpts, type TaskFileInput, type TaskFilesLandingResult } from "./feedback-landing.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { gardenLedgerBucket, gardenStatePath, readGardenState, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { readMainHistory } from "./hot-file-gardener.js";
@@ -13,11 +13,12 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardFilingRefusal, reparkStaleRuling } from "./machine-filing.js";
 import { parseTasksFromYaml, type Task } from "./plan.js";
 import { grepProofHeldAt, planCheapFingerprint, planInventory, type PlanGardenOps, type PlanInventory, type PlanOpsCatalog, type PlanOpsRead } from "./plan-gardener.js";
-import { escapeGrepLiteral } from "./plan-pr-emitter.js";
+import { escapeGrepLiteral, planPrPreflightAtCommitAsync } from "./plan-pr-emitter.js";
 import { PR_OPEN_SATISFIED_BY_MAIN_STEP } from "./pr-open.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import { INSTRUMENT_SURFACE, commentOnlyGrepProofRefusal, isDialectPrefixed } from "./review.js";
 import { lintTask, promoteIntroducedPlanOnlyDiagnostics, sharedProofViolations } from "./task-linter.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 /**
  * The redesign gardener lets the plan Architect amend a held task or propose retirement backed by main.
@@ -165,25 +166,58 @@ export function redesignOpsRecordOutcome(result: TaskFilesLandingResult, input: 
  * W1-T14882: the sealed landing the redesign pass's ops edits go through (productionPlanGardenOps' `landTaskFiles`),
  * recording each submitted record's own outcome so the next pass holds or releases exactly that record's signatures.
  */
-export function redesignOpsLandTaskFiles(log: GardenerDeps["log"], land: typeof landTaskFilesAsync = landTaskFilesAsync): typeof landTaskFilesAsync {
+export function redesignOpsLandTaskFiles(
+  log: GardenerDeps["log"], land: typeof landTaskFilesAsync = landTaskFilesAsync, mainProbe?: RedesignOpsMainProbe,
+): typeof landTaskFilesAsync {
   return async (root, inputs, opts) => {
     let result: TaskFilesLandingResult;
     try {
-      result = await land(root, inputs, opts);
+      result = await land(root, inputs, mainProbe === undefined ? opts : { ...opts, planPrPreflight: mainProbePreflight(root, opts.planPrPreflight, mainProbe, log) });
     } catch (error) {
       // The owner logs the throw too; here it only releases the records it never judged.
       const reason = `the landing threw: ${String((error as Error)?.message ?? error)}`;
       log(REDESIGN_OPS_LANDING_RESULT_STEP, { records: inputs.map((i) => ({ ...opsRecordKey(i.relPath, i.content), outcome: "released", reason })) });
       throw error;
     }
-    log(REDESIGN_OPS_LANDING_RESULT_STEP, { pr_url: result.prUrl ?? null, records: inputs.map((input) => redesignOpsRecordOutcome(result, input)) });
+    // A record an earlier call left waiting or carried can be set aside by this call (origin/main changed it): its path,
+    // with no bytes, releases it, so it never stays held on a result that is no longer true.
+    const own = new Set(inputs.map((i) => i.relPath));
+    const later = [...result.refused, ...result.setAside].filter((r) => !own.has(r.path))
+      .map((r) => ({ path: r.path, outcome: "released" as const, reason: r.reason }));
+    log(REDESIGN_OPS_LANDING_RESULT_STEP, { pr_url: result.prUrl ?? null, records: [...inputs.map((input) => redesignOpsRecordOutcome(result, input)), ...later] });
     return result;
+  };
+}
+
+/** The plan PR preflight the ops landing's main-red probe runs on ops main itself, and the public code root it reads. */
+export interface RedesignOpsMainProbe {
+  codeRoot: string;
+  inner?: typeof planPrPreflightAtCommitAsync;
+}
+
+/**
+ * W1-T14882: the ops landing's preflight with its main-red probe let through the unmoved-records guard. The guard
+ * judges a candidate by its parent; the probe's commit is ops main itself, whose parent at ops main == pin is older
+ * than the pin, so the guard threw and every own-red refusal came back unjudged. Main overwrites nothing of its own,
+ * so a commit equal to the checkout's origin/main runs the plan preflight directly; every other commit keeps the guard.
+ */
+function mainProbePreflight(
+  root: string, guarded: LandTaskFilesOpts["planPrPreflight"], probe: RedesignOpsMainProbe, log: GardenerDeps["log"],
+): LandTaskFilesOpts["planPrPreflight"] {
+  if (guarded === undefined) return undefined;
+  const inner = probe.inner ?? planPrPreflightAtCommitAsync;
+  return async (sha, pr) => {
+    let main: string;
+    try { main = (await hostWorktreeGitAsync(root, ["rev-parse", "--verify", "origin/main^{commit}"])).trim(); }
+    catch { return guarded(sha, pr); /* an unreadable main leaves every commit to the guard */ }
+    return sha === main ? inner(root, sha, { ...pr, codeRoot: probe.codeRoot, bodyProofRoot: "plan" }, { log }) : guarded(sha, pr);
   };
 }
 
 /**
  * W1-T14882: the signatures and evidence keys ops landings still hold. Each submitted record is answered by the first
- * result naming its path and bytes after it: held stays held, released frees it. One no result answered is in flight
+ * result naming its path and bytes after it: held stays held, released frees it. A later result naming only the path
+ * (another call set the waiting or carried file aside) releases it too. One no result answered is in flight
  * until REDESIGN_OPS_LANDING_LOST_MS, after which it was lost. Rows tie on `ts` in ledger order.
  */
 export function redesignOpsHeld(rows: readonly Row[], now: number): string[] {
@@ -195,6 +229,11 @@ export function redesignOpsHeld(rows: readonly Row[], now: number): string[] {
     for (const entry of row.records as unknown[]) {
       if (entry === null || typeof entry !== "object") continue;
       const record = entry as Row;
+      // A later call's set-aside names only the path: it releases every record held there, whatever its bytes.
+      if (row.step === REDESIGN_OPS_LANDING_RESULT_STEP && record.content_sha === undefined && record.outcome === "released") {
+        for (const [key, held] of records) if (key.startsWith(`${String(record.path)}\0`) && held.outcome !== "released") held.outcome = "released";
+        continue;
+      }
       const id = `${String(record.path)}\0${String(record.content_sha)}`;
       if (row.step === REDESIGN_OPS_LANDING_STEP) records.set(id, { keys: rowKeys(record, record.signatures), at: Date.parse(String(row.ts)) });
       const submitted = records.get(id);

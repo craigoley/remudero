@@ -335,3 +335,58 @@ test("W1-T14882 criterion 3: an off or unreadable ops source preserves the publi
   assert.deepEqual(await run({ outcome: "off" }), publicOnly);
   assert.deepEqual(await run({ outcome: "unavailable", reason: "ops-checkout-unreadable" }), publicOnly);
 });
+
+test("W1-T14882 criterion 2: at ops main == pin, the main-red probe runs through the guarded landing and an own red is held", async (t) => {
+  const w = fixture(t, answer({ verdict: "amend", amendment: "Exercise the runtime entry point (main is the pin).", reason: "The task needs a clearer test boundary." }));
+  const destination = { owner: "craigoley", repo: "remudero-ops" };
+  writeFileSync(join(w.deps.stateDir, "plan-destination.json"), JSON.stringify({ repository: "craigoley/remudero-ops", kinds: ["task"] }));
+  const { clone } = originWithClone(join(w.root, "repos", destination.repo), { scope: t, seed: {
+    "plan/tasks.yaml": "[]\n", [OPS_SHARD]: record(OPS_ID), [OTHER_SHARD]: record("W1-T102"), "world.txt": `${w.root}\n`,
+  } });
+  const main = clone.git("rev-parse", "HEAD");
+  const sealed = "https://github.com/craigoley/remudero-ops/pull/9002";
+  const gh = (args: string[]): string => (args[0] === "pr" && args[1] === "list" ? JSON.stringify([{ url: sealed }]) :
+    args[0] === "pr" && args[1] === "view" ? JSON.stringify({ state: "OPEN" }) : "[]");
+  // An unrelated edit already waits, so the open PR seals the branch and nothing is pushed.
+  await withLiveWritesAllowed(() => landTaskFilesAsync(clone.dir, [{ relPath: OTHER_SHARD, content: `${record("W1-T102")}  # tended\n`,
+    claim: "the other record is tended", proof: `grep: tended in ${OTHER_SHARD}` }], { stateRoot: w.root, targetRepository: destination, gh,
+    planPrPreflight: async () => GREEN, stageOnly: true }));
+  // The plan preflight behind the unmoved-records guard: main itself is green, the amended record is red.
+  const asked: string[] = [];
+  const inner = async (_dir: string, sha: string): Promise<PlanPrPreflightResult> => { asked.push(sha); return sha === main ? GREEN : RED; };
+  const ops = productionPlanGardenOps({
+    repoRoot: w.root, stateDir: w.deps.stateDir, stateRoot: w.root, log: w.deps.log, planPrPreflight: inner,
+    landTaskFiles: redesignOpsLandTaskFiles(w.deps.log, (root, inputs, opts) => landTaskFilesAsync(root, inputs, { ...opts, gh }), { codeRoot: w.root, inner }),
+  });
+  const snapshot = { ...opsRead(), pin: main };
+  await withLiveWritesAllowed(async () => {
+    await runGardenAsync(redesignGardenSpec(w.deps, w.overrides, { read: async () => snapshot, land: ops.land }), w.deps);
+    await ops.settled();
+  });
+  assert.ok(asked.includes(main), `the probe reached the plan preflight on ops main itself: ${JSON.stringify(asked)}`);
+  const refused = w.rows.find((row) => row.step === "task_files_landing.set_aside" || row.step === "task_files_landing.refused");
+  assert.equal(JSON.stringify(w.rows).includes("ops-status-source-moved"), false, "the guard never threw on the probe");
+  const outcome = (w.rows.filter((row) => row.step === REDESIGN_OPS_LANDING_RESULT_STEP).at(-1)?.records as Array<Record<string, unknown>>)[0]!;
+  assert.deepEqual([outcome.path, outcome.outcome], [OPS_SHARD, "held"], JSON.stringify({ outcome, refused }));
+  assert.equal(redesignCandidates(buildRedesignSources(w.deps, w.overrides, snapshot)).some((c) => c.id === OPS_ID), false,
+    "a record refused on its own bytes is not asked again on the next pass");
+});
+
+test("W1-T14882 criterion 2: a record an earlier landing held is released when a later landing sets its path aside", async () => {
+  const input = { relPath: OPS_SHARD, content: record(OPS_ID), claim: "the record is amended", proof: `grep: amendment in ${OPS_SHARD}` };
+  const { content_sha } = redesignOpsRecordOutcome(landingResult({}), input);
+  const rows: Array<Record<string, unknown>> = [
+    { step: REDESIGN_OPS_LANDING_STEP, ts: clock.iso(), records: [{ path: OPS_SHARD, content_sha, signatures: ["sig"] }] },
+  ];
+  const log = (step: string, extra: Record<string, unknown> = {}) => void rows.push({ ...extra, step, ts: clock.iso() });
+  await redesignOpsLandTaskFiles(log, async () => landingResult({ waiting: [OPS_SHARD] }))("/ops", [input], { stateRoot: "/state" } as Parameters<typeof landTaskFilesAsync>[2]);
+  assert.deepEqual(redesignOpsHeld(rows, clock.now()), ["sig"], "staged behind the landing: held");
+  // A later call lands another record; origin/main changed the waiting one, so the landing sets it aside.
+  const other = { relPath: OTHER_SHARD, content: record("W1-T102"), claim: "the other record is amended", proof: `grep: amendment in ${OTHER_SHARD}` };
+  await redesignOpsLandTaskFiles(log, async () => landingResult({ landed: [OTHER_SHARD], setAside: [{ path: OPS_SHARD,
+    reason: `origin/main changed ${OPS_SHARD} after this edit was staged (base a, main b); the copy on main stands` }] }))(
+    "/ops", [other], { stateRoot: "/state" } as Parameters<typeof landTaskFilesAsync>[2]);
+  const later = (rows.at(-1)!.records as Array<Record<string, unknown>>).find((r) => r.path === OPS_SHARD);
+  assert.deepEqual([later?.outcome, later?.content_sha], ["released", undefined], "the later set-aside names only the path");
+  assert.deepEqual(redesignOpsHeld(rows, clock.now()), [], "the set-aside record is free for another attempt");
+});

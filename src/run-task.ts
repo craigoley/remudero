@@ -29495,7 +29495,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const d = deps("redesign", raiseDuplicate);
       const judge = issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log });
       // W1-T14882: the plan case's ops source; its sealed landing records each redesign record's own outcome.
-      const ops = productionPlanGardenOps({ repoRoot, stateDir, stateRoot: config.root, log, landTaskFiles: redesignOpsLandTaskFiles(log) });
+      const ops = productionPlanGardenOps({ repoRoot, stateDir, stateRoot: config.root, log, landTaskFiles: redesignOpsLandTaskFiles(log, undefined, { codeRoot: repoRoot }) });
       const pass = gardenPass(redesignGardenSpec(d, { judgeText: (prompt) => judge.judgeText(prompt, 0) }, ops), d);
       return withDue(async () => { await pass(); await ops.settled(); }, pass.due!);
     }
