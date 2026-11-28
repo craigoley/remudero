@@ -442,7 +442,7 @@ import {
 } from "./refusal-amendment.js";
 import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
 import { readOpsCheckoutAtMain } from "./ops-checkout-at-main.js";
-import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, heldFollowUpOf, heldFollowUpParents, heldFollowUpsOfTaskText, parkedPrFacts, parkedPrRemedy, planPreflightRefusalChecks, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type HeldFollowUp, type ParkedPrHost } from "./parked-pr-remedy.js";
+import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, heldFollowUpOf, heldFollowUpParents, heldFollowUpsOfTaskText, heldRebuildOf, heldRebuildsOfTaskText, parkedPrFacts, parkedPrRemedy, planPreflightRefusalChecks, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type HeldFollowUp, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -6283,6 +6283,15 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const daemon = (reloadPlanForFix() ?? plan).tasks.flatMap(task => heldFollowUpOf(task) ?? []);
         return withLaggingHeldFollowUps([...main, ...queue], daemon);
       },
+      // W1-T15108: the held rebuilds in the landing queue and on the daemon's plan, so a second pass over a closed pull
+      // request's head files no second rebuild.
+      readHeldRebuilds: () => [
+        ...stagedTaskFiles(config.root).flatMap(({ relPath }) => {
+          const abs = join(config.root, "state", "task-files-landing-pending", relPath);
+          return existsSync(abs) ? heldRebuildsOfTaskText(readFileSync(abs, "utf8")) : [];
+        }),
+        ...(reloadPlanForFix() ?? plan).tasks.flatMap(task => heldRebuildOf(task) ?? []),
+      ],
       closePr: async (prUrl, comment) => {
         assertLiveWriteAllowed("gh-transport", `parked pull request close of ${prUrl}`);
         await ghTextAsync(["pr", "close", prUrl, "--comment", comment]);
@@ -20405,6 +20414,22 @@ function designHoldMainAdoptionDecision(
     typeof row[DESIGN_HOLD_MAIN_ADOPTION_FIELD] === "string") ? "already-attempted" : "due";
 }
 
+/**
+ * W1-T15108 — AN UNSPENT MAIN ADOPTION THIS PASS CANNOT TAKE WAITS FOR A PASS THAT TAKES IT. Core #21068 was closed for a
+ * rebuild in the same pass whose decision was "updater-unavailable", while main already held the fix its red needed.
+ * True for a transient decision on a head not known to be at main and with no adoption attempted; a head at main, an
+ * attempted adoption or an amended contract keeps today's remedy (invariant:a-head-at-main-is-decided-as-before). PURE.
+ */
+export function designHoldMainAdoptionDeferred(
+  decision: string, pr: Pick<OpenPrView, "prNumber">, lines: ReadonlyArray<Record<string, unknown>>,
+  behindMainBy: number | undefined,
+): boolean {
+  if (!["updater-unavailable", "main-tip-unavailable", "distance-unavailable", "pass-budget-spent"].includes(decision)) return false;
+  if (behindMainBy !== undefined && behindMainBy <= 0) return false;
+  return !lines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+    typeof row[DESIGN_HOLD_MAIN_ADOPTION_FIELD] === "string");
+}
+
 /** Preserve the existing boolean API; the sweep retains the decision that produced it. */
 export function designHoldMainAdoptionDue(
   pr: Pick<OpenPrView, "prNumber">, lines: ReadonlyArray<Record<string, unknown>>,
@@ -27681,6 +27706,8 @@ async function runSweepPinned(
         `proof-repair rounds refused twice at this head (${pr.repeatedFixRefusal}) — no strike spent — ` +
         `the plan-shard flag is the next rung`;
     }
+    // W1-T15108: the hold's one main adoption is unspent and this pass cannot take it; no close-and-rebuild runs on it.
+    let designAdoptionDeferred = false;
     let terminalDesignHold: { amended: boolean; mainAdoption?: true; mainAdoptionDecision: DesignHoldMainAdoptionDecision; revision?: string; observedRevision?: string; semantic?: { standingOn: string; observed: string }; roundId: string; producer: Record<string, unknown> } | undefined;
     // W1-T10339: a PR with no task trailer is judged on its BODY, so the body is an input a stand-down read.
     const standDownBodySha = carriesTaskTrailer(pr) ? undefined : prBodyDigest(pr.body);
@@ -27754,8 +27781,20 @@ async function runSweepPinned(
             const producedAt = typeof held.ts === "string" ? held.ts : undefined;
             const amendmentUnanswered = awaitsAmendment && !amended && !mainAdoption && producedAt !== undefined &&
               now - Date.parse(producedAt) >= HELD_ESCALATION_SLO_MS;
-            disposition = amended || mainAdoption ? "blocked-fixable" : awaitsAmendment && !amendmentUnanswered ? "wait" : "refused-escalate";
-            reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
+            // W1-T15108: an unspent main adoption this pass cannot take is not closed for a rebuild while the hold is
+            // younger than the held-escalation SLO; past the SLO, today's ladder acts. A light pass, which never takes
+            // main, waits for a full pass; a full pass decides as before but takes no close-and-rebuild.
+            const holdAt = producedAt ?? (typeof handoff.producer.ts === "string" ? handoff.producer.ts : undefined);
+            designAdoptionDeferred = !amended && !mainAdoption && !awaitsAmendment && holdAt !== undefined &&
+              now - Date.parse(holdAt) < HELD_ESCALATION_SLO_MS &&
+              designHoldMainAdoptionDeferred(mainAdoptionDecision, pr, ledgerLines, behindBy);
+            const adoptionDeferred = designAdoptionDeferred && deps.repairAdmissionSurface === "light";
+            disposition = amended || mainAdoption ? "blocked-fixable"
+              : adoptionDeferred || awaitsAmendment && !amendmentUnanswered ? "wait" : "refused-escalate";
+            reason = adoptionDeferred ? `fix needs design at this exact head (round ${handoff.roundId}), and its one main adoption ` +
+                `is unspent but this pass cannot take it (${mainAdoptionDecision}) — waiting for a pass that takes main before a ` +
+                `close and rebuild (W1-T15108): ${handoff.reason}`
+              : amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
               : amendmentUnanswered ? `fix needs a task contract amendment at this exact head (round ${handoff.roundId}) — ` +
                 `unanswered past the held-escalation SLO, so the ladder's rebuild acts: ${handoff.reason}`
               : awaitsAmendment ? `fix needs a task contract amendment at this exact head (round ${handoff.roundId}) — the fix ` +
@@ -27765,7 +27804,7 @@ async function runSweepPinned(
               : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
             if (mainAdoption) designMainAdoptionSpent = true;
             if (amendmentUnanswered) heldEscalationAt = producedAt;
-            if (!amended && !mainAdoption && !awaitsAmendment) {
+            if (!amended && !mainAdoption && !awaitsAmendment && !adoptionDeferred) {
               ruleBlockerByIndex.set(prIndex, "escalated");
               heldEscalationAt = typeof handoff.producer.ts === "string" ? handoff.producer.ts : undefined;
             }
@@ -27853,7 +27892,8 @@ async function runSweepPinned(
     // disposition, its escalated blocker and its dedup, so the held-escalation ladder still reads it, and the action arm
     // writes its remedy row (standDownHoldRemedy) in place of the needs-human issue.
     const ownStandDownHold = standDownHold !== undefined && !standDownHold.reason.includes("ALREADY OPEN");
-    if (deps.parkedPr && !deps.dryRun && !strikeLadderDue && !sloLadderDue && !ownStandDownHold && (disposition === "refused-escalate" ||
+    if (deps.parkedPr && !deps.dryRun && !strikeLadderDue && !sloLadderDue && !ownStandDownHold && !designAdoptionDeferred &&
+        (disposition === "refused-escalate" ||
         disposition === "blocked-ambiguous" && ruleBlockerByIndex.get(prIndex) === "escalated")) {
       const designQuestion = terminalDesignHold !== undefined && disposition === "refused-escalate" ? reason : undefined;
       // W1-T13046: refused-escalate means the hold's one main adoption is not due (invariant main-first), so the hold's
@@ -27904,7 +27944,10 @@ async function runSweepPinned(
       if (!deps.parkedPr || deps.dryRun) return undefined;
       const facts = await parkedPrFacts(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
         fixModelOrder: policy.fixModelOrder ?? DEFAULT_FIX_MODEL_ORDER }, ledgerLines, deps.parkedPr);
-      const parked = await actOnParkedPr(pr, parkedPrRemedy(facts), facts, ledgerLines, deps.parkedPr, { runId: deps.runId,
+      // W1-T15108: while the hold's one main adoption is deferred, this rung takes no close-and-rebuild either.
+      const decision = designAdoptionDeferred ? parkedPrRemedy(facts, ["close-and-rebuild"]) : parkedPrRemedy(facts);
+      if (decision === undefined) return undefined;
+      const parked = await actOnParkedPr(pr, decision, facts, ledgerLines, deps.parkedPr, { runId: deps.runId,
         ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(), cause, text: reason,
         append: (row) => appendLine(deps.ledgerPath, row) });
       parkedBlockerByPr.set(pr.prNumber, parked.blocker);

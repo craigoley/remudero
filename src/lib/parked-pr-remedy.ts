@@ -150,6 +150,11 @@ export interface ParkedPrHost {
   readHeldFollowUps?(target: ParkedPrTarget): readonly HeldFollowUp[] | Promise<readonly HeldFollowUp[]>;
   /** W1-T13944: the daemon root; a split's claim on its held follow-up is a folder of generations under its state directory. */
   heldFollowUpClaimRoot?: string;
+  /**
+   * W1-T15108: the held rebuilds in the task-files landing queue and on the plan, so a pass whose ledger view lacks the
+   * first rebuild's row files no second rebuild for the same pull request and head.
+   */
+  readHeldRebuilds?(): readonly HeldRebuild[] | Promise<readonly HeldRebuild[]>;
 }
 
 /** W1-T13944: a held follow-up task, as the remedy matches it to a task and criterion. */
@@ -179,6 +184,31 @@ export function heldFollowUpsOfTaskText(text: string): HeldFollowUp[] {
   const doc = parseDocument(text);
   const tasks: unknown = doc.errors.length > 0 ? undefined : doc.toJSON();
   return Array.isArray(tasks) ? tasks.flatMap(t => heldFollowUpOf(t) ?? []) : [];
+}
+
+/** W1-T15108: a held rebuild task, as the remedy matches it to the pull request and head it was filed from. */
+export interface HeldRebuild { id: string; prUrl: string; headSha: string }
+
+// Both rebuild writers name the pull request and head in the rationale's first line: heldTaskFiles (W1-T12709) and
+// heldPlanRebuildFiles (W1-T13047).
+const HELD_REBUILD_RATIONALE_RE =
+  /^REBUILD of (?:the plan filing (\S+)|[^,\s]+), filed by the sweep \(W1-T1(?:2709|3047)\)(?: from (\S+))? at ([0-9a-f]{7,40}):/;
+
+/** W1-T15108: `task` as a held rebuild, or undefined when its title and rationale do not mark it as one. PURE. */
+export function heldRebuildOf(task: unknown): HeldRebuild | undefined {
+  const t = task as { id?: unknown; title?: unknown; rationale?: unknown } | null;
+  if (typeof t?.id !== "string" || typeof t.title !== "string" || !t.title.endsWith("(held rebuild)") ||
+      typeof t.rationale !== "string") return undefined;
+  const match = HELD_REBUILD_RATIONALE_RE.exec(t.rationale);
+  const prUrl = match?.[1] ?? match?.[2];
+  return match === null || prUrl === undefined ? undefined : { id: t.id, prUrl, headSha: match[3]! };
+}
+
+/** W1-T15108: the held rebuilds a task file's text declares. PURE. */
+export function heldRebuildsOfTaskText(text: string): HeldRebuild[] {
+  const doc = parseDocument(text);
+  const tasks: unknown = doc.errors.length > 0 ? undefined : doc.toJSON();
+  return Array.isArray(tasks) ? tasks.flatMap(t => heldRebuildOf(t) ?? []) : [];
 }
 
 /** W1-T13944: for each claim, the lowest held follow-up of `parentId` that carries it; a claim none carries is absent. PURE. */
@@ -480,8 +510,12 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
   // stands for no other remedy, so close-and-rebuild after one files its rebuild as before.
   const asked = decision.inputCriteria.map(c => c.claim);
   const splitReadsPlan = decision.remedy === "split-follow-up" && host.readHeldFollowUps !== undefined;
+  // W1-T15108: a close-and-rebuild also reuses a taken close-and-rebuild row for this pull request and head under any cause,
+  // so a second pass that reads the same head under another cause files no second rebuild.
+  const rebuildOfHead = (r: Record<string, unknown>) => decision.remedy === "close-and-rebuild" &&
+    r.remedy === "close-and-rebuild" && r.head_sha === pr.headSha;
   const prior = splitReadsPlan ? undefined : ledger.findLast(r => r.step === PARKED_PR_REMEDY_STEP && r.pr_number === pr.prNumber &&
-    r.cause === ctx.cause && r.outcome === "taken" && typeof r.held_task_id === "string" && (decision.remedy !== "split-follow-up"
+    (r.cause === ctx.cause || rebuildOfHead(r)) && r.outcome === "taken" && typeof r.held_task_id === "string" && (decision.remedy !== "split-follow-up"
       ? !(r.remedy === "split-follow-up" && (r.reused === true || r.partial_refusal !== undefined))
       : Array.isArray(r.criteria) && asked.every(claim => (r.criteria as unknown[]).includes(claim))));
   if (prior !== undefined) {
@@ -492,6 +526,16 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
   let refusalChecks: string[] | undefined;
   try {
     const closed = decision.remedy === "close-and-rebuild";
+    // W1-T15108, one rebuild per pull request head: a held rebuild already in the landing queue or on the plan for this
+    // pull request and head is reused, whatever this pass's ledger view holds.
+    const filed = closed && host.readHeldRebuilds !== undefined
+      ? (await host.readHeldRebuilds()).filter(h => h.prUrl === pr.prUrl && h.headSha === pr.headSha).map(h => h.id).sort(byTaskNumber)[0]
+      : undefined;
+    if (filed !== undefined) {
+      ctx.append({ ...row, outcome: "taken", reason: decision.reason, held_task_id: filed, reused: true });
+      return { remedy: decision.remedy, heldTaskId: filed, reason: `held rebuild ${filed} for this pull request and head is on ` +
+        "the plan or in the task-files landing queue; this pass reuses it (W1-T15108)" };
+    }
     const read = pr.taskId === undefined ? undefined : await host.readTaskShard(pr.taskId);
     // W1-T13047: a plan filing with no readable task file is rebuilt from the pull request's own plan files.
     const fromPr = read?.outcome !== "read" && closed && pr.isPlanFiling === true;
