@@ -123,11 +123,13 @@ test("W1-T14891 a mounted worktree root is left alone when the mount source is a
   mkdirSync(alias);
   const st = statSync(r.root);
   const identity = `${st.dev}:${st.ino}`;
+  // The host's own stat, found before the stub dir joins PATH (Linux and macOS keep it in different places).
+  const realStat = execFileSync("sh", ["-c", "command -v stat"], { encoding: "utf8" }).trim();
   const statStub = join(r.fx.root, "stat");
   writeFileSync(statStub, `#!/usr/bin/env bash
 for arg; do path="$arg"; done
 if [ "$path" = "${alias}" ] || [ "$path" = "${r.root}" ]; then printf '%s\\n' '${identity}'; exit 0; fi
-exec /usr/bin/stat "$@"
+exec "${realStat}" "$@"
 `, { mode: 0o755 });
   const out = pass(r, {
     PATH: `${r.fx.root}:${process.env.PATH}`,
