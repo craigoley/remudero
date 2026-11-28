@@ -936,17 +936,29 @@ sweep_worktree() {
 }
 
 # ── W1-T14929: linked worktrees of home clones ──
-# home_tree_open_pr <worktree>: true when its branch has an open pull request on GitHub, or when that cannot be
-# read. A branch never pushed, a detached HEAD or a non-GitHub origin has no pull request.
+# home_tree_open_pr <worktree>: true when a pull request on GitHub is open for its HEAD or for any published branch
+# tip its HEAD contains, or when that cannot be established. The branch name, a detached HEAD or a missing
+# same-named origin ref does not matter: the candidates are every origin ref that holds HEAD and every origin ref
+# HEAD holds that the default branch does not. A non-GitHub origin has no pull requests.
+HOME_PR_MAX_LOOKUPS="${RMD_CLEANUP_HOME_PR_MAX_LOOKUPS:-20}"
 home_tree_open_pr() {
-  local wt="$1" branch url tip n
-  branch="$(rgit "$wt" symbolic-ref -q --short HEAD 2>/dev/null)" || return 1
+  local wt="$1" url base tips tip n count=0
   url="$(rgit "$wt" config --get remote.origin.url 2>/dev/null)" || return 1
   case "$url" in https://github.com/*|git@github.com:*|ssh://git@github.com/*) ;; *) return 1 ;; esac
-  tip="$(rgit "$wt" rev-parse -q --verify "refs/remotes/origin/$branch" 2>/dev/null)" || return 1
-  n="$(rmd_gh_commit_pulls "$wt" "$tip" '[.[] | select(.state == "open")] | length')" || return 0
-  case "$n" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$n" -gt 0 ]
+  base="$(rgit "$wt" rev-parse -q --verify refs/remotes/origin/HEAD 2>/dev/null)" ||
+    base="$(rgit "$wt" rev-parse -q --verify refs/remotes/origin/main 2>/dev/null)" || return 0
+  tips="$( { rgit "$wt" for-each-ref --format='%(objectname)' --contains HEAD refs/remotes/origin &&
+             rgit "$wt" for-each-ref --format='%(objectname)' --merged HEAD --no-merged "$base" refs/remotes/origin; } 2>/dev/null)" || return 0
+  while IFS= read -r tip; do
+    [ -n "$tip" ] || continue
+    [ "$tip" = "$base" ] && continue
+    count=$(( count + 1 ))
+    [ "$count" -le "$HOME_PR_MAX_LOOKUPS" ] || return 0      # too many to establish: keep
+    n="$(rmd_gh_commit_pulls "$wt" "$tip" '[.[] | select(.state == "open")] | length')" || return 0
+    case "$n" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$n" -gt 0 ] && return 0
+  done < <(printf '%s\n' "$tips" | sort -u)
+  return 1
 }
 # retire_orphan_home_tree <clone> <tree>: a linked worktree whose admin directory under the clone is gone. Git no
 # longer resolves it, so it is saved as a tarball (node_modules left out) with a MANIFEST, then removed.

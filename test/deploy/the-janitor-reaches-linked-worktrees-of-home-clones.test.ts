@@ -129,3 +129,27 @@ test("W1-T14929 an admin-less linked tree is saved then removed", () => {
     assert.doesNotMatch(listing, /node_modules/, "node_modules is left out");
   } finally { drop(r); }
 });
+
+test("W1-T14929 a home checkout and a live linked tree are kept: a detached or renamed tree with an open pull request", () => {
+  const r = homeRig();
+  try {
+    const detached = linkedTree(r, ".worktrees", "wt-detached");
+    git(detached, "push", "-q", r.origin, "HEAD:refs/heads/run-W1-T9001-1");
+    git(detached, "update-ref", "refs/remotes/origin/run-W1-T9001-1", "HEAD");
+    git(detached, "checkout", "-q", "--detach");
+    const renamed = linkedTree(r, ".worktrees", "wt-renamed");
+    git(renamed, "push", "-q", r.origin, "HEAD:refs/heads/pr-branch-elsewhere");
+    git(renamed, "update-ref", "refs/remotes/origin/pr-branch-elsewhere", "HEAD");
+    writeFileSync(join(renamed, "more.txt"), "a later unpublished commit\n");
+    git(renamed, "add", "more.txt");
+    git(renamed, "commit", "-q", "-m", "after the PR head");
+    for (const p of [detached, renamed]) age(p, 10 * DAY_HOURS);
+
+    const out = pass(r, { GH_OPEN: "1" });
+    for (const kept of [detached, renamed]) {
+      assert.equal(existsSync(kept), true, `${kept} stays:\n${out}`);
+      assert.match(out, new RegExp(`KEEP ${kept}: linked worktree of ${r.clone} has an open pull request`));
+      assert.deepEqual(copies(r, kept), []);
+    }
+  } finally { drop(r); }
+});
