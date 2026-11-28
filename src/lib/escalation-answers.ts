@@ -299,7 +299,8 @@ export function ghEscalationAnswerGateway(
       }
       return read;
     },
-    refusalIssues: scopedToCodeRepository(ghIssueGatewayAsync(owner, repo, { exec: readText }), repoArg, codeRepository),
+    refusalIssues: scopedToCodeRepository(ghIssueGatewayAsync(owner, repo,
+      { exec: readText, scopeToCodeRepository: false }), repoArg, codeRepository),
     async listOpen(label) {
       const raw = await readText(labelledIssuesRestArgs(repoArg, label, "open"));
       const listed = parseLabelledIssuesRest(raw);

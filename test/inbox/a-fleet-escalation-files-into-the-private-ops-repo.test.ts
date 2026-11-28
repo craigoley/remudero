@@ -418,7 +418,29 @@ test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery close
   });
   await green();
   assert.deepEqual(logged.filter((row) => row.step === "main.health.resolved").map((row) => row.issue_url), [siteUrl]);
-  assert.deepEqual(gh.issues.map((issue) => [issue.url, issue.state]), [[coreUrl, "open"], [siteUrl, "closed"]]);
+  // The ops catalog is itself a managed code repository. Its daemon shares the same repository as the pool, so its
+  // explicitly configured gateway still scopes dedup and recovery to ops's recorded field.
+  const opsOwner = OPS.split("/")[0]!, opsRepo = OPS.split("/")[1]!;
+  const opsIssues = ghIssueGateway(opsOwner, opsRepo, { exec: gh.exec, destination: toOps });
+  const opsUrl = withLiveWritesAllowed(() => escalate(red, { issues: opsIssues, ledgerPath: path, runId: "OPS-1" }));
+  assert.notEqual(opsUrl, coreUrl, "ops does not reuse core's issue from the shared repository");
+  assert.equal(withLiveWritesAllowed(() => escalate(red, { issues: opsIssues, ledgerPath: path, runId: "OPS-2" })), opsUrl,
+    "ops re-escalation reuses its own issue");
+  assert.equal(escalationCodeRepository(gh.issues.find((issue) => issue.url === opsUrl)?.body), OPS);
+  const opsRecovery = buildMainHealthRung(opsOwner, opsRepo, {
+    fetch: async (args: string[]): Promise<unknown> => {
+      const at = args[1]!;
+      if (at === `repos/${OPS}`) return { default_branch: "main" };
+      if (at === `repos/${OPS}/commits/main`) return { sha: "d".repeat(40) };
+      if (at.includes("/check-runs?")) return { check_runs: [{ id: 10, name: "ci", status: "completed", conclusion: "success" }] };
+      if (at.endsWith("/status")) return { statuses: [] };
+      if (at.includes("/actions/runs?")) return { workflow_runs: [] };
+      throw new Error(`unrouted ops recovery read: ${at}`);
+    },
+    ledgerPath: path, runId: "OPS-RUNG", log: () => {}, readRequiredChecks: () => ["ci"], issues: opsIssues,
+  });
+  await opsRecovery();
+  assert.deepEqual(gh.issues.map((issue) => [issue.url, issue.state]), [[coreUrl, "open"], [siteUrl, "closed"], [opsUrl, "closed"]]);
   // Core's reconciler, over the routed ops pool, follows an explicit code-repository field even if a grill cites a
   // different PR. For legacy issues without that field, it still judges by the PR repository as the listing does.
   const askedPrs: number[] = [];
@@ -513,6 +535,19 @@ test("W1-T14998 criterion 4: unrouted public and private managed repositories fi
   graphqlCalls.length = 0;
   assert.deepEqual(await ghIssueGatewayGraphql("craigoley", "arcade", { exec: graphql(false), destination: nowhere }).listOpen?.(NEEDS_HUMAN_LABEL), []);
   assert.deepEqual(graphqlCalls, ["issues"], "public managed repositories are listed directly too");
+  // An unrouted ops repo keeps its pre-task body shape but ignores a core issue routed into the same repository when
+  // searching for duplicates. Its own escalation opens separately and subsequent recovery can see it.
+  const shared = fakeGh();
+  const coreGateway = ghIssueGateway(CODE.owner, CODE.repo, { exec: shared.exec, destination: toOps });
+  const opsGateway = ghIssueGateway("craigoley", "remudero-ops", { exec: shared.exec, destination: nowhere });
+  const sameKey = escalation({ class: "BLOCKED", taskId: "MAIN-HEALTH", summary: "main is red", detail: "ci failed" });
+  const coreIssue = withLiveWritesAllowed(() => escalate(sameKey, { issues: coreGateway, ledgerPath: path, runId: "CORE-POOL" }));
+  const opsIssue = withLiveWritesAllowed(() => escalate(sameKey, { issues: opsGateway, ledgerPath: path, runId: "OPS-LOCAL" }));
+  assert.notEqual(opsIssue, coreIssue, "the unrouted ops producer ignores core's pooled issue");
+  assert.equal(escalationCodeRepository(shared.issues.find((issue) => issue.url === coreIssue)?.body), CORE_REPO);
+  assert.equal(escalationCodeRepository(shared.issues.find((issue) => issue.url === opsIssue)?.body), undefined,
+    "unrouted ops filing keeps the legacy body with no ownership field");
+  assert.equal(withLiveWritesAllowed(() => escalate(sameKey, { issues: opsGateway, ledgerPath: path, runId: "OPS-LOCAL-2" })), opsIssue);
 });
 
 /** An owner-reply reader over `pool`'s open issues: each has one owner comment answering `re-review`. */
@@ -589,7 +624,7 @@ test("W1-T14998 criterion 5: an owner reply on another repository's pooled issue
   assert.deepEqual([ops.reacted, opsRead.ignored], [[400], []]);
 });
 
-test("W1-T14998 criterion 6: owner comments and reactions on this repository's legacy issue still land", async (t) => {
+test("W1-T14998 criterion 6: an owner reply on this repository's own issue lands as before", async (t) => {
   // A routed reader answers its own recorded issue and a legacy one recording none and naming no other repository's PR.
   const routed = poolReader(t, OPS, CORE_REPO, [
     { number: 3, body: withCodeRepositoryField(answerable("W1-T15500"), CORE_REPO) },
@@ -601,8 +636,13 @@ test("W1-T14998 criterion 6: owner comments and reactions on this repository's l
   // An unrouted reader over its own code repository answers every issue there, legacy and recorded, as origin/main did
   // before this pool filter existed. This pre-field issue deliberately quotes site's PR: the owner comment and reaction
   // must still land exactly as they did on main because the issue itself lives in core.
+  const legacyBody = [
+    "**Class:** MANUAL", "**Task:** W1-T15503", "**Host:** legacy-host", "",
+    `Review of ${SITE_PR} stalled.`, "", "## Options", "- **re-review** — re-run the review in a fresh worktree",
+    "- **hand-review** — review the head by hand", "", "## Recommendation", "re-review", "",
+  ].join("\n");
   const own = poolReader(t, CORE_REPO, undefined, [
-    { number: 6, body: answerable("W1-T15503", { summary: `PR ${SITE_PR} needs a review`, detail: `Review of ${SITE_PR} stalled.` }),
+    { number: 6, body: legacyBody,
       reactions: [{ id: 601, content: "+1", login: "craigoley" }] },
     { number: 7, body: withCodeRepositoryField(answerable("W1-T15504"), CORE_REPO) },
   ]);

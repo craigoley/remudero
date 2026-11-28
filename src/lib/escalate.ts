@@ -2349,11 +2349,11 @@ export function ghIssueGateway(
     opts.exec ??
     ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   if (route.outcome === "unfiled") {
-    const local = issueGatewaySteps(code, run, runStepsSync) as IssueGateway;
+    const local = filterIssueGatewayToCodeRepository(issueGatewaySteps(code, run, runStepsSync), code) as IssueGateway;
     if (opts.exec === undefined) asyncIssueTwins.set(local, ghIssueGatewayAsync(owner, repo, { destination: () => route }));
     return local;
   }
-  const gateway = scopedToCodeRepository(issueGatewaySteps(route.repository, run, runStepsSync), route.repository, code) as IssueGateway;
+  const gateway = scopedToCodeRepository(issueGatewaySteps(route.repository, run, runStepsSync), route.repository, code, true) as IssueGateway;
   gatewayRepository.set(gateway, route.repository);
   if (opts.exec === undefined) asyncIssueTwins.set(gateway, ghIssueGatewayAsync(owner, repo, { destination: () => route }));
   return gateway;
@@ -2364,17 +2364,18 @@ export function ghIssueGateway(
 export function ghIssueGatewayAsync(
   owner: string,
   repo: string,
-  opts: { exec?: (args: string[]) => Promise<string>; destination?: EscalationDestinationRead } = {},
+  opts: { exec?: (args: string[]) => Promise<string>; destination?: EscalationDestinationRead; scopeToCodeRepository?: boolean } = {},
 ): AsyncIssueGateway {
   const code = `${owner}/${repo}`;
   const route = escalationIssueRoute(opts, code);
   if (route.outcome === "unfiled" && route.unrouted !== true) return unfiledIssueGateway(route.reason);
   const run = opts.exec ?? ((args: string[]) => ghTextAsync(args));
   if (route.outcome === "unfiled") {
-    return issueGatewaySteps(code, run, runStepsAsync);
+    return filterIssueGatewayToCodeRepository(issueGatewaySteps(code, run, runStepsAsync), code);
   }
-  const gateway = scopedToCodeRepository(issueGatewaySteps(route.repository, run, runStepsAsync),
-    route.repository, code);
+  const raw = issueGatewaySteps(route.repository, run, runStepsAsync);
+  const gateway = opts.scopeToCodeRepository === false ? raw
+    : scopedToCodeRepository(raw, route.repository, code, true);
   gatewayRepository.set(gateway, route.repository);
   return gateway;
 }
@@ -2519,11 +2520,14 @@ export function withCodeRepositoryField(body: string, codeRepository: string): s
   return stamped.length <= GITHUB_ISSUE_BODY_LIMIT ? stamped : body;
 }
 
-/** W1-T14998 — a gateway filing in `route` for `codeRepository`. When those differ, the route is a pool other code
- *  repositories file in too: each issue this gateway creates (or rewrites) records its code repository, and its open
- *  listing — which dedup, the main-health rung and the reconcilers close from — holds only that repository's issues. */
-export function scopedToCodeRepository(gateway: AsyncIssueGateway, route: string, codeRepository: string): AsyncIssueGateway {
-  if (route.toLowerCase() === codeRepository.toLowerCase()) return gateway;
+/** W1-T14998 — a gateway filing in a configured route for `codeRepository`. A configured route may also be the
+ *  producer's own repository while other fleet producers file there, so each issue records its code repository and
+ *  its open listing — which dedup, the main-health rung and the reconcilers close from — holds only that repository's issues. */
+export function scopedToCodeRepository(gateway: AsyncIssueGateway, route: string, codeRepository: string,
+  filterSameRepository = false): AsyncIssueGateway {
+  // A consumer may wrap a repo gateway and scope it to a different logical code repository (owner replies do this).
+  // Preserve that composition unless the producer explicitly opted into a configured pool, even when route === code.
+  if (!filterSameRepository && route.toLowerCase() === codeRepository.toLowerCase()) return gateway;
   const own = (open: OpenIssue[]) => open.filter((issue) => issueIsCodeRepositorys(issue, codeRepository));
   const { create, listOpen, editBody } = gateway;
   return {
@@ -2535,6 +2539,18 @@ export function scopedToCodeRepository(gateway: AsyncIssueGateway, route: string
     } } : {}),
     ...(editBody ? { editBody: (url: string, body: string) => editBody(url, withCodeRepositoryField(body, codeRepository)) } : {}),
   };
+}
+
+/** Keep an unrouted repository's legacy writes and body shape, while preventing an issue filed there for another
+ *  code repository from being deduped or closed by this repository's own producers. */
+function filterIssueGatewayToCodeRepository<T extends IssueGateway | AsyncIssueGateway>(gateway: T, codeRepository: string): T {
+  const { listOpen } = gateway;
+  if (listOpen === undefined) return gateway;
+  const own = (open: OpenIssue[]) => open.filter((issue) => issueIsCodeRepositorys(issue, codeRepository));
+  return { ...gateway, listOpen: (label: string) => {
+    const open = listOpen(label);
+    return open instanceof Promise ? open.then(own) : own(open);
+  } } as T;
 }
 
 /** W1-T14998 — the repository a gateway files in, or undefined for a fake gateway or one that files nowhere. */
