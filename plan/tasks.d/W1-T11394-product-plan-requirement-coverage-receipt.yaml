@@ -8,7 +8,7 @@
   risk: high
   band_meaning: span
   author_class: machine
-  status: queued
+  status: merged
   attempts: 0
   id: W1-T11394
   title: A product plan operation exposes observational requirement coverage without changing admission

@@ -410,12 +410,37 @@ export function watchTypecheckRss(pid: number | undefined): () => number | undef
   };
 }
 
+/**
+ * W1-T15169: how often a check holding its worktree's typecheck lock refreshes the lock's mtime, and how many missed
+ * beats make the lock stale. PRIMARY CONTROL for taking over a silent holder: a pid in another pid namespace (each
+ * Codex sandbox command has its own) cannot be probed from here, so the beat is the one liveness signal every waiter
+ * can read; a SIGKILLed holder stops beating and is taken over after the miss window.
+ */
+export const WORKTREE_LOCK_BEAT_MS = 2_000;
+export const WORKTREE_LOCK_MISSED_BEATS = 5;
+
+/** The observer's argv flag naming the lock it beats while tsc runs. */
+const HEARTBEAT_FLAG = "--rmd-heartbeat";
+
 const TYPECHECK_OBSERVER = String.raw`
 const { spawn } = require("node:child_process");
-const { readFileSync, writeSync } = require("node:fs");
+const { readFileSync, utimesSync, writeSync } = require("node:fs");
 const { constants } = require("node:os");
 const readPeak = (${readTypecheckRss.toString()});
-const [mode, file, ...args] = process.argv.slice(1);
+let argv = process.argv.slice(1);
+const beatPath = argv[0] === ${JSON.stringify(HEARTBEAT_FLAG)} ? argv[1] : undefined;
+if (beatPath !== undefined) argv = argv.slice(2);
+const [mode, file, ...args] = argv;
+const beat = () => {
+  try {
+    const now = new Date();
+    utimesSync(beatPath, now, now);
+  } catch {
+    // A lock already released or taken over has no holder left to keep alive here.
+  }
+};
+if (beatPath !== undefined) beat();
+const beats = beatPath === undefined ? undefined : setInterval(beat, ${WORKTREE_LOCK_BEAT_MS});
 const child = spawn(file, args, { stdio: [0, mode === "stream" ? "pipe" : 1, 2] });
 let peak, tail = "";
 child.stdout?.on("data", chunk => { tail = (tail + chunk.toString()).slice(-16384); });
@@ -431,6 +456,7 @@ let error;
 child.on("error", err => { error = err.message; });
 child.on("close", (status, signal) => {
   clearInterval(timer);
+  clearInterval(beats);
   const rechecked = Number(${RECHECKED_FILES}.exec(tail)?.[1]);
   try {
     writeSync(mode === "sandbox" ? 2 : 3, ${JSON.stringify(TYPECHECK_PEAK_MARKER)} +
@@ -447,8 +473,11 @@ child.on("close", (status, signal) => {
 });
 `;
 
-export function measuredTypecheckArgs(mode: "stream" | "capture" | "sandbox", file: string, args: readonly string[]): string[] {
-  return ["--input-type=commonjs", "-e", TYPECHECK_OBSERVER, "--", mode, file, ...args];
+/** `heartbeat` names a lock whose mtime the observer refreshes every {@link WORKTREE_LOCK_BEAT_MS} while tsc runs. */
+export function measuredTypecheckArgs(
+  mode: "stream" | "capture" | "sandbox", file: string, args: readonly string[], heartbeat?: string,
+): string[] {
+  return ["--input-type=commonjs", "-e", TYPECHECK_OBSERVER, "--", ...(heartbeat === undefined ? [] : [HEARTBEAT_FLAG, heartbeat]), mode, file, ...args];
 }
 
 export function takeTypecheckObservation(stderr: string): {
@@ -467,7 +496,7 @@ export function takeTypecheckObservation(stderr: string): {
 }
 
 export function measuredTypecheckInvocation(
-  file: string, args: readonly string[], options: SpawnSyncOptionsWithStringEncoding, stream = false,
+  file: string, args: readonly string[], options: SpawnSyncOptionsWithStringEncoding, stream = false, heartbeat?: string,
 ): { file: string; args: string[]; options: SpawnSyncOptionsWithStringEncoding } {
   const env = { ...options.env, RMD_TSC_ENTRY: "1" } as NodeJS.ProcessEnv;
   // The observer pipes stdout to collect the summary. Carry the terminal's default color behavior.
@@ -476,7 +505,7 @@ export function measuredTypecheckInvocation(
   }
   return {
     file: process.execPath,
-    args: measuredTypecheckArgs(stream ? "stream" : "capture", file, args),
+    args: measuredTypecheckArgs(stream ? "stream" : "capture", file, args, heartbeat),
     options: {
       ...options, env,
       stdio: stream ? ["inherit", "inherit", "inherit", "pipe"] : ["pipe", "pipe", "pipe", "pipe"],

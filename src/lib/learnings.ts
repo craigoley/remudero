@@ -1942,6 +1942,7 @@ export function evaluateLayerBudgetRatchet(entries: LearningEntry[], caps: Layer
 /** Text the learning selector can search for declared symbols and error signatures. */
 export interface LearningsSelectionContext {
   text?: string | readonly string[];
+  includeMatchDetails?: boolean;
   /** W1-T4091: each learning's offered/used history. When present, entries of equal match strength
    *  are ranked by a draw from their usefulness posterior instead of by `cited` date. */
   usage?: LearningUsage;
@@ -2232,7 +2233,8 @@ export function selectLearnings<T extends LearningEntry>(
   taskFiles: string[] | undefined,
   budgetChars: number = DEFAULT_KNOWLEDGE_BUDGET_CHARS,
   context?: LearningsSelectionContext,
-): { selected: T[]; dropped: T[]; matchedBy: LearningMatchCounts; propensity?: Record<string, number> } & LearningDrawRecord {
+): { selected: T[]; dropped: T[]; matchedBy: LearningMatchCounts; propensity?: Record<string, number>;
+  selectedMatches?: Array<{ id: string; counts: LearningMatchCounts }> } & LearningDrawRecord {
   const active = entries.filter((e) => e.lifecycle === "active");
   const files = taskFiles ?? [];
   const haystack = selectionHaystack(context);
@@ -2290,7 +2292,12 @@ export function selectLearnings<T extends LearningEntry>(
 
   const seed = context?.seed ?? 0;
   const primary = selectWith(seed);
-  const result = { selected: primary.selected, dropped: primary.dropped, matchedBy: primary.matchedBy };
+  const result = { selected: primary.selected, dropped: primary.dropped, matchedBy: primary.matchedBy,
+    ...(context?.includeMatchDetails ? { selectedMatches: primary.selectedSlots.map(slot => {
+      const { entry, counts } = matched[slot];
+      return { id: entry.id, counts };
+    }) } : {}),
+  };
   const draws = context?.propensityDraws ?? 0;
   if (draws <= 0) return result;
   // W1-T4241: 0 < share < 1 means the budget cut, not match strength, decided the entry.

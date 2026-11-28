@@ -74,6 +74,11 @@ export interface AcquireInflightOpts {
   /** Injectable process-start-time probe, forwarded to {@link isHolderStale} (tests). Defaults
    *  to {@link import("./fs-race-safe.js").defaultGetProcessStartTime}. */
   getProcessStartTime?: (pid: number) => number | null;
+  /** Identity fields written beside the holder record, never read back by this module (W1-T15169: the holder's pid
+   *  namespace, boot id and kernel start, for a caller whose {@link isStale} judges another pid namespace). */
+  extra?: Record<string, string | undefined>;
+  /** Replaces the staleness judgment; `byPid` is the default {@link isHolderStale} one (W1-T15169). */
+  isStale?: (held: InflightLockInfo, byPid: () => boolean) => boolean;
   /** Called when a reclaim attempt loses the race (see {@link reclaimStaleLock}). Defaults
    *  to a `console.error` trace; tests override it to observe the event directly. */
   onLostReclaim?: (detail: { lockPath: string; reason: string }) => void;
@@ -117,14 +122,17 @@ export function acquireInflightLock(
   for (;;) {
     try {
       const fd = openSync(lockPath, "wx"); // create-or-fail; no TOCTOU gap
-      writeSync(fd, JSON.stringify(info, null, 2));
+      writeSync(fd, JSON.stringify({ ...opts.extra, ...info }, null, 2));
       closeSync(fd);
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST" || opts.reclaim === false) throw e;
       const result = reclaimStaleLock(lockPath, {
         parseHolder: parseInflightLockInfo,
-        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime }),
+        isStale: (held) => {
+          const byPid = () => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime });
+          return opts.isStale ? opts.isStale(held, byPid) : byPid();
+        },
         onLostReclaim: opts.onLostReclaim,
         beforeDelete: opts.__beforeReclaimDelete,
       });
