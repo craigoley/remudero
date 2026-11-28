@@ -46,7 +46,7 @@ import type { DigestCadenceRunResult } from "./digest.js";
 import type { LedgerCompactionDecision, LedgerCompactionOutcome } from "./ledger-compaction-rung.js";
 import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
 import {
-  DETACHED_WORK_KINDS, detachedWorkPlacement, measureDrainCosts, planSha, priorChildPlacements, runChildOutsideKill,
+  abortRunChild, DETACHED_WORK_KINDS, detachedWorkPlacement, measureDrainCosts, planSha, priorChildPlacements, runChildOutsideKill,
   type AdoptedRunChild, type DetachedWorkEvidence, type DetachedWorkKind, type DetachedWorkMode, type RunChildHandle, type RunChildPending,
 } from "./run-child.js";
 import type { RunResult } from "./run-result.js";
@@ -201,7 +201,10 @@ import { defaultLaneGovernorPorts, DISPATCH_LANE_CPU_CLASS, initialLaneCpuLearne
 import type { LaneGovernorMode } from "./policy.js";
 import {
   createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, quantileOf, reclaimBeforeMemoryRestart, reclaimLedgerFields, type DaemonMemoryGovernor, type HeapShadowOptions,
+  decideContainerShed, readContainerShedReading, MEMORY_SHED_HELD_STEP, MEMORY_SHED_STEP,
+  type ContainerShedDecision, type ContainerShedEndOutcome, type ContainerShedEntry, type ContainerShedEpisode, type ContainerShedReading,
 } from "./daemon-memory-policy.js";
+import { SWAP_STALL_HISTORY_MS } from "./host-memory-shadow.js";
 import {
   IDLE_LANE_SUMMARY_WINDOW_MS,
   accountIdleLaneMinutes,
@@ -1626,6 +1629,9 @@ export interface DaemonDeps {
    *  W1-T7092: `afterRow` starts the worker-thread heap read once the row is written; the tick never
    *  awaits it, and the NEXT row's fields carry what it found. */
   readMemoryTelemetry?: (() => Record<string, unknown>) & { afterRow?: () => void };
+  /** W1-T15181: the container-shed rung each in-flight tick consults; absent, one over this process's own cgroup and the
+   *  sweep's run children, ended through abortRunChild under `fleetLane.stateDir`. A test seam. */
+  containerShed?: ContainerShedRung;
   /** W1-T8883: the heap-ceiling shadow's heap reading and process id; absent, this process's own. A test seam. */
   heapShadowSeams?: Pick<HeapShadowOptions, "snapshot" | "pid">;
   /** Report-only observer; null disables it. The state directory supplies the production store. */
@@ -2911,6 +2917,112 @@ export function takeSyncSpawn(deps: Pick<DaemonDeps, "readLoopTelemetry">, consu
   } catch { return {}; /* Reason: observability only. */ }
 }
 
+/** W1-T15181 — the container-shed rung: the history and the episode for this boot, around the pure decision. */
+export interface ContainerShedRung {
+  tick(atMs: number, missedTicks: number | undefined): ContainerShedDecision;
+}
+
+export interface ContainerShedPorts {
+  read: (atMs: number, missedTicks: number | undefined) => ContainerShedReading;
+  inventory: () => readonly ContainerShedEntry[];
+  now: () => number;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+function shedOutcome(outcome: ContainerShedEndOutcome): "terminal" | "lost" | "unsignalled" {
+  return outcome.signalled ? outcome.ended : "unsignalled";
+}
+
+/**
+ * W1-T15181: each tick reads, asks {@link decideContainerShed}, and keeps the history (fully read readings, this boot,
+ * W1-T10085's history span) and the episode. A shed ends its child without blocking the tick and writes its one
+ * memory.shed row once the end resolves; the episode waits on the child's settlement. A partly met hold writes its
+ * episode's one memory.shed_held row.
+ */
+export function createContainerShedRung(ports: ContainerShedPorts): ContainerShedRung {
+  const readings: ContainerShedReading[] = [];
+  let episode: ContainerShedEpisode = {};
+  return {
+    tick(atMs, missedTicks) {
+      const reading = ports.read(atMs, missedTicks);
+      let inventory: readonly ContainerShedEntry[] | { unread: string };
+      try {
+        inventory = ports.inventory();
+      } catch (error) {
+        inventory = { unread: String((error as Error)?.message ?? error).slice(0, 160) };
+      }
+      const decision = decideContainerShed(reading, { readings, episode }, inventory);
+      episode = decision.episode;
+      if ((reading.unread ?? []).length === 0) readings.push(reading);
+      while (readings.length > 0 && readings[0]!.at_ms < atMs - SWAP_STALL_HISTORY_MS) readings.shift();
+      const fields = {
+        memory_current_mib: reading.memory_current_mib, memory_high_mib: reading.memory_high_mib,
+        psi_full_avg60: reading.psi_full_avg60, calm_band: decision.band.band, band_source: decision.band.source,
+        missed_ticks: reading.missed_ticks,
+      };
+      if (decision.write_held) ports.log(MEMORY_SHED_HELD_STEP, { missing: decision.missing, reason: decision.reason, ...fields });
+      const entry = decision.entry;
+      if (decision.action === "shed" && entry?.end !== undefined) {
+        const shed = episode.shed!;
+        void entry.settled.then(() => {
+          if (episode.shed === shed) episode = { ...episode, shed: { ...shed, settled_at_ms: ports.now() } };
+        });
+        const row = { run_id: entry.run_id, kind: entry.kind, task_id: entry.task_id, pr: entry.pr,
+          age_ms: Math.max(0, reading.at_ms - entry.admitted_at_ms), ...fields };
+        void Promise.resolve().then(() => entry.end!()).then(shedOutcome, () => "unsignalled" as const)
+          .then((outcome) => ports.log(MEMORY_SHED_STEP, { ...row, outcome }));
+      }
+      return decision;
+    },
+  };
+}
+
+/** W1-T15181: end a run child the rung shed through abortRunChild on its run directory, with the restart's learned
+ *  teardown before SIGKILL. An unreadable restart history leaves the teardown unknown: SIGTERM only, never a kill. */
+export function endRunChildForShed(
+  stateDir: string, runId: string, log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<ContainerShedEndOutcome> {
+  return abortRunChild(join(stateDir, "runs", runId), {
+    log,
+    teardownMs: () => {
+      try {
+        return restartWorkHistory(readRestartHistoryLines(stateDir), systemClock.now()).yieldCost.ms;
+      } catch (error) {
+        log("memory.shed_teardown_unread", { run_id: runId, error: String((error as Error)?.message ?? error).slice(0, 160) });
+        return undefined;
+      }
+    },
+  });
+}
+
+/** W1-T15181: the sweep's inventory with its run children, each given an end under `stateDir`; with no state directory
+ *  no entry can be ended, so none is a candidate. */
+export function containerShedInventory(
+  stateDir: string | undefined, log: (step: string, extra?: Record<string, unknown>) => void,
+): () => ContainerShedEntry[] {
+  return () => restartDrainInventory({ children: true }).map((entry) => {
+    const runId = entry.run_id;
+    if (runId === undefined || stateDir === undefined) return entry;
+    return { ...entry, end: () => endRunChildForShed(stateDir, runId, log) };
+  });
+}
+
+const containerShedRungs = new WeakMap<object, ContainerShedRung>();
+
+/** The boot's one rung: the injected one, else a default created on the first in-flight tick. */
+function containerShedRungFor(deps: DaemonDeps, log: (step: string, extra?: Record<string, unknown>) => void): ContainerShedRung {
+  if (deps.containerShed) return deps.containerShed;
+  let rung = containerShedRungs.get(deps);
+  if (!rung) {
+    rung = createContainerShedRung({
+      read: (atMs, missed) => readContainerShedReading(atMs, missed), inventory: containerShedInventory(deps.fleetLane?.stateDir, log),
+      now: () => systemClock.now(), log,
+    });
+    containerShedRungs.set(deps, rung);
+  }
+  return rung;
+}
+
 /** W1-T7746: report a tick's lag, and first hand it to the loop-stall profiler, which sets its bound from
  *  this interval and these lags. A daemon without the sampler reports exactly as before. */
 export function reportTickLag(deps: Pick<DaemonDeps, "readLoopTelemetry">, sample: Parameters<typeof reportLoopLag>[0],
@@ -3575,11 +3687,15 @@ function startInFlightTicker(
           const tickDueAtMs = daemonClock.now() + pollIntervalMs;
           const waitResult = await (owner.sweepRetrigger ? (deps.sleepUntilSweepWake ?? deps.sleep) : deps.sleep)(pollIntervalMs);
           const lastStepBeforeBlock = deps.lastStepBeforeBlock?.();
+          const tickObservedAtMs = daemonClock.now();
           reportTickLag(deps,
-            { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: daemonClock.now(), intervalMs: pollIntervalMs, lastStepBeforeBlock,
+            { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: tickObservedAtMs, intervalMs: pollIntervalMs, lastStepBeforeBlock,
               ...takeSyncSpawn(deps, "ticker") },
             log,
           );
+          // W1-T15181: the tick's own lateness in whole intervals, as daemon.loop_lag counts it; a non-finite clock is unread.
+          const tickLateMs = tickObservedAtMs - tickDueAtMs;
+          const tickMissed = Number.isFinite(tickLateMs) ? (tickLateMs > pollIntervalMs ? Math.floor(tickLateMs / pollIntervalMs) : 0) : undefined;
           if (waitResult === "wake") eventWakePending = true;
           if (!owner.active) break;
           recordNearLimitHeapSample(deps, "in-flight-tick");
@@ -3612,6 +3728,12 @@ function startInFlightTicker(
             ...(diskHeadroom?.freeBytes !== undefined ? { disk_free_bytes: diskHeadroom.freeBytes } : {}),
           });
           startMemoryReadAfterRow(deps, log);
+          // W1-T15181: the container-shed rung reads the cgroup this heartbeat sampled; it never blocks the tick.
+          try {
+            containerShedRungFor(deps, log).tick(tickObservedAtMs, tickMissed);
+          } catch (e) {
+            log("memory.shed_error", { error: String((e as Error)?.message ?? e).slice(0, 160) });
+          }
           // W1-T7093: the reservation tree must be refreshed by the real recurring heartbeat,
           // not merely by worker start/release calls. Best-effort, after the liveness row so a
           // slow or failed ledger walk cannot erase this tick's heartbeat.

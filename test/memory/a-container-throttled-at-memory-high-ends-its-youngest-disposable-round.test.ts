@@ -304,7 +304,7 @@ test("W1-T15181 criterion 5: a shed writes one memory.shed row with exactly its 
     for (const reading of calmReadings(T1016, 120, 2.9)) tick(reading);
     const [lag219, lag408] = episode1016();
     tick(lag219);
-    tick({ ...lag219, at_ms: lag219.at_ms + MIN, events_high: 5500 });
+    tick({ ...lag219, at_ms: lag219.at_ms + 30_000, events_high: 5500 });
     tick(lag408);
     await flush();
     await flush();

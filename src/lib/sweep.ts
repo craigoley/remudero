@@ -21834,6 +21834,8 @@ export interface RestartDrainInventoryEntry {
   phase: string;
   admitted_at_ms: number;
   settled: Promise<void>;
+  /** W1-T15181: a run child's run id, set only on the entries `restartDrainInventory({ children: true })` adds. */
+  run_id?: string;
 }
 function detachedRestartItem(settled: Promise<void>, action: DetachedSweepActionRegistration): RestartDrainInventoryEntry {
   return { what: "detached", kind: action.actionKind, task_id: action.taskId,
@@ -21852,11 +21854,21 @@ export function directMergeRestartItem(operation: DirectMergeOperation): Restart
     ...(operation.headSha === undefined ? {} : { head_sha: operation.headSha }),
     admitted_at_ms: operation.admittedAtMs, settled: operation.settled };
 }
-export function restartDrainInventory(): RestartDrainInventoryEntry[] {
-  return [...inFlightReviewRuns].map(([work, review]) => reviewRestartItem(work, review)).concat(
+/** W1-T15181: a review or detached action hosted in a run child, as the container-shed rung reads it: a restart never
+ *  waits for one (W1-T9114), so only `restartDrainInventory({ children: true })` lists it. Admitted when registered. */
+function childRestartItem(work: RegisteredChildWork, settled: Promise<void>): RestartDrainInventoryEntry {
+  return { what: work.kind === "review" ? "review" : "detached", kind: work.kind, task_id: work.taskId,
+    ...(work.prNumber === undefined ? {} : { pr: work.prNumber }),
+    ...(work.headSha === undefined ? {} : { head_sha: work.headSha }),
+    phase: work.phase ?? "child", admitted_at_ms: work.registeredAtMs, settled, run_id: work.runId };
+}
+export function restartDrainInventory(opts: { children?: boolean } = {}): RestartDrainInventoryEntry[] {
+  const owned = [...inFlightReviewRuns].map(([work, review]) => reviewRestartItem(work, review)).concat(
     [...detachedSweepActions].filter(([, action]) => isRestartInterruptible(action))
       .map(([work, action]) => detachedRestartItem(work, action)),
     directMergeOperationsInFlight().map(directMergeRestartItem));
+  if (opts.children !== true) return owned;
+  return owned.concat([...childWork.values()].flatMap((work) => work.settled === undefined ? [] : [childRestartItem(work, work.settled)]));
 }
 
 /** Hand one review attempt to {@link inFlightReviewRuns}; returns `work` unchanged for the caller to await. */
@@ -21958,6 +21970,8 @@ interface RegisteredChildWork extends ChildWorkRegistration {
   phase?: string;
   /** W1-T11149: the provider-refusal epoch when this review registered, so its settlement knows whether it ran refusal-free. */
   refusalEpoch?: number;
+  /** W1-T15181: resolves once {@link adoptChildWork} has settled this child; unset, the child is never a shed candidate. */
+  settled?: Promise<void>;
 }
 const childWork = new Map<string, RegisteredChildWork>();
 const settledChildWork = new Set<string>();
@@ -22406,7 +22420,7 @@ export function adoptChildWork(child: AdoptedWorkChild, log: (step: string, extr
   registerChildWork({
     runId: child.runId, taskId: child.taskId, ...registered, ...(planLane ? { planLane } : {}), readPhase: child.readPhase,
   });
-  return child.settled.then(
+  const done = child.settled.then(
     (value) => ({ status: "fulfilled" as const, value }),
     (reason: unknown) => ({ status: "rejected" as const, reason }),
   ).then((outcome) => {
@@ -22432,6 +22446,9 @@ export function adoptChildWork(child: AdoptedWorkChild, log: (step: string, extr
       outcome: outcome.status === "fulfilled" ? "terminal" : "lost", first_settlement: first,
     });
   });
+  const held = childWork.get(child.runId);
+  if (held !== undefined && held.settled === undefined) held.settled = done;
+  return done;
 }
 
 /** W1-T2981 — is an action of this kind already detached? A second concurrent retro would race the
