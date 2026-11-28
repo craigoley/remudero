@@ -55,7 +55,8 @@ function linkedTree(r: HomeRig, dir: string, name: string): string {
   const wt = join(r.clone, dir, name);
   mkdirSync(join(r.clone, dir), { recursive: true });
   git(r.clone, "worktree", "add", "-q", "-b", `hand/${name}`, wt, "main");
-  writeFileSync(join(wt, "feature.txt"), "unpublished\n");
+  // The content names the tree, so two trees built in the same second never share a HEAD SHA.
+  writeFileSync(join(wt, "feature.txt"), `unpublished ${name}\n`);
   git(wt, "add", "feature.txt");
   git(wt, "commit", "-q", "-m", "unpublished commit");
   writeFileSync(join(wt, "README"), "edited, not committed\n");
@@ -164,8 +165,17 @@ test("W1-T14929 a home checkout and a live linked tree are kept", () => {
     // Pushed: the fixture writes the local origin and the remote-tracking ref (a GitHub push is blocked in tests).
     git(pr, "push", "-q", r.origin, "HEAD:refs/heads/hand/wt-pr");
     git(pr, "update-ref", "refs/remotes/origin/hand/wt-pr", "HEAD");
-    for (const p of [open, locked, pr, r.clone]) age(p, 10 * DAY_HOURS);
+    // Control: idle, unlocked, not open and with no PR — the same shape as the live and locked trees
+    // minus their hold, so it shows the open-PR guard is not what keeps them.
+    const control = linkedTree(r, ".worktrees", "wt-control");
+    for (const p of [open, locked, pr, control, r.clone]) age(p, 10 * DAY_HOURS);
     writeFileSync(r.fx.lsofList, `${open}\n`);
+    // GitHub has never seen the live, locked and control HEADs (HTTP 422: no PR), so the open-PR
+    // guard lets them through and the lsof and lock guards are the ones exercised. Only the pushed
+    // tree's HEAD answers with an open pull request (GH_OPEN=1).
+    const heads = [open, locked, control].map(t => git(t, "rev-parse", "HEAD").trim());
+    assert.equal(new Set([...heads, git(pr, "rev-parse", "HEAD").trim()]).size, 4, "every tree has its own HEAD");
+    for (const head of heads) stubUnpublishedHead(r, head);
 
     const out = pass(r, { GH_OPEN: "1" });
     for (const kept of [open, locked, pr]) {
@@ -173,7 +183,15 @@ test("W1-T14929 a home checkout and a live linked tree are kept", () => {
       assert.doesNotMatch(out, new RegExp(`REMOVE ${kept}[: ]`));
       assert.deepEqual(copies(r, kept), [], `nothing is saved for ${kept}`);
     }
+    for (const head of heads) assert.ok(r.shim.calls().some(call => call.includes(head)), `HEAD ${head} is checked with GitHub`);
+    assert.match(out, new RegExp(`KEEP ${open}: held open by a process`));
+    assert.match(out, new RegExp(`KEEP ${locked}: Git worktree is locked`));
+    for (const t of [open, locked]) {
+      assert.doesNotMatch(out, new RegExp(`KEEP ${t}: linked worktree of ${r.clone} has an open pull request`), `${t} is not kept by the PR guard`);
+    }
     assert.match(out, new RegExp(`KEEP ${pr}: linked worktree of ${r.clone} has an open pull request`));
+    assert.match(out, new RegExp(`REMOVE ${control}: uncommitted changes; idle 7 days, preserved then retired`));
+    assert.equal(existsSync(control), false, `the unheld control tree is retired:\n${out}`);
     assert.equal(existsSync(join(r.clone, "README")), true, "the clone's own checkout is never retired");
     assert.doesNotMatch(out, new RegExp(`REMOVE ${r.clone}[: ]`));
   } finally { drop(r); }
