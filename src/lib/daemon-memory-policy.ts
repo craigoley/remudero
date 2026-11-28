@@ -1421,10 +1421,9 @@ export function containerCalmBandOf(readings: readonly ContainerShedReading[], n
     return { band: null, source: "unlearned", samples: calm, basis: `${calm} of ${SWAP_STALL_MIN_SAMPLES} calm readings with a closed window` };
   }
   let band: number | null = null;
-  let lowerCount = 0;
-  let lowerHurt = 0;
   let bandSamples = 0;
   let basis = "";
+  const overallHarmShare = closed.filter((sample) => sample.harmed).length / closed.length;
   for (let k = 0; k < closed.length;) {
     const level = closed[k]!.level;
     let end = k + 1;
@@ -1432,28 +1431,25 @@ export function containerCalmBandOf(readings: readonly ContainerShedReading[], n
     const group = closed.slice(k, end);
     const hurt = group.filter((sample) => sample.harmed).length;
     const share = hurt / group.length;
-    // Include this level in its local baseline, but never readings above it: a harmed upper tail must not
-    // raise the baseline used to judge itself. This also gives an isolated miss in a large calm population
-    // W1-T10085's noise allowance.
-    const baseline = (lowerHurt + hurt) / (lowerCount + group.length);
-    const noise = psiLiftNoise(baseline, lowerCount + group.length);
+    // Compare this PSI level's harm rate with the instance-wide rate, as W1-T10085 does for its flagged cohort.
+    // A mostly harmed level can move the baseline, but cannot make its own excess harm disappear.
+    const baseline = overallHarmShare;
+    const noise = psiLiftNoise(baseline, group.length);
+    const lifted = share - baseline > noise;
     basis = `${hurt} of ${group.length} readings at full avg60 ${level} were followed by a missed tick ` +
-      `(harm share ${Math.round(share * 100)}%, prior PSI baseline ${Math.round(baseline * 100)}%, ` +
-      `lift noise ${Math.round(noise * 100)}%)`;
+      `(harm share ${Math.round(share * 100)}%, instance baseline ${Math.round(baseline * 100)}%, ` +
+      `lift noise ${Math.round(noise * 100)}%; ${lifted ? "lifted" : "within noise"})`;
     const calmAtLevel = group.length - hurt;
-    // A statistically lifted level is not calm. A completely harmed level is excluded even when its self-inclusion
-    // would make the global baseline equal to its harm share (the former false-calm case).
-    if (calmAtLevel > 0) {
+    // A statistically lifted level is not calm, including when one on-time tick is mixed into a mostly harmed level.
+    if (calmAtLevel > 0 && !lifted) {
       band = level;
       bandSamples += calmAtLevel;
     }
-    lowerCount += group.length;
-    lowerHurt += hurt;
     k = end;
   }
-  if (band === null || bandSamples < SWAP_STALL_MIN_SAMPLES) {
-    return { band: null, source: "unlearned", samples: bandSamples,
-      basis: `${bandSamples} of ${SWAP_STALL_MIN_SAMPLES} calm readings; ${band === null ? "no calm level within noise" : "below minimum"}: ${basis}` };
+  if (band === null || calm < SWAP_STALL_MIN_SAMPLES) {
+    return { band: null, source: "unlearned", samples: calm,
+      basis: `${calm} of ${SWAP_STALL_MIN_SAMPLES} calm readings; ${band === null ? "no calm level within noise" : "below minimum"}: ${basis}` };
   }
   return { band, source: "learned", samples: bandSamples, basis: `learned ${band}: ${basis}` };
 }

@@ -111,7 +111,7 @@ test("W1-T15181 criterion 1: the 10:16Z fixture sheds the most recently admitted
   assert.equal(shed.action, "shed", shed.reason);
   assert.equal(shed.entry?.run_id, "run-fix-c", "the most recently admitted child is the one ended");
   assert.equal(shed.band.source, "learned");
-  assert.equal(shed.band.band, 2.9, "the calm band is the instance's own highest calm reading");
+  assert.equal(shed.band.band, 2.8, "the isolated harmed upper level exceeds the W1-T10085 noise allowance");
   await flush();
   assert.deepEqual(all.flatMap((c) => c.ended), ["run-fix-c"], "exactly one child is ended");
   assert.equal(rows.filter((r) => r.step === MEMORY_SHED_STEP).length, 1);
@@ -170,7 +170,7 @@ test("W1-T15181 criterion 2: the calm band is the instance's own, so one PSI rea
   const busy = decideContainerShed(lag408, { readings: [...calmReadings(T1016, 120, 50), lag219], episode: {} }, ready);
   assert.equal(quiet.action, "shed");
   assert.equal(busy.action, "hold");
-  assert.equal(busy.band.band, 50);
+  assert.equal(busy.band.band, 48.33, "the isolated harmed top level is outside the learned calm band");
   assert.ok(busy.missing.some((m) => m.includes("calm band")), busy.missing.join("; "));
 });
 
@@ -240,6 +240,23 @@ test("W1-T15181 criterion 2: a wholly harmed upper PSI level cannot raise the no
   const band = containerCalmBandOf([...samples, ...high, late], now);
   assert.equal(band.source, "learned", band.basis);
   assert.equal(band.band, 2, "all high PSI readings followed by missed ticks are excluded from the calm band");
+});
+
+test("W1-T15181 criterion 2: a mostly harmed upper PSI level cannot hide behind one on-time tick", () => {
+  const now = T1016 + 20 * MIN;
+  const samples = calmReadings(now, SWAP_STALL_MIN_SAMPLES + 5, 2, 12 * MIN);
+  const high: ContainerShedReading[] = Array.from({ length: 40 }, (_, i) => ({
+    at_ms: now - 10 * MIN + i * 5_000, events_high: 1, memory_current_mib: 1, memory_high_mib: 2,
+    psi_full_avg60: 40, missed_ticks: i === 0 ? 0 : 1,
+  }));
+  const onTime: ContainerShedReading = {
+    at_ms: now - 10 * MIN + 40 * 5_000, events_high: 1, memory_current_mib: 1, memory_high_mib: 2,
+    psi_full_avg60: 46, missed_ticks: 0,
+  };
+  const band = containerCalmBandOf([...samples, ...high, onTime], now);
+  assert.equal(band.source, "learned", band.basis);
+  assert.equal(band.band, 2, "39 harmed readings exceed the shared noise allowance despite one on-time tick");
+  assert.match(band.basis, /lifted/);
 });
 
 test("W1-T15181 criterion 2: one stall among hundreds of calm samples does not erase the learned PSI band", () => {
@@ -406,7 +423,7 @@ test("W1-T15181 criterion 5: a shed writes one memory.shed row with exactly its 
     assert.equal(shedRows[0]!.fields.outcome, named);
     assert.equal(shedRows[0]!.fields.run_id, "run-77");
     assert.equal(shedRows[0]!.fields.age_ms, lag408.at_ms - (T1016 - 7 * MIN));
-    assert.equal(shedRows[0]!.fields.calm_band, 2.9);
+    assert.equal(shedRows[0]!.fields.calm_band, 2.8);
     assert.equal(shedRows[0]!.fields.band_source, "learned");
     assert.equal(shedRows[0]!.fields.missed_ticks, 6);
     const heldRows = rows.filter((r) => r.step === MEMORY_SHED_HELD_STEP);
