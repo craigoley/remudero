@@ -3765,6 +3765,23 @@ function isGitWorktree(cwd: string): boolean {
   }
 }
 
+/** W1-T15260: true when cwd or any folder above it holds a `.git` entry of any kind, i.e. Codex's
+ *  default marker walk would find a project root. Checks the lexical and the physical chain. */
+function hasGitMarkerAtOrAbove(cwd: string): boolean {
+  for (const start of new Set([resolve(cwd), physicalPath(cwd)])) {
+    for (let at = start; ; at = dirname(at)) {
+      try {
+        lstatSync(join(at, ".git"));
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ENOTDIR") return true;
+      }
+      if (dirname(at) === at) break;
+    }
+  }
+  return false;
+}
+
 /**
  * The `project_doc_max_bytes` the Codex spawn pins (W1-T3135). KIND: BACKSTOP (W1-T1266) — the
  * PRIMARY CONTROL on this lane's doctrine size is the CLAUDE.md budget ratchet
@@ -4019,8 +4036,9 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     // test/a-dispatched-codex-worker-loads-the-whole-file.test.ts.
     "-c", 'project_doc_fallback_filenames=["AGENTS.md","CLAUDE.md"]',
     "-c", `project_doc_max_bytes=${CODEX_PROJECT_DOC_MAX_BYTES}`,
-    // W1-T15260: with no checkout, disable the .git walk above cwd; Codex still reads cwd's instructions.
-    ...(insideGitWorktree ? [] : ["-c", "project_root_markers=[]"]),
+    // W1-T15260: with no .git at or above cwd, disable the walk; Codex still reads cwd's instructions.
+    // A checkout subfolder (no .git in cwd itself) keeps the walk, exactly as before.
+    ...(hasGitMarkerAtOrAbove(args.cwd) ? [] : ["-c", "project_root_markers=[]"]),
   ];
   // W1-T2748 narrows W1-T2754's trust bypass to the two call-site properties that make it safe:
   // read-only tools and positive evidence that the cwd is not a Git worktree. The flag remains in
