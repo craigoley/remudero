@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { PROOF_REUSE_SHADOW_STEP, runReview, type ReviewCommandHost } from "#src/cli/commands/review.js";
 import { setProofSandboxForTests } from "#src/lib/review.js";
+import { buildBaseProofDirAsync } from "#src/lib/check-proof.js";
 import { spawnWorker } from "#src/lib/worker.js";
 // @ts-expect-error the hosted gate is a plain .mjs module.
 import * as gate from "#scripts/proof-discrimination-gate.mjs";
@@ -58,12 +59,15 @@ function fixture(t: TestContext, withBase = false) {
   const digests = gate.executorDigestsAt(checkout.dir);
   const review = async (proofs: string[], options: {
     hosted?: Array<"pass" | "fail" | "executed_stale" | undefined>; overrides?: Record<string, unknown>;
-    runHead?: string; diff?: string; repository?: string;
+    runHead?: string; diff?: string; repository?: string; grepBase?: boolean;
   } = {}) => {
     const acceptance = proofs.map((p, index) => ({ claim: `marker ${index} exists`, proof: p }));
     const body = `## Acceptance\n${acceptance.map(c => `- claim: ${c.claim}\n  proof: ${c.proof}`).join("\n")}\n`;
     const hosted = options.hosted ?? proofs.map(() => "pass" as const);
-    const line = gate.resultLine({ format: gate.RESULT_FORMAT, head_sha: headSha, base_sha: base?.git("rev-parse", "HEAD"), body_digest: sha(body),
+    const baseProof = options.grepBase ? await buildBaseProofDirAsync(acceptance, checkout.dir) : undefined;
+    if (baseProof?.baseCheckoutDir) t.after(() => rmSync(baseProof.baseCheckoutDir!, { recursive: true, force: true }));
+    const recordBaseSha = options.grepBase ? checkout.git("merge-base", "origin/main", "HEAD") : base?.git("rev-parse", "HEAD");
+    const line = gate.resultLine({ format: gate.RESULT_FORMAT, head_sha: headSha, base_sha: recordBaseSha, body_digest: sha(body),
       executor_digest: digests.executor_digest, workflow_digest: digests.workflow_digest,
       proofs: proofs.flatMap((p, index) => hosted[index] === undefined ? [] : [{ proof: p, verdict: hosted[index],
         head: hosted[index] === "fail" ? "fail" : "pass", base: hosted[index] === "executed_stale" ? "pass" : "no-match" }]),
@@ -84,7 +88,8 @@ function fixture(t: TestContext, withBase = false) {
       task: { id: "W1-T14745", acceptance, files: ["src/proofs.ts"] }, report: body,
       settingsFile: join(checkout.dir, "settings.json"), config: { root: checkout.dir } as never,
       headCheckoutDir: checkout.dir, ledgerPath: join(checkout.dir, ".git", "ledger.ndjson"), runId: "proof-audit",
-      baseCheckoutDir: base?.dir, baseIsCheckout: base !== undefined,
+      baseCheckoutDir: baseProof?.baseCheckoutDir ?? base?.dir,
+      baseIsCheckout: baseProof?.baseIsCheckout ?? base !== undefined, baseIsGrepTree: baseProof?.baseIsGrepTree,
       log: (step, extra) => rows.push({ step, ...extra }), say: () => {}, account: result => result,
       shadow: true, spawnReviewer: false, readReviewReuseFacts: () => undefined, runtimeImageSha: null,
     }));
@@ -92,7 +97,7 @@ function fixture(t: TestContext, withBase = false) {
     assert.ok(shadow);
     return { result, shadow, disagreements: rows.filter(row => row.step === "proof_reuse.disagreement") };
   };
-  return { advance, review, path, auditDir: join(checkout.dir, ".git", "review-proof-audit") };
+  return { advance, review, path, checkout, auditDir: join(checkout.dir, ".git", "review-proof-audit") };
 }
 
 const training = Array.from({ length: 12 }, (_, i) => proof(i));
@@ -118,6 +123,19 @@ test("W1-T14745 criterion 1: a hosted pass outside the audit skips the host and 
   assert.match(result.criteria[0]!.reason, /reused hosted proof PASS \(run 77, job 88\)/);
   const differentBase = await f.review([reused], { overrides: { base_sha: "f".repeat(40) } });
   assert.equal(differentBase.result.proofUniqueRuns, 2);
+});
+
+test("W1-T14745 ordinary grep-only review verifies the base tree merge-base and reuses an unaudited pass", async t => {
+  const f = fixture(t);
+  const cold = await f.review(training);
+  f.checkout.git("update-ref", "refs/remotes/origin/main", cold.result.headSha);
+  const { reused } = sampledProofs(f.advance());
+  const { result, shadow } = await f.review([reused], { grepBase: true });
+  assert.equal(result.proofUniqueRuns, 0);
+  assert.equal(result.criteria[0]?.met, true);
+  assert.match(result.criteria[0]!.reason, /reused hosted proof PASS \(run 77, job 88\)/);
+  assert.deepEqual(shadow.reused_proofs, [reused]);
+  assert.deepEqual(shadow.audited_proofs, []);
 });
 
 test("W1-T14745 criterion 2: fail, stale, absent and ineligible hosted evidence still reach the host", async t => {

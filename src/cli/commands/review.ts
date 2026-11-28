@@ -1053,7 +1053,7 @@ function proofCommandKey(cwd: string, proof: WhitelistedProof): string {
 type PreparedReview = Awaited<ReturnType<typeof preparePromisedReviewDecision>>;
 
 async function prepareHostedProofs(comparison: Extract<ProofReuseComparison, { eligible: true }>, input: ProofReuseInput,
-  args: Pick<Parameters<typeof runReview>[1], "owner" | "repo" | "ledgerPath" | "baseCheckoutDir" | "baseIsCheckout" | "log">) {
+  args: Pick<Parameters<typeof runReview>[1], "owner" | "repo" | "ledgerPath" | "baseCheckoutDir" | "baseIsCheckout" | "baseIsGrepTree" | "log">) {
   const passes = new Map((comparison.record.proofs ?? []).filter(p => p.verdict === "pass").map(p => [p.proof, p]));
   if (passes.size === 0) return undefined;
   const repository = `${args.owner}/${args.repo}`.toLowerCase();
@@ -1061,7 +1061,8 @@ async function prepareHostedProofs(comparison: Extract<ProofReuseComparison, { e
   const target = { owner: args.owner, repo: args.repo };
   const head = input.headCheckoutDir, base = args.baseCheckoutDir;
   const baseMatches = base === undefined || args.baseIsCheckout === true &&
-    (await hostWorktreeGitAsync(base, ["rev-parse", "HEAD"])).trim() === comparison.record.base_sha;
+    (await hostWorktreeGitAsync(base, ["rev-parse", "HEAD"])).trim() === comparison.record.base_sha ||
+    args.baseIsGrepTree === true && (await hostWorktreeGitAsync(head, ["merge-base", "origin/main", "HEAD"])).trim() === comparison.record.base_sha;
   const byCommand = new Map<string, string>();
   const shared = new Set<string>();
   for (const criterion of input.criteria) {
@@ -1437,6 +1438,8 @@ export async function runReview(host: ReviewCommandHost, args: {
   baseUnreadablePaths?: ReadonlySet<string>;
   /** R-11: true when `baseCheckoutDir` is a real merge-base worktree — see buildBaseProofDir. */
   baseIsCheckout?: boolean;
+  /** A grep-only tree has no git metadata; verify its recorded merge-base through the head checkout. */
+  baseIsGrepTree?: boolean;
   /** (W1-T3190) see {@link BaseProofDir.addedTestFiles}. */
   addedTestFiles?: ReadonlySet<string>;
   /**
@@ -3863,6 +3866,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
             baseCheckoutDir: baseProof?.baseCheckoutDir,
             baseUnreadablePaths: baseProof?.baseUnreadablePaths,
             baseIsCheckout: baseProof?.baseIsCheckout,
+            baseIsGrepTree: baseProof?.baseIsGrepTree,
             addedTestFiles: baseProof?.addedTestFiles,
             // W1-T233: the named reason materialization failed (absent ⇒ it was
             // never attempted at all) — carried onto the posted CAPPED description
