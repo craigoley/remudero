@@ -33070,36 +33070,85 @@ export function lightPassEarlyReviewBatch(
  *  absent-repush minted keeps W1-T12534's key (its first eligible ts, else its mint ts). A PR that was eligible at an
  *  earlier head is keyed by the first `sweep.review_eligible` ts of its current review key (the key carries the head
  *  sha, so a fix head is a new key), else `now`: this pass writes that key's first row. A PR's first head keeps its
- *  createdAt (W1-T12534 criteria 2 and 3), which is never later than its first eligibility. */
+ *  createdAt (W1-T12534 criteria 2 and 3), which is never later than its first eligibility.
+ *  W1-T15162 — A HEAD THE SWEEP'S OWN BRANCH UPDATE MADE KEEPS THE QUEUE PLACE OF THE HEAD IT REPLACED. A branch update
+ *  adds no new work to review, so a head first eligible after a `sweep.update_branch.updated` row of an unreviewed
+ *  earlier head inherits that head's key. INVARIANT a-new-head-of-new-work-requeues: a head with no such update before
+ *  it, a head after a fix dispatch or another new head, and a head whose earlier head has a verdict keep the key above. */
 function reviewInputQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>, now: number): ReviewQueuedAt {
   const byKey = new Map<string, string>();
   const minted = new Map<string, string>();
   const eligible = new Map<string, string>();
   const eligibleHeads = new Map<string, Set<string>>();
+  const sweepUpdates = new Map<string, Array<{ from: string; at: number }>>();
+  const fixDispatches = new Map<string, number[]>();
+  const judgedHeads = new Set<string>();
   const isTime = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
   const first = (values: Map<string, string>, key: string, ts: string): void => {
     if (!values.has(key)) values.set(key, ts);
   };
   for (const row of ledgerLines) {
     if (!isTime(row.ts)) continue;
+    const prKey = String(row.pr_number);
+    if (row.step === "sweep.update_branch.updated" && typeof row.head_sha === "string" && row.pr_number !== undefined) {
+      sweepUpdates.set(prKey, [...(sweepUpdates.get(prKey) ?? []), { from: row.head_sha, at: Date.parse(row.ts) }]);
+      continue;
+    }
+    if (row.step === "fix.dispatch" && row.pr_number !== undefined) {
+      fixDispatches.set(prKey, [...(fixDispatches.get(prKey) ?? []), Date.parse(row.ts)]);
+      continue;
+    }
+    if (row.step === "review.posted" && (row.state === "success" || row.state === "failure") &&
+      typeof row.head_sha === "string") {
+      judgedHeads.add(row.head_sha);
+      continue;
+    }
     if (row.step === "sweep.review_eligible" && typeof row.review_key === "string") first(byKey, row.review_key, row.ts);
     const head = row.step === "sweep.absent_repush" ? row.new_head
       : row.step === "sweep.review_eligible" ? row.head_sha : undefined;
     if (typeof head !== "string") continue;
-    const key = `${String(row.pr_number)}@${head}`;
+    const key = `${prKey}@${head}`;
     if (row.step === "sweep.absent_repush") {
       first(minted, key, row.ts);
       continue;
     }
     first(eligible, key, row.ts);
-    const heads = eligibleHeads.get(String(row.pr_number)) ?? new Set<string>();
-    eligibleHeads.set(String(row.pr_number), heads.add(head));
+    const heads = eligibleHeads.get(prKey) ?? new Set<string>();
+    eligibleHeads.set(prKey, heads.add(head));
   }
   const nowIso = clockFromMillisFn(() => now).iso();
+  /** W1-T15162: the unreviewed head a sweep branch update replaced with `head`, or undefined when `head` is new work. */
+  const sweepMadeFrom = (prKey: string, head: string): string | undefined => {
+    const seen = eligible.get(`${prKey}@${head}`);
+    const headAt = seen === undefined ? now : Date.parse(seen);
+    const update = (sweepUpdates.get(prKey) ?? []).filter((u) => u.from !== head && u.at <= headAt)
+      .reduce<{ from: string; at: number } | undefined>((latest, u) => latest === undefined || u.at > latest.at ? u : latest, undefined);
+    if (update === undefined || judgedHeads.has(update.from)) return undefined;
+    const fromSeen = eligible.get(`${prKey}@${update.from}`);
+    if (fromSeen === undefined || Date.parse(fromSeen) > update.at) return undefined;
+    const between = (at: number): boolean => at > update.at && at < headAt;
+    if ((fixDispatches.get(prKey) ?? []).some(between)) return undefined;
+    const otherNewHead = [...(eligibleHeads.get(prKey) ?? [])].some((h) =>
+      h !== head && h !== update.from && between(Date.parse(eligible.get(`${prKey}@${h}`)!)));
+    return otherNewHead ? undefined : update.from;
+  };
+  /** The key a head of a PR queues at; `null` keeps its PR's createdAt (its first head). */
+  const keyOfHead = (prKey: string, head: string, depth: number): string | null => {
+    const mint = minted.get(`${prKey}@${head}`);
+    if (mint !== undefined) return eligible.get(`${prKey}@${head}`) ?? mint;
+    const from = depth < 32 ? sweepMadeFrom(prKey, head) : undefined;
+    if (from !== undefined) return keyOfHead(prKey, from, depth + 1);
+    const own = eligible.get(`${prKey}@${head}`);
+    const earlier = [...(eligibleHeads.get(prKey) ?? [])].some((h) => h !== head &&
+      (own === undefined || Date.parse(eligible.get(`${prKey}@${h}`)!) < Date.parse(own)));
+    return earlier ? own ?? nowIso : null;
+  };
   return (pr) => {
     const head = `${pr.prNumber}@${pr.headSha}`;
     const mint = minted.get(head);
     if (mint !== undefined) return eligible.get(head) ?? mint;
+    const from = sweepMadeFrom(String(pr.prNumber), pr.headSha);
+    if (from !== undefined) return keyOfHead(String(pr.prNumber), from, 1) ?? undefined;
     const heads = eligibleHeads.get(String(pr.prNumber));
     const reentered = heads !== undefined && [...heads].some((h) => h !== pr.headSha);
     return reentered ? byKey.get(reviewOutcomeKeyForPr(pr)) ?? nowIso : undefined;
