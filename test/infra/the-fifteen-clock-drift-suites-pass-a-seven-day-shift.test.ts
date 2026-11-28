@@ -346,27 +346,31 @@ for (const suite of DRIFTING) {
 // The report's input is the sweep's own discovery (deriveCandidates: an age surface and a date literal). A suite whose
 // fix removed its last date literal leaves that population, so the report never measures it again; it is named here,
 // and every other one of the fifteen must be a runnable candidate, so no pass below stands in for a suite the report
-// does not run.
+// does not run. Both named suites left it on main (W1-T15078, #21093), not in this task, so the check is a
+// precondition of each whole-suite verdict below rather than a criterion of its own: a standalone proof of it passed
+// at this task's merge base and read executed_stale (#20913 at 63699a9).
 const DATE_LITERAL = /\d{4}-\d{2}-\d{2}/;
 const LEFT_THE_SWEEP = new Set([
   "sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views",
   "sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views",
 ]);
-const measured = () => new Set(runnableCandidates(deriveCandidates()));
-
-test("W1-T14786 the clock sweep reports no new drift for the fifteen suites: the sweep measures each one it can", () => {
-  const runnable = measured();
-  assert.deepEqual(FIFTEEN.map(sweepId).filter((suite) => !runnable.has(suite) && !LEFT_THE_SWEEP.has(suite)), [],
-    "every one of the fifteen is a runnable candidate of the sweep, or named as having left it");
-  for (const suite of LEFT_THE_SWEEP) {
-    assert.equal(runnable.has(suite), false, `${suite} is no longer a sweep candidate`);
-    assert.equal(DATE_LITERAL.test(readFileSync(join(REPO_ROOT, "test", `${suite}.test.ts`), "utf8")), false,
-      `${suite} left the sweep because it carries no date literal, the sweep's own rule`);
+let runnable: Set<string> | undefined;
+/** The suite is one the sweep's report measures, or it left the report's population by the sweep's own rule. */
+function assertMeasuredOrLeft(suite: Suite): void {
+  runnable ??= new Set(runnableCandidates(deriveCandidates()));
+  const id = sweepId(suite.file);
+  if (!LEFT_THE_SWEEP.has(id)) {
+    assert.equal(runnable.has(id), true, `${id} is a runnable candidate of the sweep, or named as having left it`);
+    return;
   }
-});
+  assert.equal(runnable.has(id), false, `${id} is no longer a sweep candidate`);
+  assert.equal(DATE_LITERAL.test(readFileSync(join(REPO_ROOT, suite.file), "utf8")), false,
+    `${id} left the sweep because it carries no date literal, the sweep's own rule`);
+}
 
 for (const suite of WHOLE_TEST_ORDER) {
   test(WHOLE_TITLES[DRIFTING.indexOf(suite)]!, async () => {
+    assertMeasuredOrLeft(suite);
     // The whole suite, as the sweep's report runs it: a pinned run could pass while another test in the file drifts.
     const run = await runOf(SWEEP_SHIFT_DAYS, suite, true);
     // Positive control: a child that never reported its own summary would read as "not failed" to the classifier.
@@ -416,6 +420,7 @@ assert.deepEqual(WHOLE_GROUPS.flatMap((group) => group.suites).sort(), [...FIFTE
 for (const group of WHOLE_GROUPS) {
   test(group.title, async () => {
     const suites = group.suites.map((file) => DRIFTING.find((suite) => suite.file === file)!);
+    suites.forEach(assertMeasuredOrLeft);
     // Ask for every suite of the group at once, so the pool runs them side by side.
     const runs = await Promise.all(suites.map((suite) => runOf(SWEEP_SHIFT_DAYS, suite, true)));
     suites.forEach((suite, i) => {
