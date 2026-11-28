@@ -1402,44 +1402,60 @@ export function isDisposableShedEntry(entry: ContainerShedEntry): boolean {
 }
 
 /**
- * The calm band, learned as W1-T10085 learns its PSI bound: over readings in the last SWAP_STALL_HISTORY_MS whose
- * SWAP_STALL_WINDOW_MS has closed, a reading is HARMED when it, or a later reading within that window, missed a tick. With fewer
- * than SWAP_STALL_MIN_SAMPLES calm readings the band is unlearned. Otherwise, walking levels upward, a calm level joins
- * the band while the harmed share of every reading at or below it stays within twice its noise of zero.
+ * The calm band, learned with W1-T10085's windows, minimum and noise rule: a reading is HARMED when the next reading
+ * reports a missed tick. The late tick belongs to the interval after the preceding reading, even when the loop only
+ * records the late arrival after the avg60 window. With fewer than SWAP_STALL_MIN_SAMPLES calm readings the band is
+ * unlearned. The band is the highest level with an observed calm reading. W1-T10085's lift/noise calculation is
+ * reported for each PSI level; harm is attributed to the next tick, so a level with no calm observations cannot enter
+ * the band by raising the population baseline with its own harmed readings.
  */
 export function containerCalmBandOf(readings: readonly ContainerShedReading[], nowMs: number): ContainerCalmBand {
-  const missedAt = readings.filter((r) => (r.missed_ticks ?? 0) >= 1).map((r) => r.at_ms);
-  // The reading's own missed ticks count: a reading at a missed tick was never calm.
-  const harmed = (r: ContainerShedReading): boolean => missedAt.some((at) => at >= r.at_ms && at <= r.at_ms + SWAP_STALL_WINDOW_MS);
-  const closed = readings.filter((r) => r.psi_full_avg60 !== undefined &&
-    nowMs - r.at_ms >= SWAP_STALL_WINDOW_MS && nowMs - r.at_ms <= SWAP_STALL_HISTORY_MS)
-    .map((r) => ({ level: r.psi_full_avg60!, harmed: harmed(r) })).sort((x, y) => x.level - y.level);
+  const ordered = [...readings].sort((a, b) => a.at_ms - b.at_ms);
+  const closed = ordered.flatMap((r, i) => {
+    const next = ordered[i + 1];
+    if (r.psi_full_avg60 === undefined || nowMs - r.at_ms < SWAP_STALL_WINDOW_MS || nowMs - r.at_ms > SWAP_STALL_HISTORY_MS || next === undefined) return [];
+    return [{ level: r.psi_full_avg60, harmed: (next.missed_ticks ?? 0) >= 1 }];
+  }).sort((x, y) => x.level - y.level);
   const calm = closed.filter((r) => !r.harmed).length;
   if (calm < SWAP_STALL_MIN_SAMPLES) {
     return { band: null, source: "unlearned", samples: calm, basis: `${calm} of ${SWAP_STALL_MIN_SAMPLES} calm readings with a closed window` };
   }
   let band: number | null = null;
-  let n = 0;
-  let hurt = 0;
-  let calmLevel = false;
+  let lowerCount = 0;
+  let lowerHurt = 0;
+  let bandSamples = 0;
   let basis = "";
-  for (let k = 0; k < closed.length; k++) {
-    const r = closed[k]!;
-    n += 1;
-    if (r.harmed) hurt += 1;
-    else calmLevel = true;
-    if (k + 1 < closed.length && closed[k + 1]!.level === r.level) continue;
-    if (!calmLevel) continue;
-    calmLevel = false;
-    const share = hurt / n;
-    const baseline = closed.filter((sample) => sample.harmed).length / closed.length;
-    const noise = psiLiftNoise(baseline, n);
-    basis = `${hurt} of ${n} readings at full avg60 <= ${r.level} were followed by a missed tick ` +
-      `(baseline ${Math.round(baseline * 100)}%, lift noise ${Math.round(noise * 100)}%)`;
-    if (share - baseline <= noise) band = r.level;
+  for (let k = 0; k < closed.length;) {
+    const level = closed[k]!.level;
+    let end = k + 1;
+    while (end < closed.length && closed[end]!.level === level) end++;
+    const group = closed.slice(k, end);
+    const hurt = group.filter((sample) => sample.harmed).length;
+    const share = hurt / group.length;
+    // Include this level in its local baseline, but never readings above it: a harmed upper tail must not
+    // raise the baseline used to judge itself. This also gives an isolated miss in a large calm population
+    // W1-T10085's noise allowance.
+    const baseline = (lowerHurt + hurt) / (lowerCount + group.length);
+    const noise = psiLiftNoise(baseline, lowerCount + group.length);
+    basis = `${hurt} of ${group.length} readings at full avg60 ${level} were followed by a missed tick ` +
+      `(harm share ${Math.round(share * 100)}%, prior PSI baseline ${Math.round(baseline * 100)}%, ` +
+      `lift noise ${Math.round(noise * 100)}%)`;
+    const calmAtLevel = group.length - hurt;
+    // A statistically lifted level is not calm. A completely harmed level is excluded even when its self-inclusion
+    // would make the global baseline equal to its harm share (the former false-calm case).
+    if (calmAtLevel > 0) {
+      band = level;
+      bandSamples += calmAtLevel;
+    }
+    lowerCount += group.length;
+    lowerHurt += hurt;
+    k = end;
   }
-  if (band === null) return { band: null, source: "unlearned", samples: calm, basis: `no calm level within noise: ${basis}` };
-  return { band, source: "learned", samples: calm, basis: `learned ${band}: ${basis}` };
+  if (band === null || bandSamples < SWAP_STALL_MIN_SAMPLES) {
+    return { band: null, source: "unlearned", samples: bandSamples,
+      basis: `${bandSamples} of ${SWAP_STALL_MIN_SAMPLES} calm readings; ${band === null ? "no calm level within noise" : "below minimum"}: ${basis}` };
+  }
+  return { band, source: "learned", samples: bandSamples, basis: `learned ${band}: ${basis}` };
 }
 
 /** A field's own noise: twice the standard deviation of its tick-to-tick change over the readings. Fewer than two

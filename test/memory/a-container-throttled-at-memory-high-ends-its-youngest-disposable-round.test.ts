@@ -182,7 +182,7 @@ test("W1-T15181 criterion 2: below the minimum calm sample count the PSI conditi
   assert.equal(thin.band.source, "unlearned");
   assert.equal(thin.band.band, null);
   assert.equal(thin.action, "shed", "a high-count rise and missed ticks in two readings decide alone");
-  const learned = decideContainerShed(calmPsi, { readings: [...calmReadings(T1016, SWAP_STALL_MIN_SAMPLES, 2.9), lag219], episode: {} }, ready);
+  const learned = decideContainerShed(calmPsi, { readings: [...calmReadings(T1016, SWAP_STALL_MIN_SAMPLES + 1, 2.9), lag219], episode: {} }, ready);
   assert.equal(learned.band.source, "learned");
   assert.equal(learned.action, "hold", "PSI inside the learned band holds");
 });
@@ -208,6 +208,38 @@ test("W1-T15181 criterion 2: the band uses W1-T10085's closed windows, history s
   assert.equal(lifted.source, "learned", "harm concentrated at low PSI does not erase the calm higher band");
   assert.equal(lifted.band, 4);
   assert.match(lifted.basis, /baseline/);
+});
+
+test("W1-T15181 criterion 2: a late tick harms the preceding PSI reading even when arrival is beyond five minutes", () => {
+  const now = T1016 + 20 * MIN;
+  const samples = calmReadings(now, SWAP_STALL_MIN_SAMPLES + 1, 2.9, 12 * MIN);
+  const highBeforeStall: ContainerShedReading = {
+    at_ms: now - 9 * MIN, events_high: 1, memory_current_mib: 1, memory_high_mib: 2,
+    psi_full_avg60: 40, missed_ticks: 0,
+  };
+  const lateArrival: ContainerShedReading = {
+    at_ms: now - 2 * MIN, events_high: 2, memory_current_mib: 2, memory_high_mib: 2,
+    psi_full_avg60: 46, missed_ticks: 7,
+  };
+  const band = containerCalmBandOf([...samples, highBeforeStall, lateArrival], now);
+  assert.equal(band.source, "learned", band.basis);
+  assert.equal(band.band, 2.9, "PSI 40 before the delayed arrival is not a calm sample");
+});
+
+test("W1-T15181 criterion 2: a wholly harmed upper PSI level cannot raise the noise baseline and join the band", () => {
+  const now = T1016 + 20 * MIN;
+  const samples = calmReadings(now, SWAP_STALL_MIN_SAMPLES + 5, 2, 12 * MIN);
+  const high: ContainerShedReading[] = Array.from({ length: SWAP_STALL_MIN_SAMPLES }, (_, i) => ({
+    at_ms: now - 10 * MIN + i * 5_000, events_high: 1, memory_current_mib: 1, memory_high_mib: 2,
+    psi_full_avg60: 40, missed_ticks: 1,
+  }));
+  const late: ContainerShedReading = {
+    at_ms: now - 8 * MIN, events_high: 2, memory_current_mib: 2, memory_high_mib: 2,
+    psi_full_avg60: 46, missed_ticks: 1,
+  };
+  const band = containerCalmBandOf([...samples, ...high, late], now);
+  assert.equal(band.source, "learned", band.basis);
+  assert.equal(band.band, 2, "all high PSI readings followed by missed ticks are excluded from the calm band");
 });
 
 test("W1-T15181 criterion 2: one stall among hundreds of calm samples does not erase the learned PSI band", () => {
