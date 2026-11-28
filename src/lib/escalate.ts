@@ -2349,7 +2349,9 @@ export function ghIssueGateway(
     opts.exec ??
     ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   if (route.outcome === "unfiled") {
-    const local = filterIssueGatewayToCodeRepository(issueGatewaySteps(code, run, runStepsSync), code) as IssueGateway;
+    // Unrouted: the code repository's own issues, listed and closed exactly as before this task — never filtered by
+    // body or PR URL, so an unstamped issue it filed itself is always its own to dedupe onto and close.
+    const local = issueGatewaySteps(code, run, runStepsSync) as IssueGateway;
     if (opts.exec === undefined) asyncIssueTwins.set(local, ghIssueGatewayAsync(owner, repo, { destination: () => route }));
     return local;
   }
@@ -2370,9 +2372,7 @@ export function ghIssueGatewayAsync(
   const route = escalationIssueRoute(opts, code);
   if (route.outcome === "unfiled" && route.unrouted !== true) return unfiledIssueGateway(route.reason);
   const run = opts.exec ?? ((args: string[]) => ghTextAsync(args));
-  if (route.outcome === "unfiled") {
-    return filterIssueGatewayToCodeRepository(issueGatewaySteps(code, run, runStepsAsync), code);
-  }
+  if (route.outcome === "unfiled") return issueGatewaySteps(code, run, runStepsAsync); // unrouted: as ghIssueGateway's
   const raw = issueGatewaySteps(route.repository, run, runStepsAsync);
   const gateway = opts.scopeToCodeRepository === false ? raw
     : scopedToCodeRepository(raw, route.repository, code, true);
@@ -2467,40 +2467,36 @@ export function escalationCodeRepository(body: string | undefined): string | und
 }
 
 /** W1-T14998 — the `<owner>/<name>` of the PR referent {@link prReferentFromIssueText} reads (the first `/pull/<n>`),
- *  when that referent is a full GitHub URL; undefined for no referent or a bare path. */
+ *  when that referent is a full GitHub URL; undefined for no referent or a bare path. A reading aid only: no listing
+ *  classifies an issue's owner by the PR it names, whose first link may quote another repository's PR. */
 export function prReferentRepositoryFromIssueText(text: string | undefined): string | undefined {
   return /(?:github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?\/pull\/\d+/.exec(escalationBodyInLegacyOrder(text) ?? "")?.[1];
 }
 
-/** W1-T14998 — whether an issue in a shared escalation pool is `codeRepository`'s: the code repository it records, or,
- *  with none recorded, the repository of the PR it names. An issue recording or naming neither is kept, as before. */
-export function issueIsCodeRepositorys(issue: Pick<OpenIssue, "title" | "body">, codeRepository: string): boolean {
-  const named = escalationCodeRepository(issue.body)
-    ?? (prReferentFromIssueText(issue.body) !== undefined ? prReferentRepositoryFromIssueText(issue.body) : prReferentRepositoryFromIssueText(issue.title));
-  return named === undefined || named.toLowerCase() === codeRepository.toLowerCase();
-}
-
 /** W1-T14998 — whether `issue`, read from a ROUTED listing (a pool other code repositories file in too), is
- *  `codeRepository`'s, for the owner-reply reader, the reconciler and the garden. A recorded code repository decides
- *  (its quoted PR links may be another's); with none, the PR its body and title name must not be another's. */
-export function pooledIssueIsCodeRepositorys(issue: Pick<OpenIssue, "title" | "body">, codeRepository: string): boolean {
-  const recorded = escalationCodeRepository(issue.body);
-  if (recorded !== undefined) return recorded.toLowerCase() === codeRepository.toLowerCase();
-  const same = (named: string | undefined) => named === undefined || named.toLowerCase() === codeRepository.toLowerCase();
-  return same(prReferentRepositoryFromIssueText(issue.body)) && same(prReferentRepositoryFromIssueText(issue.title));
+ *  `codeRepository`'s, for the routed gateways' listings, the owner-reply reader, the reconciler and the garden. The
+ *  code repository it records decides (its quoted PR links may be another's). An issue recording none is a legacy
+ *  one only where it lives in the code repository itself: in the pool it was filed by another, unrouted producer
+ *  (the pool repository's own daemon), never by this one, which stamps every write. PR links never decide. Where it
+ *  lives is `listedFrom`, the repository the listing was read from, when the reader knows it; else its issue URL's. */
+export function pooledIssueIsCodeRepositorys(issue: Pick<OpenIssue, "url" | "body">, codeRepository: string,
+  listedFrom?: string): boolean {
+  const owner = escalationCodeRepository(issue.body) ?? listedFrom ?? issueUrlRepository(issue.url);
+  return owner !== undefined && owner.toLowerCase() === codeRepository.toLowerCase();
 }
 
-/** W1-T14998 — whether `gateway` lists the escalation issues of `owner/repo` from a routed pool: a real gateway
- *  whose escalation repository is not the code repository. A fake or unfiled gateway is never a pool. */
-export function escalationListingIsRouted(owner: string, repo: string, gateway: object): boolean {
-  const route = gatewayRepository.get(gateway);
-  return route !== undefined && route.toLowerCase() !== `${owner}/${repo}`.toLowerCase();
+/** W1-T14998 — whether `gateway` lists escalation issues from a routed pool: a real gateway built on a configured
+ *  escalation repository, the code repository itself included (the ops catalog's daemon files where core and site
+ *  do). Only then does a reader apply {@link pooledIssueIsCodeRepositorys}; an unrouted, fake or unfiled gateway
+ *  lists its own repository's issues unfiltered. The code repository (`_owner`/`_repo`) does not change the answer. */
+export function escalationListingIsRouted(_owner: string, _repo: string, gateway: object): boolean {
+  return gatewayRepository.get(gateway) !== undefined;
 }
 
 /** W1-T14998 — `body` with its code repository recorded first in its machine fields, so it is the one
  *  {@link escalationCodeRepository} reads even when the detail quotes another such line. A body already read as this
  *  repository's, or one the field would push past GitHub's body limit, is returned unchanged (that issue is then
- *  judged by its PR URL). */
+ *  read as the repository it lives in, by {@link pooledIssueIsCodeRepositorys}). */
 export function withCodeRepositoryField(body: string, codeRepository: string): string {
   if (escalationCodeRepository(body)?.toLowerCase() === codeRepository.toLowerCase()) return body;
   const line = `**Code-Repository:** ${codeRepository}`;
@@ -2518,13 +2514,15 @@ export function withCodeRepositoryField(body: string, codeRepository: string): s
 
 /** W1-T14998 — a gateway filing in a configured route for `codeRepository`. A configured route may also be the
  *  producer's own repository while other fleet producers file there, so each issue records its code repository and
- *  its open listing — which dedup, the main-health rung and the reconcilers close from — holds only that repository's issues. */
+ *  its open listing — which dedup, the main-health rung and the reconcilers close from — holds only that repository's
+ *  issues, by {@link pooledIssueIsCodeRepositorys}. */
 export function scopedToCodeRepository(gateway: AsyncIssueGateway, route: string, codeRepository: string,
   filterSameRepository = false): AsyncIssueGateway {
   // A consumer may wrap a repo gateway and scope it to a different logical code repository (owner replies do this).
-  // Preserve that composition unless the producer explicitly opted into a configured pool, even when route === code.
+  // `filterSameRepository` says `route` is a configured pool even when it is the code repository; without it a
+  // repository listed for itself is unrouted, and stays unfiltered and unstamped.
   if (!filterSameRepository && route.toLowerCase() === codeRepository.toLowerCase()) return gateway;
-  const own = (open: OpenIssue[]) => open.filter((issue) => issueIsCodeRepositorys(issue, codeRepository));
+  const own = (open: OpenIssue[]) => open.filter((issue) => pooledIssueIsCodeRepositorys(issue, codeRepository, route));
   const { create, listOpen, editBody } = gateway;
   return {
     ...gateway,
@@ -2535,18 +2533,6 @@ export function scopedToCodeRepository(gateway: AsyncIssueGateway, route: string
     } } : {}),
     ...(editBody ? { editBody: (url: string, body: string) => editBody(url, withCodeRepositoryField(body, codeRepository)) } : {}),
   };
-}
-
-/** Keep an unrouted repository's legacy writes and body shape, while preventing an issue filed there for another
- *  code repository from being deduped or closed by this repository's own producers. */
-function filterIssueGatewayToCodeRepository<T extends IssueGateway | AsyncIssueGateway>(gateway: T, codeRepository: string): T {
-  const { listOpen } = gateway;
-  if (listOpen === undefined) return gateway;
-  const own = (open: OpenIssue[]) => open.filter((issue) => issueIsCodeRepositorys(issue, codeRepository));
-  return { ...gateway, listOpen: (label: string) => {
-    const open = listOpen(label);
-    return open instanceof Promise ? open.then(own) : own(open);
-  } } as T;
 }
 
 /** W1-T14998 — the repository a gateway files in, or undefined for a fake gateway or one that files nowhere. */
@@ -2660,7 +2646,10 @@ export function ghIssueGatewayGraphql(
       return url;
     },
   };
-  const scoped = scopedToCodeRepository(gateway, repoArg, `${codeOwner}/${codeRepo}`);
+  // Unrouted, it lists the code repository's own issues as the REST forms do; routed, it is the same pool they scope
+  // (a route naming the code repository itself included), so its listing and writes are scoped the same way.
+  if (route.outcome === "unfiled") return gateway;
+  const scoped = scopedToCodeRepository(gateway, repoArg, code, true);
   gatewayRepository.set(scoped, repoArg);
   return scoped;
 }

@@ -26,7 +26,7 @@ import { ledgerPathFor } from "./ledger-path.js";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
-import { escalationListingIsRouted, escalationTaskId, issueUrlRepository, pooledIssueIsCodeRepositorys, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText, escalationHeadSha } from "./escalate.js";
+import { escalationListingIsRouted, escalationTaskId, issueGatewayRepository, issueUrlRepository, pooledIssueIsCodeRepositorys, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText, escalationHeadSha } from "./escalate.js";
 import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, classifyChangesRequested, pullReviewsRestArgs, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation, combinedStatusRestArgs, openPrsRestArgs, MERGE_STATE_HYDRATION_CAP, SCANNER_BLOCKER_HYDRATION_CAP, REVIEW_QUEUE_HOLD_READ_CAP, CODEQL_HEAD_ALERT_HYDRATION_CAP, WORKFLOW_RUN_HYDRATION_CAP, type MergeStateObservation, createHeadReadGate, recordHeadReadCounts, type HeadReadGate } from "./open-prs-rest.js";
 import { peekChangedHeads, pruneAcknowledgedChangedHeads } from "./github-event-wake.js";
 import { readDrainLock } from "./drain-lock.js";
@@ -3631,6 +3631,7 @@ export async function buildEscalationReconcileCandidatesAsync(
   }
   return buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
     ...injected, issues: { listOpen: () => open }, routed: injected.routed ?? escalationListingIsRouted(owner, repo, source),
+    listedFrom: injected.listedFrom ?? issueGatewayRepository(source),
   });
 }
 
@@ -3654,6 +3655,8 @@ export function buildEscalationReconcileCandidates(
     creditIo?: Pick<DeriveDeps, "readCreditStore" | "writeCreditStore">;
     /** W1-T14998 — the listing is a routed pool other code repositories file in too. Omitted: read off the gateway. */
     routed?: boolean;
+    /** W1-T14998 — the repository a routed listing was read from. Omitted: read off the gateway, else each issue URL's. */
+    listedFrom?: string;
   } = {},
 ): EscalationReconcileCandidate[] {
   const issues = injected.issues ?? ghIssueGateway(owner, repo);
@@ -3689,11 +3692,13 @@ export function buildEscalationReconcileCandidates(
   const candidates: EscalationReconcileCandidate[] = [];
   const codeRepository = `${owner}/${repo}`;
   const routed = injected.routed ?? escalationListingIsRouted(owner, repo, issues);
+  const listedFrom = injected.listedFrom ?? issueGatewayRepository(issues);
   for (const issue of open) {
-    // W1-T14998: from a routed listing (an escalation repository other code repositories file in too), an issue
-    // recording another code repository, or naming another repository's PR, is not this reconciler's: its task id and
-    // PR number are resolved HERE, so another repository's PR-<n> would otherwise be closed by this one's PR #<n>.
-    if (routed && !pooledIssueIsCodeRepositorys(issue, codeRepository)) continue; // another repository's: its own reconciler's
+    // W1-T14998: from a routed listing (an escalation repository other code repositories file in too, this one's own
+    // included), an issue recording another code repository, or recording none outside this code repository, is not
+    // this reconciler's: its task id and PR number are resolved HERE, so another repository's PR-<n> would otherwise be
+    // closed by this one's PR #<n>. An unrouted listing is this repository's own issues, never filtered by body.
+    if (routed && !pooledIssueIsCodeRepositorys(issue, codeRepository, listedFrom)) continue; // another repository's: its own reconciler's
     const taskId = escalationTaskId(issue.body);
     if (!taskId) {
       intake.droppedNoTaskTrailer++;

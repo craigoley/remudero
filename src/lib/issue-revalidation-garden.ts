@@ -31,7 +31,7 @@ import { loadConfig, type Config, type WorkerProviderId } from "./config.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import {
-  escalationBodyInLegacyOrder, escalationHeadSha, escalationIssueRepository, ghIssueGatewayAsync, pooledIssueIsCodeRepositorys, prReferentFromIssueText, splitConcatenatedJsonPages,
+  escalationBodyInLegacyOrder, escalationHeadSha, escalationIssueRepository, ghIssueGatewayAsync, hostEscalationDestination, pooledIssueIsCodeRepositorys, prReferentFromIssueText, splitConcatenatedJsonPages,
   type AsyncIssueGateway,
 } from "./escalate.js";
 import { feedbackCaptured, stageFeedbackCapture } from "./feedback.js";
@@ -1283,7 +1283,10 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
   });
   const repoArg = `${opts.owner}/${opts.repo}`;
   // W1-T14998: escalation issues are listed and read where they are filed; pull requests stay on the code repository.
-  const [issueOwner, issueRepo] = escalationIssueRepository(opts.owner, opts.repo);
+  const destination = hostEscalationDestination();
+  const [issueOwner, issueRepo] = escalationIssueRepository(opts.owner, opts.repo, () => destination);
+  // A configured escalation repository is a pool other code repositories file in, even when it is this one.
+  const pooled = destination.outcome === "named";
   const sinceIso = () => fixedClock(clock.now() - ISSUE_REVALIDATION_LEDGER_WINDOW_MS).iso();
   let ownRows: Array<Record<string, unknown>> | undefined;
   const rows = () => (ownRows ??= readLedgerRows([ISSUE_REVALIDATION_VERDICT_STEP, "read_model.consistency"], sinceIso()));
@@ -1297,11 +1300,10 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
     clock,
     log: opts.log,
     listOpenIssues: async () => {
-      // W1-T14998: the escalation repository is a pool other code repositories file in; this garden judges (and closes)
-      // only the issues that record no other code repository and name none of another's PRs.
-      const pooled = `${issueOwner}/${issueRepo}`.toLowerCase() !== repoArg.toLowerCase();
+      // W1-T14998: from a pool this garden judges (and closes) only the issues that record this code repository, or
+      // record none and live in it; unrouted, its own repository's issues are all its own, as before.
       listed = parseOpenIssuesRest(await readText(openIssuesRestArgs(issueOwner, issueRepo)))
-        .filter((issue) => !pooled || pooledIssueIsCodeRepositorys(issue, repoArg));
+        .filter((issue) => !pooled || pooledIssueIsCodeRepositorys(issue, repoArg, `${issueOwner}/${issueRepo}`));
       stepRows = undefined;
       commits = undefined;
       shardList = undefined;

@@ -66,10 +66,10 @@ import { readQueuedFeedbackRecords } from "./feedback-landing.js";
 import {
   ASK_TYPE_LABEL,
   escalationBodyInLegacyOrder,
-  escalationCodeRepository,
   escalationTaskId,
   escalationIssueTitle,
   ghIssueGatewayAsync,
+  issueGatewayRepository,
   labelledIssuesRestArgs,
   parseLabelledIssuesRest,
   pooledIssueIsCodeRepositorys,
@@ -261,11 +261,13 @@ export function ghEscalationAnswerGateway(
     };
   }
   const repoArg = `${owner}/${repo}`;
-  // A pool other code repositories file in too: an issue recording another, or none and naming another's PR, is theirs.
-  // In its own repository, only an issue recording another code repository (filed there for it) is skipped.
-  const own = codeRepository.toLowerCase() === repoArg.toLowerCase()
-    ? (issue: ListedIssue) => (escalationCodeRepository(issue.body) ?? codeRepository).toLowerCase() === codeRepository.toLowerCase()
-    : (issue: ListedIssue) => pooledIssueIsCodeRepositorys(issue, codeRepository);
+  // The alarm gateway, unscoped: it names the host's route for `repoArg`, so it says whether these issues are a pool.
+  const refusalRaw = ghIssueGatewayAsync(owner, repo, { exec: readText, scopeToCodeRepository: false });
+  // W1-T14998: a pool when the issues live in another repository than the code one, or when a configured escalation
+  // repository is this one (the ops catalog's daemon reads the pool core and site file in). Only a pool is filtered,
+  // with the reconciler's rule; an unrouted reader of its own repository answers every issue there, as on main.
+  const routed = codeRepository.toLowerCase() !== repoArg.toLowerCase() || issueGatewayRepository(refusalRaw) !== undefined;
+  const own = (issue: ListedIssue): boolean => !routed || pooledIssueIsCodeRepositorys(issue, codeRepository, repoArg);
   const run = (args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   const parents = new Map<number, FeedbackAdmissionSubject>();
   const adminReads = new Map<string, Promise<boolean>>();
@@ -299,8 +301,9 @@ export function ghEscalationAnswerGateway(
       }
       return read;
     },
-    refusalIssues: scopedToCodeRepository(ghIssueGatewayAsync(owner, repo,
-      { exec: readText, scopeToCodeRepository: false }), repoArg, codeRepository),
+    // Routed, its alarm lists, dedupes onto and stamps only this code repository's pooled issues, the pool being this
+    // repository itself included; unrouted, it is the repository's own gateway, unfiltered and unstamped.
+    refusalIssues: scopedToCodeRepository(refusalRaw, repoArg, codeRepository, routed),
     async listOpen(label) {
       const raw = await readText(labelledIssuesRestArgs(repoArg, label, "open"));
       const listed = parseLabelledIssuesRest(raw);

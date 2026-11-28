@@ -18,7 +18,7 @@ import {
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { sreOperatorEscalation } from "#src/lib/sre-runbooks.js";
 import { productionIssueRevalidationPorts } from "#src/lib/issue-revalidation-garden.js";
-import { attachEscalationConditions, buildEscalationReconcileCandidates } from "#src/lib/tick-read-worker.js";
+import { attachEscalationConditions, buildEscalationReconcileCandidates, buildEscalationReconcileCandidatesAsync } from "#src/lib/tick-read-worker.js";
 import { buildMainHealthRung } from "#src/lib/main-health-rung.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { hostAlertIssueGateway } from "#src/lib/launcher-host-alerts.js";
@@ -443,7 +443,8 @@ test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery close
   await opsRecovery();
   assert.deepEqual(gh.issues.map((issue) => [issue.url, issue.state]), [[coreUrl, "open"], [siteUrl, "closed"], [opsUrl, "closed"]]);
   // Core's reconciler, over the routed ops pool, follows an explicit code-repository field even if a grill cites a
-  // different PR. For legacy issues without that field, it still judges by the PR repository as the listing does.
+  // different PR. An issue recording none is core's legacy only in core itself: in the pool it is another producer's
+  // (the ops daemon's own unrouted filing), whatever PR it names.
   const askedPrs: number[] = [];
   const github = { prByRef: (n: number) => (askedPrs.push(n), { number: n, url: `https://github.com/${code}/pull/${n}`, state: "MERGED" }),
     prByTrailer: () => undefined, mergedNewestFirst: () => [] };
@@ -462,19 +463,28 @@ test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery close
       { issues: { listOpen: () => pool }, github: github as never, evidenceRootFor: () => undefined, routed })
       .map((c) => [c.issueNumber, c.derived.merged]);
   };
-  assert.deepEqual(reconcile(true), [[4, true], [5, true], [6, true], [7, true], [8, true]],
-    "an explicit core ownership field wins; unrecorded legacy issues still follow their PR repository");
-  assert.deepEqual(askedPrs, [44, 45, 46, 47, 48]);
+  assert.deepEqual(reconcile(true), [[5, true], [6, true], [7, true]],
+    "an explicit core ownership field wins; an unrecorded issue is core's only where it lives in core");
+  assert.deepEqual(askedPrs, [45, 46, 47]);
   assert.deepEqual(reconcile().map(([n]) => n), [3, 4, 5, 6, 7, 8, 9], "control: a listing that is not routed applies no pool rule");
-  // A routed gateway is read as routed; one filing in its own code repository, or a fake, is not.
+  // A gateway on a configured route is read as routed, the ops daemon's own route to ops included; a fake or an
+  // unrouted one is not.
   assert.equal(escalationListingIsRouted(CODE.owner, CODE.repo, core), true);
-  assert.equal(escalationListingIsRouted(OPS.split("/")[0]!, OPS.split("/")[1]!, ghIssueGateway("craigoley", "remudero-ops", { exec: gh.exec, destination: toOps })), false);
+  assert.equal(escalationListingIsRouted(OPS.split("/")[0]!, OPS.split("/")[1]!, ghIssueGateway("craigoley", "remudero-ops", { exec: gh.exec, destination: toOps })), true);
+  assert.equal(escalationListingIsRouted(OPS.split("/")[0]!, OPS.split("/")[1]!, ghIssueGateway("craigoley", "remudero-ops", { exec: gh.exec, destination: nowhere })), false);
   assert.equal(escalationListingIsRouted(CODE.owner, CODE.repo, { listOpen: () => pool }), false);
-  // The revalidation garden, which closes what it lists, lists only core's issues out of the ops pool.
-  const rest = JSON.stringify(pool.map((issue) => ({ number: issue.number, html_url: issue.url, title: issue.title, body: issue.body })));
+  // The revalidation garden, which closes what it lists, lists only core's issues out of the ops pool's own listing.
+  const rest = JSON.stringify(pool.filter((issue) => issueUrlRepository(issue.url) === OPS)
+    .map((issue) => ({ number: issue.number, html_url: issue.url, title: issue.title, body: issue.body })));
   const ports = withEnv(OPS, () => productionIssueRevalidationPorts({ ...CODE, stateDir: tmpdir(), repoRoot: tmpdir(), log: () => {},
     referentVerdicts: async () => new Map(), hasReferent: () => false, judgeText: async () => "", readText: async () => rest } as never));
-  assert.deepEqual((await ports.listOpenIssues()).map((issue) => issue.number), [4, 5, 6, 7, 8]);
+  assert.deepEqual((await ports.listOpenIssues()).map((issue) => issue.number), [5, 6]);
+  // The ops daemon's own garden, routed to ops itself, is a pool reader too: core's and site's recorded issues are
+  // not its to close, while an unrecorded one living in ops is its own.
+  const opsPorts = withEnv(OPS, () => productionIssueRevalidationPorts({ owner: "craigoley", repo: "remudero-ops", stateDir: tmpdir(),
+    repoRoot: tmpdir(), log: () => {}, referentVerdicts: async () => new Map(), hasReferent: () => false, judgeText: async () => "",
+    readText: async () => rest } as never));
+  assert.deepEqual((await opsPorts.listOpenIssues()).map((issue) => issue.number), [4, 8, 9]);
 });
 
 test("W1-T14998 criterion 4: unrouted public and private managed repositories file in themselves" +
@@ -536,19 +546,6 @@ test("W1-T14998 criterion 4: unrouted public and private managed repositories fi
   graphqlCalls.length = 0;
   assert.deepEqual(await ghIssueGatewayGraphql("craigoley", "arcade", { exec: graphql(false), destination: nowhere }).listOpen?.(NEEDS_HUMAN_LABEL), []);
   assert.deepEqual(graphqlCalls, ["issues"], "public managed repositories are listed directly too");
-  // An unrouted ops repo keeps its pre-task body shape but ignores a core issue routed into the same repository when
-  // searching for duplicates. Its own escalation opens separately and subsequent recovery can see it.
-  const shared = fakeGh();
-  const coreGateway = ghIssueGateway(CODE.owner, CODE.repo, { exec: shared.exec, destination: toOps });
-  const opsGateway = ghIssueGateway("craigoley", "remudero-ops", { exec: shared.exec, destination: nowhere });
-  const sameKey = escalation({ class: "BLOCKED", taskId: "MAIN-HEALTH", summary: "main is red", detail: "ci failed" });
-  const coreIssue = withLiveWritesAllowed(() => escalate(sameKey, { issues: coreGateway, ledgerPath: path, runId: "CORE-POOL" }));
-  const opsIssue = withLiveWritesAllowed(() => escalate(sameKey, { issues: opsGateway, ledgerPath: path, runId: "OPS-LOCAL" }));
-  assert.notEqual(opsIssue, coreIssue, "the unrouted ops producer ignores core's pooled issue");
-  assert.equal(escalationCodeRepository(shared.issues.find((issue) => issue.url === coreIssue)?.body), CORE_REPO);
-  assert.equal(escalationCodeRepository(shared.issues.find((issue) => issue.url === opsIssue)?.body), undefined,
-    "unrouted ops filing keeps the legacy body with no ownership field");
-  assert.equal(withLiveWritesAllowed(() => escalate(sameKey, { issues: opsGateway, ledgerPath: path, runId: "OPS-LOCAL-2" })), opsIssue);
 });
 
 /** An owner-reply reader over `pool`'s open issues: each has one owner comment answering `re-review`. */
@@ -607,6 +604,8 @@ test("W1-T14998 criterion 5: an owner reply on another repository's pooled issue
     { number: 4, body: withCodeRepositoryField(answerable("W1-T15501", {
       summary: `PR ${SITE_PR} needs a review`, detail: `Review of ${SITE_PR} stalled.`,
     }), CORE_REPO), reactions: [{ id: 401, content: "+1", login: "craigoley" }] },
+    // Recording none and naming no PR, filed in the pool: the ops daemon's own unrouted filing, never core's.
+    { number: 5, body: answerable("W1-T15500", { summary: "proof runner cannot load test files", detail: "no PR named" }) },
   ]);
   const { result, stored, ignored } = await core.read();
   assert.deepEqual(stored, [["W1-T15500", "issue#3:comment:300"], ["W1-T15501", "issue#4:comment:400"],
@@ -614,26 +613,30 @@ test("W1-T14998 criterion 5: an owner reply on another repository's pooled issue
   assert.deepEqual(core.reacted, [300, 400, 4], "accepted comments and reactions are acknowledged");
   assert.equal(result.accepted, 3);
   assert.deepEqual(ignored, [], "another repository's issue writes no refusal row");
-  assert.equal(core.reads.some((at) => /\/issues\/[12]\//.test(at)), false, "another repository's issue is never read");
-  // The ops daemon reads its own repository, which is also the pool: an issue recording another code repository is skipped.
-  const ops = poolReader(t, OPS, undefined, [
+  assert.equal(core.reads.some((at) => /\/issues\/[125]\//.test(at)), false, "another repository's issue is never read");
+  // The ops daemon reads its own repository, which is also the pool it routes to: an issue recording another code
+  // repository is skipped, and one recording none, living in ops, is its own.
+  const ops = withEnv(OPS, () => poolReader(t, OPS, undefined, [
     { number: 1, body: withCodeRepositoryField(answerable("W1-T15500"), CORE_REPO) },
     { number: 4, body: answerable("W1-T15502", { summary: "ops plan lint is red", detail: "no PR" }) },
-  ]);
+  ]));
   const opsRead = await ops.read();
   assert.deepEqual(opsRead.stored, [["W1-T15502", "issue#4:comment:400"]]);
   assert.deepEqual([ops.reacted, opsRead.ignored], [[400], []]);
 });
 
 test("W1-T14998 criterion 6: an owner reply on this repository's own issue lands as before", async (t) => {
-  // A routed reader answers its own recorded issue and a legacy one recording none and naming no other repository's PR.
+  // A routed reader answers its own recorded issues in the pool, by comment and by reaction. (Its legacy issues, filed
+  // before this task, live in the code repository itself: below.)
   const routed = poolReader(t, OPS, CORE_REPO, [
     { number: 3, body: withCodeRepositoryField(answerable("W1-T15500"), CORE_REPO) },
-    { number: 5, body: answerable("W1-T15501", { summary: "proof runner cannot load test files", detail: "no PR named" }) },
+    { number: 5, body: withCodeRepositoryField(answerable("W1-T15501", { summary: "proof runner cannot load test files", detail: "no PR named" }), CORE_REPO),
+      reactions: [{ id: 501, content: "+1", login: "craigoley" }] },
   ]);
   const routedRead = await routed.read();
-  assert.deepEqual(routedRead.stored, [["W1-T15500", "issue#3:comment:300"], ["W1-T15501", "issue#5:comment:500"]]);
-  assert.deepEqual([routed.reacted, routedRead.result.accepted], [[300, 500], 2]);
+  assert.deepEqual(routedRead.stored, [["W1-T15500", "issue#3:comment:300"], ["W1-T15501", "issue#5:comment:500"],
+    ["W1-T15501", "issue#5:reaction:501"]]);
+  assert.deepEqual([routed.reacted, routedRead.result.accepted], [[300, 500, 5], 3]);
   // An unrouted reader over its own code repository answers every issue there, legacy and recorded, as origin/main did
   // before this pool filter existed. This pre-field issue deliberately quotes site's PR: the owner comment and reaction
   // must still land exactly as they did on main because the issue itself lives in core.
@@ -766,4 +769,211 @@ test("W1-T14998: routed answers include legacy code-repository issues and scope 
   assert.ok(create.includes(OPS), "refusal alarms remain in the configured escalation repository");
   assert.ok(create.some(value => value.includes(`**Code-Repository:** ${CORE_REPO}`)),
     "the shared-pool issue records its code repository for scoped dedup and recovery");
+});
+
+type FakeIssue = ReturnType<typeof fakeGh>["issues"][number];
+
+/** A `gh api graphql` stand-in over `pool`: the open-issue page query, the repository/label id read (each id is the
+ *  repository's or label's own name) and the createIssue mutation. */
+function fakeGraphql(pool: FakeIssue[]) {
+  return async (args: string[]): Promise<string> => {
+    const vars = new Map<string, string>(), labelIds: string[] = [];
+    args.forEach((arg, i) => {
+      if (args[i - 1] !== "-f") return;
+      const at = arg.indexOf("=");
+      if (arg.startsWith("labelIds[]=")) labelIds.push(arg.slice(at + 1)); else vars.set(arg.slice(0, at), arg.slice(at + 1));
+    });
+    const query = vars.get("query")!;
+    if (query.startsWith("mutation")) {
+      const repo = vars.get("repositoryId")!, number = pool.length + 1, url = `https://github.com/${repo}/issues/${number}`;
+      pool.push({ repo, number, url, title: vars.get("title")!, body: vars.get("body")!, labels: labelIds, state: "open" });
+      return JSON.stringify({ data: { createIssue: { issue: { url } } } });
+    }
+    const repo = `${vars.get("owner")}/${vars.get("name")}`;
+    if (query.includes("issues(labels:")) {
+      const nodes = pool.filter((issue) => issue.repo === repo && issue.state === "open" && issue.labels.includes(vars.get("label")!))
+        .map(({ number, url, title, body }) => ({ number, url, title, body }));
+      return JSON.stringify({ data: { repository: { issues: { nodes, pageInfo: { hasNextPage: false } } } } });
+    }
+    const labels = [...vars].filter(([key]) => /^l\d+$/.test(key)).map(([key, name]) => [key, { id: name }]);
+    return JSON.stringify({ data: { repository: { id: repo, ...Object.fromEntries(labels) } } });
+  };
+}
+
+const MAIN_RED = escalation({ class: "BLOCKED", taskId: "MAIN-HEALTH", summary: "main's own check suite is red", detail: "required check ci failed on main" });
+const OPS_OWNER = OPS.split("/")[0]!, OPS_REPO = OPS.split("/")[1]!;
+/** Whether `issues`' open listing, over every label `issue` carries, holds `issue`. */
+const lists = async (issues: { listOpen?: (label: string) => unknown }, issue: FakeIssue) => {
+  for (const label of issue.labels) {
+    if ((await (issues.listOpen!(label) as Promise<Array<{ url: string }>>)).some((open) => open.url === issue.url)) return true;
+  }
+  return false;
+};
+
+test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery closes it, over the quota notice's GraphQL"
+  + " gateway on a shared pool", async (t) => {
+  // Reviewer finding (escalate.ts ghIssueGatewayGraphql): the ops daemon's GraphQL gateway, routed to ops itself, listed
+  // core's pooled issues, deduped onto them, and its reconciler took core's PR-45 ask as ops's PR #45.
+  const { path } = ledger(t);
+  const pool: FakeIssue[] = [];
+  const exec = fakeGraphql(pool);
+  const core = ghIssueGatewayGraphql(CODE.owner, CODE.repo, { exec, destination: toOps });
+  const coreUrl = await withLiveWritesAllowed(() => escalateAsync(MAIN_RED, { issues: core, ledgerPath: path, runId: "CORE-GQL" }));
+  const coreIssue = pool.find((issue) => issue.url === coreUrl)!;
+  assert.deepEqual([coreIssue.repo, escalationCodeRepository(coreIssue.body)], [OPS, CORE_REPO], "routed GraphQL writes are stamped");
+  const ops = ghIssueGatewayGraphql(OPS_OWNER, OPS_REPO, { exec, destination: toOps });
+  assert.equal(escalationListingIsRouted(OPS_OWNER, OPS_REPO, ops), true, "a route naming the code repository itself is a pool");
+  assert.equal(await lists(ops, coreIssue), false, "the routed pool excludes another repository's stamped issue");
+  assert.equal(await lists(ghIssueGatewayGraphql(OPS_OWNER, OPS_REPO, { exec, destination: nowhere }), coreIssue), true,
+    "control: the same repository listed unrouted is unfiltered");
+  const opsUrl = await withLiveWritesAllowed(() => escalateAsync(MAIN_RED, { issues: ops, ledgerPath: path, runId: "OPS-GQL-1" }));
+  assert.notEqual(opsUrl, coreUrl, "ops's red main never folds onto core's");
+  assert.equal(escalationCodeRepository(pool.find((issue) => issue.url === opsUrl)?.body), OPS);
+  assert.equal(await withLiveWritesAllowed(() => escalateAsync(MAIN_RED, { issues: ops, ledgerPath: path, runId: "OPS-GQL-2" })), opsUrl,
+    "a re-escalation reuses its own issue");
+  // Ops's reconciler over that GraphQL listing never resolves core's PR-45 as ops's PR #45.
+  pool.push({ repo: OPS, number: 90, url: `https://github.com/${OPS}/issues/90`, title: "[BLOCKED] PR-45: stalled",
+    body: `**Code-Repository:** ${CORE_REPO}\n**Class:** BLOCKED\n**Task:** PR-45\n`, labels: [NEEDS_HUMAN_LABEL], state: "open" });
+  const asked: number[] = [];
+  const github = { prByRef: (n: number) => (asked.push(n), { number: n, url: `https://github.com/${OPS}/pull/${n}`, state: "MERGED" }),
+    prByTrailer: () => undefined, mergedNewestFirst: () => [] };
+  const reconcile = async (issues: ReturnType<typeof ghIssueGatewayGraphql>) => {
+    asked.length = 0;
+    const candidates = await buildEscalationReconcileCandidatesAsync(OPS_OWNER, OPS_REPO, { tasks: [], byId: new Map() } as never, path, () => {},
+      { issues, github: github as never, evidenceRootFor: () => undefined });
+    return [candidates.some((c) => c.issueNumber === 90), asked.includes(45)];
+  };
+  assert.deepEqual(await reconcile(ops), [false, false], "core's pooled PR-45 is not ops's to resolve");
+  assert.deepEqual(await reconcile(ghIssueGatewayGraphql(OPS_OWNER, OPS_REPO, { exec, destination: nowhere })), [true, true],
+    "control: an unrouted listing applies no pool rule");
+  // Unrouted, a managed repository's GraphQL listing keeps an unstamped issue of its own whose first /pull/ URL names
+  // another repository (core's), and a re-escalation reuses it.
+  const site = ghIssueGatewayGraphql("craigoley", "site", { exec, destination: nowhere });
+  assert.equal(escalationListingIsRouted("craigoley", "site", site), false);
+  const siteUrl = await withLiveWritesAllowed(() => escalateAsync(escalation(), { issues: site, ledgerPath: path, runId: "SITE-GQL-1" }));
+  const siteIssue = pool.find((issue) => issue.url === siteUrl)!;
+  assert.deepEqual([siteIssue.repo, escalationCodeRepository(siteIssue.body), prReferentRepositoryFromIssueText(siteIssue.body)],
+    ["craigoley/site", undefined, CORE_REPO], "precondition: unstamped, its first PR link core's");
+  assert.equal(await lists(site, siteIssue), true, "the unrouted listing keeps it");
+  assert.equal(await withLiveWritesAllowed(() => escalateAsync(escalation(), { issues: site, ledgerPath: path, runId: "SITE-GQL-2" })), siteUrl);
+});
+
+test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery closes it, routed core never folding onto"
+  + " the ops daemon's unstamped issue", async (t) => {
+  // Reviewer finding (escalate.ts scopedToCodeRepository): an unrouted ops daemon filed an unstamped MAIN-HEALTH into
+  // the pool; routed core kept it as "recording no repository, naming no PR", deduped onto it and closed it when green.
+  const gh = fakeGh();
+  const { path } = ledger(t);
+  const byUrl = (url: string) => gh.issues.find((issue) => issue.url === url)!;
+  const opsLocal = ghIssueGateway(OPS_OWNER, OPS_REPO, { exec: gh.exec, destination: nowhere });
+  const opsUrl = withLiveWritesAllowed(() => escalate(MAIN_RED, { issues: opsLocal, ledgerPath: path, runId: "OPS-1" }));
+  assert.equal(escalationCodeRepository(byUrl(opsUrl).body), undefined, "unrouted ops files unstamped, as before this task");
+  // Its unrouted listing keeps an unstamped issue of its own whose first /pull/ URL names core's PR: dedup reuses it.
+  const askUrl = withLiveWritesAllowed(() => escalate(escalation({ taskId: "W1-T15600" }), { issues: opsLocal, ledgerPath: path, runId: "OPS-2" }));
+  assert.equal(prReferentRepositoryFromIssueText(byUrl(askUrl).body), CORE_REPO, "precondition: its first PR link is core's");
+  assert.equal(await lists(opsLocal, byUrl(askUrl)), true, "the unrouted listing keeps it");
+  assert.equal(withLiveWritesAllowed(() => escalate(escalation({ taskId: "W1-T15600" }), { issues: opsLocal, ledgerPath: path, runId: "OPS-3" })), askUrl);
+  // Routed core lists neither ops issue: unstamped in the pool is never core's, whatever PR it names.
+  const core = ghIssueGateway(CODE.owner, CODE.repo, { exec: gh.exec, destination: toOps });
+  assert.deepEqual([await lists(core, byUrl(opsUrl)), await lists(core, byUrl(askUrl))], [false, false]);
+  const coreUrl = withLiveWritesAllowed(() => escalate(MAIN_RED, { issues: core, ledgerPath: path, runId: "CORE-1" }));
+  assert.notEqual(coreUrl, opsUrl, "core's red main opens its own issue, never ops's");
+  assert.equal(escalationCodeRepository(byUrl(coreUrl).body), CORE_REPO);
+  assert.equal(withLiveWritesAllowed(() => escalate(MAIN_RED, { issues: core, ledgerPath: path, runId: "CORE-2" })), coreUrl);
+  // The routed pool still excludes another repository's stamped issue: site's routed listing never holds core's.
+  const site = ghIssueGateway("craigoley", "site", { exec: gh.exec, destination: toOps });
+  assert.equal(await lists(site, byUrl(coreUrl)), false);
+  assert.equal(await lists(core, byUrl(coreUrl)), true, "control: core's own routed listing holds it");
+  // Core's main goes green: it closes its own issue and leaves the ops daemon's open.
+  const logged: Array<Record<string, unknown>> = [];
+  await buildMainHealthRung(CODE.owner, CODE.repo, {
+    fetch: async (args: string[]): Promise<unknown> => {
+      const at = args[1]!;
+      if (at === `repos/${CORE_REPO}`) return { default_branch: "main" };
+      if (at === `repos/${CORE_REPO}/commits/main`) return { sha: "e".repeat(40) };
+      if (at.includes("/check-runs?")) return { check_runs: [{ id: 11, name: "ci", status: "completed", conclusion: "success" }] };
+      if (at.endsWith("/status")) return { statuses: [] };
+      if (at.includes("/actions/runs?")) return { workflow_runs: [] };
+      throw new Error(`unrouted core recovery read: ${at}`);
+    },
+    ledgerPath: path, runId: "CORE-RUNG", log: (step, extra) => void logged.push({ step, ...extra }),
+    readRequiredChecks: () => ["ci"], issues: core,
+  })();
+  assert.deepEqual(logged.filter((row) => row.step === "main.health.resolved").map((row) => row.issue_url), [coreUrl]);
+  assert.deepEqual([opsUrl, askUrl, coreUrl].map((url) => byUrl(url).state), ["open", "open", "closed"]);
+});
+
+test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery closes it, the ops reader's refusal alarm"
+  + " scoped to its own pooled issues", async (t) => {
+  // Reviewer finding (escalation-answers.ts refusalIssues): for an ops daemon routed to ops, route equalled the code
+  // repository, so its refusal alarm listed core's pooled issues unfiltered and deduped onto core's alarm.
+  const url = (n: number) => `https://github.com/${OPS}/issues/${n}`;
+  const rows = JSON.stringify([
+    { number: 1, html_url: url(1), state: "open", title: "[BLOCKED] core alarm", body: `**Code-Repository:** ${CORE_REPO}\n**Task:** W1-T15700\n` },
+    { number: 2, html_url: url(2), state: "open", title: "[MANUAL] W1-T15701", body: answerable("W1-T15701") },
+    { number: 3, html_url: url(3), state: "open", title: "[BLOCKED] ops alarm", body: `**Code-Repository:** ${OPS}\n**Task:** W1-T15702\n` },
+  ]);
+  const created: string[] = [];
+  const exec = async (args: string[]): Promise<string> => {
+    if (args[0] === "api" && args[1]?.startsWith(`repos/${OPS}/issues?`)) return rows;
+    if (args[0] === "issue" && args[1] === "create") { created.push(args[args.indexOf("--body") + 1]!); return `${url(4)}\n`; }
+    throw new Error(`unexpected ops answer call ${args.join(" ")}`);
+  };
+  assert.equal(prReferentRepositoryFromIssueText(answerable("W1-T15701")), CORE_REPO, "precondition: #2's first PR link is core's");
+  const numbers = async (open: Promise<Array<{ number: number }>> | Array<{ number: number }> | undefined) => (await open)?.map((i) => i.number);
+  const routed = withEnv(OPS, () => ghEscalationAnswerGateway(OPS_OWNER, OPS_REPO, exec));
+  assert.deepEqual(await numbers(routed.refusalIssues!.listOpen?.(NEEDS_HUMAN_LABEL)), [2, 3],
+    "the routed pool excludes another repository's stamped issue from the alarm's dedup listing");
+  assert.deepEqual(await numbers(routed.listOpen(NEEDS_HUMAN_LABEL)), [2, 3], "and from the answers it reads");
+  await withLiveWritesAllowed(async () => routed.refusalIssues!.create("ops refusal", "alarm detail", [NEEDS_HUMAN_LABEL]));
+  assert.equal(escalationCodeRepository(created[0]), OPS, "a routed alarm is stamped");
+  // Unrouted, the ops reader is its own repository's, as on main: nothing is filtered by body or PR URL, so its own
+  // unstamped #2, whose first /pull/ URL names core, is kept, and its alarm is written unstamped.
+  const unrouted = withHostHome(t, undefined, () => ghEscalationAnswerGateway(OPS_OWNER, OPS_REPO, exec));
+  assert.deepEqual(await numbers(unrouted.refusalIssues!.listOpen?.(NEEDS_HUMAN_LABEL)), [1, 2, 3]);
+  assert.deepEqual(await numbers(unrouted.listOpen(NEEDS_HUMAN_LABEL)), [1, 2, 3]);
+  await withLiveWritesAllowed(async () => unrouted.refusalIssues!.create("ops refusal", "alarm detail", [NEEDS_HUMAN_LABEL]));
+  assert.equal(escalationCodeRepository(created[1]), undefined);
+});
+
+test("W1-T14998 criterion 4: an unrouted managed repository files its escalation in itself, a grill quoting another"
+  + " repository's PR deduped and closed there", async (t) => {
+  // Reviewer finding (escalate.ts unrouted listing filter): remudero-site, unrouted, filed a `rmd triage` grill quoting a
+  // core PR; its listing dropped the issue as core's by that first /pull/ URL, so each re-escalation opened another.
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14998-site-grill-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const ledgerPath = join(root, "state", "ledger.ndjson"), threadStorePath = join(root, "threads.jsonl");
+  const SITE = "craigoley/remudero-site";
+  const gh = fakeGh();
+  const exec = async (args: string[]) => gh.exec(args);
+  const entry: FeedbackEntry = { id: "fb-w1-t14998-site", ts: "2026-11-27T07:00:00Z", raw: `Core's PR ${PR_URL} broke the site build.`,
+    attachments: [], origin: "ui", status: "new", proposal_pr: null };
+  const grill = buildGrillEscalation({ entry, taskId: `TRIAGE-${entry.id}`, runId: "RUN-SITE-TRIAGE", decision: { action: "grill",
+    status: "grilling", detail: "Which repository owns this?",
+    options: [{ label: "re-run", detail: "re-run triage" }, { label: "drop", detail: "drop it" }], recommendation: "re-run" } });
+  const issues = ghIssueGatewayAsync("craigoley", "remudero-site", { exec, destination: nowhere });
+  const filed: string[] = [];
+  for (const run of ["RUN-1", "RUN-2", "RUN-3"]) {
+    filed.push(await withLiveWritesAllowed(() => escalateAsync(grill, { issues, ledgerPath, threadStorePath, runId: run })));
+  }
+  assert.equal(new Set(filed).size, 1, "three escalations of one grill name its one open issue");
+  assert.equal(gh.issues.length, 1);
+  const issue = gh.issues[0]!;
+  assert.deepEqual([issue.repo, escalationCodeRepository(issue.body), prReferentRepositoryFromIssueText(issue.body)],
+    [SITE, undefined, CORE_REPO], "filed in itself, unstamped, its first PR link core's");
+  assert.equal(escalationListingIsRouted("craigoley", "remudero-site", issues), false);
+  assert.equal(await lists(issues, issue), true, "the unrouted async listing keeps it");
+  const sync = ghIssueGateway("craigoley", "remudero-site", { exec: gh.exec, destination: nowhere });
+  assert.equal(await lists(sync, issue), true, "so does the sync form");
+  await issues.closeWithComment!(filed[0]!, "recovered: the grill was answered");
+  assert.equal(issue.state, "closed", "recovery closes it in its own repository");
+  // The routed pool still excludes another repository's stamped issue: core's pooled issue is not site's.
+  const shared = fakeGh();
+  const coreUrl = withLiveWritesAllowed(() => escalate(escalation(), { issues: ghIssueGateway(CODE.owner, CODE.repo,
+    { exec: shared.exec, destination: toOps }), ledgerPath, runId: "CORE-POOL" }));
+  const coreIssue = shared.issues.find((entry) => entry.url === coreUrl)!;
+  const routedSite = ghIssueGateway("craigoley", "remudero-site", { exec: shared.exec, destination: toOps });
+  assert.equal(await lists(routedSite, coreIssue), false);
+  assert.equal(await lists(ghIssueGateway(CODE.owner, CODE.repo, { exec: shared.exec, destination: toOps }), coreIssue), true,
+    "control: core's own routed listing holds it");
 });
