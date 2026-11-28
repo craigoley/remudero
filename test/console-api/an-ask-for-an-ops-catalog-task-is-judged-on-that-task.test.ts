@@ -7,7 +7,7 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { updateProposalRegistry, type Proposal } from "#src/lib/inbox.js";
-import { askTaskPlan, buildInboxVerbActions, classifyAllProposalsMemo, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { askTaskPlan, buildInboxVerbActions, classifyAllProposalsMemo, classifyAllProposalsSliced, type PanelGraphDeps } from "#src/lib/panel-graph.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import type { BoardCatalogContext } from "#src/lib/serve-plan-reload.js";
 import { makeTempDir } from "#src/lib/tmp.js";
@@ -59,12 +59,26 @@ async function approve(deps: PanelGraphDeps, proposalId: string): Promise<number
   return status;
 }
 
-test("W1-T15105 criterion 1: an ask whose task is only in the ops catalog is judged on that task", (t) => {
+test("W1-T15105 criterion 1: an ask whose task is only in the ops catalog is judged on that task", async (t) => {
   const { deps } = fixture(t, [ask(PARKED_ASK), ask(RELEASED_ASK)], combinedPlan);
   const judged = states(deps);
   assert.equal(judged.get(PARKED_ASK)?.state, "ready", "a parked ops verify:human task's ask is its release");
   assert.equal(judged.get(PARKED_ASK)?.releaseTaskId, OPS_PARKED);
   assert.equal(judged.get(RELEASED_ASK)?.state, "retired", "an ask for a released ops task leaves the Inbox");
+
+  // An ops-repo plan merge edits the named ops tasks; the slow lane's catalog hands the next pass the new
+  // combined plan while the public plan, the ledger and the ids stay the same. The memo must not reuse.
+  let catalog = plan(...corePlan.tasks, task(OPS_PARKED, "auto"), { ...task(OPS_RELEASED, "auto"), dispatch_hold: true });
+  const live = { ...fixture(t, [ask(PARKED_ASK), ask(RELEASED_ASK)], combinedPlan).deps, inboxReferentPlan: () => catalog };
+  const pass = async () => new Map((await classifyAllProposalsSliced(live, () => corePlan)).classifications.map(c => [c.proposalId, c.state]));
+  const before = await pass();
+  assert.notEqual(before.get(PARKED_ASK), "ready", "a verify:auto ops task has no release to offer");
+  assert.notEqual(before.get(RELEASED_ASK), "retired", "a held ops task's release answers nothing");
+  catalog = combinedPlan;
+  const after = await pass();
+  assert.equal(after.get(PARKED_ASK), "ready", "the ops task edited to parked: its ask is ready as its release");
+  assert.equal(after.get(RELEASED_ASK), "retired", "the ops task's hold lifted: its released ask retires");
+  assert.equal(states(live).get(PARKED_ASK)?.state, "ready", "the synchronous memo judges the same ops tasks");
 });
 
 test("W1-T15105 criterion 2: Approve judges an ops-catalog task's ask as the Inbox that offered it did", async (t) => {

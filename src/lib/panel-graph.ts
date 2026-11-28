@@ -2385,6 +2385,12 @@ function projectionDigest(projection: Map<string, StatusProjection>, boardRefere
 }
 
 
+/** W1-T15105: the named ops tasks by content, so an ops-repo edit re-judges their asks; none keeps the public key. */
+function askTasksKey(plan: Plan, askPlan: Plan): string[] {
+  if (askPlan === plan) return [];
+  return [createHash("sha256").update(JSON.stringify(askPlan.tasks.slice(plan.tasks.length))).digest("hex")];
+}
+
 /** Every release is already a `ratify.approved` row, so this existing digest also invalidates
  * the inbox memo when one lands; no second scan or release-specific fingerprint is needed. */
 function ledgerVerdictDigest(lines: LedgerLines, receipts: readonly VerdictReceipt[]): string {
@@ -2453,7 +2459,8 @@ function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readP
   const readProposals = inboxProposalReader(deps);
   const { projection, boardReferents, askPlan, askProjection } = projectInboxPlan(deps, plan, ledgerLines, readProposals);
   const archiveKey = archiveReleases?.size ? [...archiveReleases].sort(([a], [b]) => a.localeCompare(b)) : null;
-  const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(askProjection, boardReferents), archiveKey]);
+  const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(askProjection, boardReferents), archiveKey,
+    ...askTasksKey(plan, askPlan)]);
   return { key, writeKey: inboxWriteKey(inputs), sha, plan, planKey, readPlanSnapshot, readProposals, projection, askPlan, askProjection, boardReferents, ledgerLines, archiveReleases, verdictReceipts };
 }
 
