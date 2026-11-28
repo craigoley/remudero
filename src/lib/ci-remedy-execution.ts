@@ -340,89 +340,186 @@ function namedAssertionImports(tokens: readonly SourceToken[]): Set<string> {
   return names;
 }
 
-/** Names bound by `for (const { expected } of cases)` inherit changes to the source table. */
-function loopBindingSources(tokens: readonly SourceToken[]): Map<string, Set<string>> {
-  const sources = new Map<string, Set<string>>();
-  for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i]!.text !== "for") continue;
-    let open = i + 1;
-    if (tokens[open]?.text === "await") open++;
-    if (tokens[open]?.text !== "(") continue;
-    const closeParen = closing(tokens, open);
-    let declaration = open + 1;
-    if (!["const", "let", "var"].includes(tokens[declaration]?.text ?? "")) continue;
-    declaration++;
-    const pattern = tokens[declaration]!.text;
-    if (!OPENERS.has(pattern) && !isName(tokens[declaration])) continue;
-    const patternEnd = OPENERS.has(pattern) ? closing(tokens, declaration) : declaration;
-    let of = patternEnd + 1;
-    if (tokens[of]?.text !== "of" || !isName(tokens[of + 1])) continue;
-    const iterable = tokens[of + 1]!.text;
-    const bindings = pattern === "{" || pattern === "["
-      ? tokens.slice(declaration + 1, patternEnd).flatMap((token, offset, body) => {
-        const at = declaration + 1 + offset;
-        if (!isName(token) || body[offset - 1]?.text === ":") return [];
-        const localAt = tokens[at + 1]?.text === ":" ? at + 2 : at;
-        return isName(tokens[localAt]) ? [tokens[localAt]!.text] : [];
-      }) : [];
-    const names = pattern === "{" || pattern === "[" ? bindings : [tokens[declaration]!.text];
-    for (const local of names) {
-      const bound = sources.get(local!) ?? new Set<string>();
-      bound.add(iterable);
-      sources.set(local!, bound);
-    }
-    i = closeParen;
-  }
-  return sources;
+/** A name the code reads: a word token that is not a property name after `.` or `?.`. */
+const isRead = (tokens: readonly SourceToken[], at: number) =>
+  isName(tokens[at]) && tokens[at - 1]?.text !== "." && tokens[at - 1]?.text !== "?.";
+/** The names the tokens `from..to` (inclusive) read. */
+function namesIn(tokens: readonly SourceToken[], from: number, to: number): string[] {
+  const names: string[] = [];
+  for (let k = Math.max(0, from); k <= to && k < tokens.length; k++) if (isRead(tokens, k)) names.push(tokens[k]!.text);
+  return names;
 }
 
-function assertionsOf(text: string, tokens = sourceTokens(text)): Array<{ call: string; reads: Set<string> }> {
-  const found: Array<{ call: string; reads: Set<string> }> = [];
-  const heads = new Set(["assert", "expect", ...namedAssertionImports(tokens)]);
-  const loopSources = loopBindingSources(tokens);
+/** Each bracket's partner, and each token's innermost enclosing opener (-1 at top level), read in one pass. */
+function bracketsOf(tokens: readonly SourceToken[]): { partner: number[]; parent: number[] } {
+  const partner = new Array<number>(tokens.length).fill(-1), parent = new Array<number>(tokens.length).fill(-1);
+  const stack: number[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    const head = tokens[i]!;
-    if (!isName(head) || !heads.has(head.text) || tokens[i - 1]?.text === ".") continue;
-    let at = i + 1;
-    while (tokens[at]?.text === "." && isName(tokens[at + 1])) at += 2;
-    if (tokens[at]?.text !== "(") continue;
-    let end = closing(tokens, at);
-    while (tokens[end + 1]?.text === "." && isName(tokens[end + 2]) && tokens[end + 3]?.text === "(") end = closing(tokens, end + 3);
-    const reads = new Set<string>();
-    for (let k = at + 1; k < end; k++) if (isName(tokens[k]) && tokens[k - 1]?.text !== ".") {
-      reads.add(tokens[k]!.text);
-      for (const source of loopSources.get(tokens[k]!.text) ?? []) reads.add(source);
-    }
-    found.push({ call: sliceOf(text, tokens, i, end), reads });
-    i = end;
+    const text = tokens[i]!.text;
+    if (CLOSERS.has(text) && stack.length > 0) { const open = stack.pop()!; partner[open] = i; partner[i] = open; }
+    parent[i] = stack.at(-1) ?? -1;
+    if (OPENERS.has(text)) stack.push(i);
   }
-  return found;
+  return { partner, parent };
 }
 
 /** A line break after one of these continues the statement. */
 const CONTINUES = /^(?:=|,|\?|:|\+|-|\*|\/|%|&&|\|\||\?\?|=>|\.|===|!==|==|!=|<|>|<=|>=|\||&|in|of|instanceof)$/;
 
-/** Each `const`/`let`/`var` declaration in the file, by every name it binds: the whole statement, whitespace collapsed.
- *  A name declared twice in different scopes keeps both texts. */
-function bindingDeclarationsOf(text: string, tokens = sourceTokens(text)): Map<string, string[]> {
-  const declarations = new Map<string, string[]>();
+/** The last token of the `const`/`let`/`var` statement starting at `i`. */
+function statementEnd(tokens: readonly SourceToken[], i: number): number {
+  let end = i + 1, depth = 0;
+  for (let k = i + 1; k < tokens.length; k++) {
+    const token = tokens[k]!;
+    if (depth === 0 && k > i + 1 && (token.text === ";" || (token.lineBreak && !CONTINUES.test(tokens[k - 1]!.text)
+      && !CONTINUES.test(token.text)))) break;
+    if (OPENERS.has(token.text)) depth++;
+    else if (CLOSERS.has(token.text) && --depth < 0) break;
+    end = k;
+  }
+  return end;
+}
+
+/** One declaration: the names it binds, the token range it spans, and whether it holds a function. */
+interface Declaration { names: string[]; from: number; to: number; callable: boolean }
+
+/** Every `const`/`let`/`var` statement and every `function NAME` declaration in the file. */
+function declarationsIn(tokens: readonly SourceToken[], partner: readonly number[]): Declaration[] {
+  const found: Declaration[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    if (!["const", "let", "var"].includes(tokens[i]!.text) || !(isName(tokens[i + 1]) || OPENERS.has(tokens[i + 1]?.text ?? ""))) continue;
+    const text = tokens[i]!.text;
+    if (text === "function" && isName(tokens[i + 1]) && tokens[i - 1]?.text !== ".") {
+      let params = i + 2;
+      while (params < tokens.length && tokens[params]!.text !== "(") params++;
+      // The body's `{`; a signature with none (an overload, `declare function`) ends at its `;`.
+      let body = partner[params] ?? -1;
+      while (body >= 0 && body < tokens.length && tokens[body]!.text !== "{" && tokens[body]!.text !== ";") body++;
+      const to = body < 0 || body >= tokens.length ? tokens.length - 1
+        : tokens[body]!.text === ";" ? body : Math.max(partner[body]!, body);
+      found.push({ names: [tokens[i + 1]!.text], from: i, to, callable: true });
+      continue;
+    }
+    if (!["const", "let", "var"].includes(text) || !(isName(tokens[i + 1]) || OPENERS.has(tokens[i + 1]?.text ?? ""))) continue;
     const names = isName(tokens[i + 1]) ? [tokens[i + 1]!.text]
       : tokens.slice(i + 2, closing(tokens, i + 1)).filter((token) => isName(token)).map((token) => token.text);
-    let end = i + 1, depth = 0;
-    for (let k = i + 1; k < tokens.length; k++) {
-      const token = tokens[k]!;
-      if (depth === 0 && k > i + 1 && (token.text === ";" || (token.lineBreak && !CONTINUES.test(tokens[k - 1]!.text)
-        && !CONTINUES.test(token.text)))) break;
-      if (OPENERS.has(token.text)) depth++;
-      else if (CLOSERS.has(token.text) && --depth < 0) break;
-      end = k;
-    }
-    const statement = sliceOf(text, tokens, i, end);
-    for (const name of names) declarations.set(name, [...(declarations.get(name) ?? []), statement]);
+    const to = statementEnd(tokens, i);
+    const callable = tokens.slice(i, to + 1).some((token) => token.text === "=>" || token.text === "function");
+    found.push({ names, from: i, to, callable });
   }
-  return declarations;
+  return found;
+}
+
+/** What each name's value is computed from, file-wide: the names its declarations read, the names a `for…of`/`for…in`
+ *  iterable reads (every one, so `Object.entries(TABLE)` binds to TABLE), and, for a callback's parameters, the
+ *  names its call reads before it (`TABLE.forEach(([input, want]) => …)` binds both to TABLE). Scopes are not told
+ *  apart, so a name declared twice reads from both. */
+function dataSources(tokens: readonly SourceToken[], declarations: readonly Declaration[],
+  { partner, parent }: { partner: readonly number[]; parent: readonly number[] }): Map<string, Set<string>> {
+  const sources = new Map<string, Set<string>>();
+  const bind = (locals: readonly string[], read: readonly string[]) => {
+    for (const local of locals) {
+      const bound = sources.get(local) ?? new Set<string>();
+      for (const name of read) if (name !== local) bound.add(name);
+      sources.set(local, bound);
+    }
+  };
+  for (const { names, from, to } of declarations) bind(names, namesIn(tokens, from + 1, to));
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i]!.text === "for") {
+      const open = tokens[i + 1]?.text === "await" ? i + 2 : i + 1;
+      if (tokens[open]?.text !== "(" || partner[open]! < 0) continue;
+      const close = partner[open]!;
+      let of = open + 1;
+      while (of < close && !(parent[of] === open && (tokens[of]!.text === "of" || tokens[of]!.text === "in"))) of++;
+      if (of >= close) continue;
+      const first = ["const", "let", "var"].includes(tokens[open + 1]?.text ?? "") ? open + 2 : open + 1;
+      bind(namesIn(tokens, first, of - 1), namesIn(tokens, of + 1, close - 1));
+      continue;
+    }
+    // A callback: `(params) =>`, `name =>` or `function (params)`.
+    let paramsFrom = -1, paramsTo = -1;
+    if (tokens[i]!.text === "=>") {
+      if (tokens[i - 1]?.text === ")" && partner[i - 1]! >= 0) { paramsFrom = partner[i - 1]!; paramsTo = i - 1; }
+      else if (isName(tokens[i - 1])) { paramsFrom = i - 1; paramsTo = i - 1; }
+      if (tokens[paramsFrom - 1]?.text === "async") paramsFrom--;
+    } else if (tokens[i]!.text === "function" && tokens[i + 1]?.text === "(" && partner[i + 1]! >= 0) {
+      paramsFrom = i; paramsTo = partner[i + 1]!;
+    }
+    if (paramsFrom < 0) continue;
+    const call = parent[paramsFrom]!;
+    if (call < 0 || tokens[call]!.text !== "(") continue;
+    // The callee: names, `.name` steps and bracketed calls or indexes, read back from the call's `(`.
+    let callee = call;
+    for (;;) {
+      const prior = tokens[callee - 1];
+      if (prior === undefined) break;
+      if ((prior.text === ")" || prior.text === "]") && partner[callee - 1]! >= 0) { callee = partner[callee - 1]!; continue; }
+      if (isName(prior) && !["if", "while", "for", "switch", "catch", "return", "typeof", "await"].includes(prior.text)) {
+        callee--;
+        if (tokens[callee - 1]?.text === "." || tokens[callee - 1]?.text === "?.") { callee--; continue; }
+      }
+      break;
+    }
+    if (callee === call) continue;
+    bind(namesIn(tokens, paramsFrom, paramsTo), [...namesIn(tokens, callee, call - 1), ...namesIn(tokens, call + 1, paramsFrom - 1)]);
+  }
+  return sources;
+}
+
+/** The file's assertion heads: `assert`, `expect`, named node:assert imports, and every file-local function whose body
+ *  makes an assertion, such as `const close = (actual, expected) => assert.ok(…)`, to any depth. */
+const BUILTIN_HEADS = new Set(["assert", "expect"]);
+function assertionHeads(tokens: readonly SourceToken[], declarations: readonly Declaration[]): Set<string> {
+  const heads = new Set([...BUILTIN_HEADS, ...namedAssertionImports(tokens)]);
+  const helpers = declarations.filter((declaration) => declaration.callable && declaration.names.length === 1);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const { names: [name], from, to } of helpers) {
+      if (heads.has(name!)) continue;
+      for (let k = from + 2; k <= to; k++) {
+        if (!heads.has(tokens[k]!.text) || !(isRead(tokens, k) || tokens[k]!.text === "assert")) continue;
+        let at = k + 1;
+        while (tokens[at]?.text === "." && isName(tokens[at + 1])) at += 2;
+        if (tokens[at]?.text === "(") { heads.add(name!); grew = true; break; }
+      }
+    }
+  }
+  return heads;
+}
+
+/** Each assertion in the file, whole, whitespace collapsed, with the names its arguments read: a call to an assertion
+ *  head with its chained matchers. `t.assert.equal(…)` counts as `assert.equal(…)`. */
+function assertionsOf(text: string, tokens: readonly SourceToken[], heads: ReadonlySet<string>): Array<{ call: string; reads: Set<string> }> {
+  const found: Array<{ call: string; reads: Set<string> }> = [];
+  const namedImports = namedAssertionImports(tokens);
+  for (let i = 0; i < tokens.length; i++) {
+    const head = tokens[i]!;
+    if (!isName(head) || !heads.has(head.text) || tokens[i - 1]?.text === "function") continue;
+    if ((tokens[i - 1]?.text === "." || tokens[i - 1]?.text === "?.") && head.text !== "assert") continue;
+    let at = i + 1;
+    while (tokens[at]?.text === "." && isName(tokens[at + 1])) at += 2;
+    if (tokens[at]?.text !== "(") continue;
+    let end = closing(tokens, at);
+    while (tokens[end + 1]?.text === "." && isName(tokens[end + 2]) && tokens[end + 3]?.text === "(") end = closing(tokens, end + 3);
+    // A local helper handed a callback (`withRepo(() => { … })`) wraps a block of test code: its own assertions are
+    // read one by one, so a line added inside it is not read as a rewrite of the whole block.
+    if (!BUILTIN_HEADS.has(head.text) && !namedImports.has(head.text)
+      && tokens.slice(at + 1, end).some((token) => token.text === "=>" || token.text === "function")) continue;
+    found.push({ call: sliceOf(text, tokens, i, end), reads: new Set(namesIn(tokens, at + 1, end - 1)) });
+    i = end;
+  }
+  return found;
+}
+
+/** Each declaration's text, by every name it binds, whitespace collapsed. A name declared twice in different scopes
+ *  keeps both texts. */
+function bindingDeclarationsOf(text: string, tokens: readonly SourceToken[], declarations: readonly Declaration[]): Map<string, string[]> {
+  const texts = new Map<string, string[]>();
+  for (const { names, from, to } of declarations) {
+    const statement = sliceOf(text, tokens, from, to);
+    for (const name of names) texts.set(name, [...(texts.get(name) ?? []), statement]);
+  }
+  return texts;
 }
 
 /** The names whose declarations in `base` are not all still present, word for word, in `head`. */
@@ -439,16 +536,37 @@ function changedDeclarations(base: Map<string, string[]>, head: Map<string, stri
   return changed;
 }
 
-/** A test file read once: its assertions and its declarations. */
-interface TestSource { assertions: Array<{ call: string; reads: Set<string> }>; declarations: Map<string, string[]> }
+/** A test file read once: its assertions, its declarations, and what each name's value is computed from. */
+interface TestSource {
+  assertions: Array<{ call: string; reads: Set<string> }>; declarations: Map<string, string[]>;
+  /** Read only when a declaration changed. */
+  sources: () => Map<string, Set<string>>;
+}
 const testSource = (text: string): TestSource => {
   const tokens = sourceTokens(text);
-  return { assertions: assertionsOf(text, tokens), declarations: bindingDeclarationsOf(text, tokens) };
+  const brackets = bracketsOf(tokens);
+  const declared = declarationsIn(tokens, brackets.partner);
+  let sources: Map<string, Set<string>> | undefined;
+  return { assertions: assertionsOf(text, tokens, assertionHeads(tokens, declared)),
+    declarations: bindingDeclarationsOf(text, tokens, declared), sources: () => (sources ??= dataSources(tokens, declared, brackets)) };
 };
 
 /** One changed expectation: the assertion, and the changed declarations it reads (none when the assertion went). */
 interface ExpectationChange { call: string; reads: string[] }
 const describeChange = ({ call, reads }: ExpectationChange) => reads.length > 0 ? `${call} (reads changed ${reads.join(", ")})` : call;
+
+/** The names in `moved` that `reads` reach, directly or through what each name's value is computed from. */
+function movedReads(reads: Iterable<string>, sources: ReadonlyMap<string, ReadonlySet<string>>, moved: ReadonlySet<string>): string[] {
+  const seen = new Set<string>(), queue = [...reads], reached: string[] = [];
+  while (queue.length > 0) {
+    const name = queue.pop()!;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    if (moved.has(name)) reached.push(name);
+    queue.push(...(sources.get(name) ?? []));
+  }
+  return reached.sort();
+}
 
 function expectationChanges(base: TestSource, head: TestSource): ExpectationChange[] {
   const moved = changedDeclarations(base.declarations, head.declarations);
@@ -458,13 +576,16 @@ function expectationChanges(base: TestSource, head: TestSource): ExpectationChan
     const n = left.get(call) ?? 0;
     if (n > 0) left.set(call, n - 1);
     if (n === 0) return [{ call, reads: [] }];
-    const read = [...reads].filter((name) => moved.has(name)).sort();
+    if (moved.size === 0) return [];
+    const read = movedReads(reads, base.sources(), moved);
     return read.length > 0 ? [{ call, reads: read }] : [];
   });
 }
 
 /** W1-T15064: the assertions of an existing test file the round's diff removed or changed, per file. An assertion
- *  also counts as changed when a declaration its arguments read changed, such as `const expected = false`. */
+ *  also counts as changed when a declaration its value is computed from changed, at any distance: `const expected =
+ *  false`, a table a loop or callback reads, or a constant derived from one. A call to a local assertion helper is an
+ *  assertion too. */
 export function rewrittenTestExpectations(changes: ReadonlyArray<{ path: string; base: string; head: string }>):
   Array<{ path: string; changed: string[] }> {
   return changes.flatMap(({ path, base, head }) => {

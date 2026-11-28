@@ -101,6 +101,8 @@ interface RoundOptions {
   needsScope?: string;
   /** The host's complete job-log reader; absent, every read fails, as with no network. */
   readCiJobLog?: (owner: string, repo: string, jobId: string) => Promise<string>;
+  /** The text of test/inbox.test.ts at the round's base; absent, {@link EXPECT}. */
+  testText?: string;
 }
 
 /** Every scope-amendment write refuses: the shard is never found, so a NEEDS_SCOPE round escalates. */
@@ -119,7 +121,7 @@ async function round(ciFailures: Array<{ name: string; logTail: string }> | unde
   mkdirSync(join(repo.dir, "src"));
   mkdirSync(join(repo.dir, "test"));
   writeFileSync(join(repo.dir, SOURCE), GUARDED);
-  writeFileSync(join(repo.dir, TEST), EXPECT);
+  writeFileSync(join(repo.dir, TEST), options.testText ?? EXPECT);
   repo.git("add", "src", "test");
   repo.git("commit", "-qm", "seed");
   repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
@@ -377,6 +379,72 @@ test("W1-T15064 criterion 2: a changed test expectation is refused unless its fi
   assert.deepEqual(unaskedExpectationRewrites(multi, answeredFindingText(coloured)), []);
   assert.deepEqual(unaskedExpectationRewrites(multi, answeredFindingText({ ciFailures: [{ name: "unit", logTail: "",
     annotations: [{ message: `\u001b[31minbox.test.ts\u001b[39m failed` }] }] })), [], "an annotation alone names it too");
+
+  // A real two-commit fixture: a repository holding two of this repo's own test files at a base commit, then a fix
+  // commit that changes one expected value in each. One is a value in the table a loop reads through
+  // `Object.entries(STATES)`. The other is the expected argument of a file-local assertion helper,
+  // `close(actual, expected)`. The gate diffs the fix against its base and refuses both unless a finding names the test.
+  const two = gitRepo({ kind: "w1-t15064-two-commit" });
+  t.after(() => two.cleanup());
+  two.git("config", "user.name", "fixture");
+  two.git("config", "user.email", "fixture@example.invalid");
+  mkdirSync(join(two.dir, "test"));
+  const GATES = "test/human-gate-classification.test.ts", STRIDE = "test/an-old-start-stops-spending-a-stride.test.ts";
+  const flips: Array<[string, string, string]> = [[GATES, "ready: \"ASK\"", "ready: \"RECORD\""],
+    [STRIDE, "close(passRatio(recent), 2)", "close(passRatio(recent), 1)"]];
+  for (const [path] of flips) writeFileSync(join(two.dir, path), readFileSync(join(REPO_ROOT, path), "utf8"));
+  two.git("add", "test");
+  two.git("commit", "-qm", "base");
+  const twoBase = two.git("rev-parse", "HEAD");
+  for (const [path, from, to] of flips) {
+    const text = readFileSync(join(two.dir, path), "utf8");
+    assert.ok(text.includes(from), `${path} still holds ${from}`);
+    writeFileSync(join(two.dir, path), text.replace(from, to));
+  }
+  two.git("commit", "-qam", "fix: change two expected values");
+  const twoFix = two.git("rev-parse", "HEAD");
+  assert.equal(two.git("rev-list", "--count", `${twoBase}..${twoFix}`), "1", "one fix commit on one base commit");
+  const twoRewrites = await readExpectationRewrites((args) => hostWorktreeGitAsync(two.dir, args), twoBase, twoFix);
+  assert.deepEqual(twoRewrites.map(({ path }) => path), [STRIDE, GATES], "both changed expectations are read");
+  assert.deepEqual(twoRewrites.find(({ path }) => path === STRIDE)?.changed, ["close(passRatio(recent), 2)"],
+    "a local helper's expected argument is an expectation");
+  const gates = twoRewrites.find(({ path }) => path === GATES)?.changed ?? [];
+  assert.ok(gates.some((change) => change.startsWith("assert.equal(asks.length, expected === \"ASK\" ? 1 : 0")
+    && change.endsWith("(reads changed STATES)")), `the loop over Object.entries(STATES) reads the table: ${gates.join(" | ")}`);
+  const unnamed = answeredFindingText({ review: { unmetCriteria: [{ claim: "released asks the reference", proof: "unit test: released" }] } });
+  assert.deepEqual(unaskedExpectationRewrites(twoRewrites, unnamed), twoRewrites, "a finding naming neither test refuses both");
+  const namesStride = answeredFindingText({ review: { unmetCriteria: [],
+    findings: [{ path: STRIDE, line: 63, mechanism: "expects the old ratio", remedy: null }] } });
+  assert.deepEqual(unaskedExpectationRewrites(twoRewrites, namesStride).map(({ path }) => path), [GATES],
+    "the finding that names one test admits only that test's change");
+  // The same helper change, made by a real fix round, is refused at the rung and nothing is pushed.
+  const strideText = readFileSync(join(REPO_ROOT, STRIDE), "utf8");
+  const helperRound = await round([{ name: "unit", logTail: "✖ inbox guard\n    at released (src/inbox.ts:1:1)" }], (dir) => {
+    writeFileSync(join(dir, SOURCE), LOOSENED);
+    writeFileSync(join(dir, TEST), strideText.replace("close(passRatio(recent), 2)", "close(passRatio(recent), 1)"));
+  }, { testText: strideText });
+  t.after(() => helperRound.repo.cleanup());
+  assert.equal(helperRound.pushes, 0, "the round that changed a helper's expected argument does not push");
+  assert.deepEqual(refusalOf(helperRound.rows)?.changed_assertions, ["close(passRatio(recent), 2)"]);
+  // The same class, written small: a forEach table, a constant derived from a table, and a helper declared as a
+  // function each carry the expected value into the assertion.
+  const forEachBase = "import assert from \"node:assert/strict\";\nconst TABLE = [[1, \"one\"]];\n" +
+    "TABLE.forEach(([input, want]) => assert.equal(name(input), want));\n";
+  assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base: forEachBase, head: forEachBase.replace("\"one\"", "\"two\"") }]),
+    [{ path: TEST, changed: ["assert.equal(name(input), want) (reads changed TABLE)"] }]);
+  const derivedBase = "import assert from \"node:assert/strict\";\nconst TABLE = { ready: \"ASK\" };\nconst expected = TABLE.ready;\n" +
+    "assert.equal(kind(\"ready\"), expected);\n";
+  assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base: derivedBase, head: derivedBase.replace("\"ASK\"", "\"RECORD\"") }]),
+    [{ path: TEST, changed: ["assert.equal(kind(\"ready\"), expected) (reads changed TABLE)"] }]);
+  const helperBase = "import assert from \"node:assert/strict\";\n" +
+    "function near(actual: number, want: number) { assert.ok(Math.abs(actual - want) < 1e-9); }\nnear(ratio(), 2);\n";
+  assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base: helperBase, head: helperBase.replace("near(ratio(), 2)", "near(ratio(), 1)") }]),
+    [{ path: TEST, changed: ["near(ratio(), 2)"] }]);
+  // The control: a helper that wraps a block of test code is not one expectation, so a line added inside it is new.
+  const wrapperBase = "import assert from \"node:assert/strict\";\nconst withRepo = (body: () => void) => { body(); assert.ok(clean()); };\n" +
+    "withRepo(() => {\n  assert.ok(a());\n});\n";
+  assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base: wrapperBase,
+    head: wrapperBase.replace("  assert.ok(a());\n", "  assert.ok(a());\n  assert.ok(b());\n") }]), []);
 
   // A harness merge round: resolving the conflict, the worker also flips the PR's own assertion, which main never had.
   // The finding names only the conflicted file, so the round pushes nothing.
