@@ -2925,7 +2925,7 @@ export interface ContainerShedRung {
 export interface ContainerShedPorts {
   read: (atMs: number, missedTicks: number | undefined) => ContainerShedReading;
   inventory: () => readonly ContainerShedEntry[];
-  now: () => number;
+  clock: Pick<Clock, "now">;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -2965,7 +2965,7 @@ export function createContainerShedRung(ports: ContainerShedPorts): ContainerShe
       if (decision.action === "shed" && entry?.end !== undefined) {
         const shed = episode.shed!;
         void entry.settled.then(() => {
-          if (episode.shed === shed) episode = { ...episode, shed: { ...shed, settled_at_ms: ports.now() } };
+          if (episode.shed === shed) episode = { ...episode, shed: { ...shed, settled_at_ms: ports.clock.now() } };
         });
         const row = { run_id: entry.run_id, kind: entry.kind, task_id: entry.task_id, pr: entry.pr,
           age_ms: Math.max(0, reading.at_ms - entry.admitted_at_ms), ...fields };
@@ -2987,9 +2987,8 @@ export function endRunChildForShed(
     teardownMs: () => {
       try {
         return restartWorkHistory(readRestartHistoryLines(stateDir), systemClock.now()).yieldCost.ms;
-      } catch (error) {
-        log("memory.shed_teardown_unread", { run_id: runId, error: String((error as Error)?.message ?? error).slice(0, 160) });
-        return undefined;
+      } catch {
+        return undefined; // Reason: an unread history is an unknown teardown: abortRunChild then never SIGKILLs, it waits.
       }
     },
   });
@@ -3016,7 +3015,7 @@ function containerShedRungFor(deps: DaemonDeps, log: (step: string, extra?: Reco
   if (!rung) {
     rung = createContainerShedRung({
       read: (atMs, missed) => readContainerShedReading(atMs, missed), inventory: containerShedInventory(deps.fleetLane?.stateDir, log),
-      now: () => systemClock.now(), log,
+      clock: systemClock, log,
     });
     containerShedRungs.set(deps, rung);
   }
@@ -3732,7 +3731,7 @@ function startInFlightTicker(
           try {
             containerShedRungFor(deps, log).tick(tickObservedAtMs, tickMissed);
           } catch (e) {
-            log("memory.shed_error", { error: String((e as Error)?.message ?? e).slice(0, 160) });
+            log("daemon.in_flight_ticker.failed", { phase: owner.phase, surface: "container_shed", error: String((e as Error)?.message ?? e).slice(0, 160) });
           }
           // W1-T7093: the reservation tree must be refreshed by the real recurring heartbeat,
           // not merely by worker start/release calls. Best-effort, after the liveness row so a

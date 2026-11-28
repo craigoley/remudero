@@ -79,7 +79,7 @@ function rungOver(inventory: () => readonly ContainerShedEntry[]) {
       assert.ok(next, "a reading was queued");
       return { ...next, at_ms: atMs };
     },
-    inventory, now: () => nowMs, log: (step, fields) => rows.push({ step, fields: fields ?? {} }),
+    inventory, clock: { now: () => nowMs }, log: (step, fields) => rows.push({ step, fields: fields ?? {} }),
   });
   const tick = (reading: ContainerShedReading) => {
     queue.push(reading);
@@ -356,7 +356,7 @@ test("W1-T15181 criterion 6: a shed fix round counts no strike and frees its PR;
         return { signalled: true, ended: "terminal", killed: false };
       },
     }));
-    const rung = createContainerShedRung({ read: (atMs, missed) => ({ ...script.shift()!, at_ms: atMs, missed_ticks: missed }), inventory, now: () => clock, log });
+    const rung = createContainerShedRung({ read: (atMs, missed) => ({ ...script.shift()!, at_ms: atMs, missed_ticks: missed }), inventory, clock: { now: () => clock }, log });
     let clock = T1016;
     const script: ContainerShedReading[] = [];
     const tick = (offsetMin: number, high: number, missed: number, psi: number, current: number) => {
@@ -435,7 +435,7 @@ test("W1-T15181 criterion 7: off Linux the cgroup reads are skipped and the deci
   const [lag219, lag408] = episode1016();
   const queue = [lag219, { ...lag219, at_ms: lag219.at_ms + MIN }, lag408];
   const rung = createContainerShedRung({
-    read: (atMs) => ({ ...queue.shift()!, at_ms: atMs }), now: () => 0, log: () => {},
+    read: (atMs) => ({ ...queue.shift()!, at_ms: atMs }), clock: { now: () => 0 }, log: () => {},
     inventory: () => { throw new Error("registry unreadable"); },
   });
   for (const at of [T1016, T1016 + MIN, T1016 + 408_000]) assert.equal(rung.tick(at, 6).action, "hold");
