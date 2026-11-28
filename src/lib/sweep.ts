@@ -30079,6 +30079,16 @@ async function runSweepPinned(
                   recordForcedRefresh(deps, pr, "stale-base"); // W1-T7735: W1-T2789
                   try {
                     const outcome = await deps.updateBranch!(pr);
+                    let refreshed: LiveStateResult | undefined;
+                    if (outcome === "updated" && deps.readLiveState) {
+                      try {
+                        refreshed = await deps.readLiveState(pr);
+                      } catch (error) {
+                        appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+                          step: "sweep.update_branch.head_read_failed", pr_number: pr.prNumber, pr_url: pr.prUrl,
+                          head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
+                      }
+                    }
                     appendLine(deps.ledgerPath, {
                       run_id: deps.runId,
                       task_id: pr.taskId ?? "SWEEP",
@@ -30087,6 +30097,8 @@ async function runSweepPinned(
                       pr_number: pr.prNumber,
                       pr_url: pr.prUrl,
                       head_sha: pr.headSha,
+                      ...(refreshed?.ok === true && typeof refreshed.headSha === "string"
+                        ? { new_head_sha: refreshed.headSha } : {}),
                       main_tip_sha: staleBaseReleaseTarget.mainTipSha,
                       behind_by: decision.behindBy,
                       matching_base_files: decision.matchingBaseFiles,
@@ -30913,6 +30925,16 @@ async function runSweepPinned(
       });
       try {
         const outcome = await deps.updateBranch(target);
+        let refreshed: LiveStateResult | undefined;
+        if (outcome === "updated" && deps.readLiveState) {
+          try {
+            refreshed = await deps.readLiveState(viewOf(target));
+          } catch (error) {
+            appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: target.taskId ?? "SWEEP",
+              step: "sweep.update_branch.head_read_failed", pr_number: target.prNumber, pr_url: target.prUrl,
+              head_sha: target.headSha, error: String((error as Error)?.message ?? error) });
+          }
+        }
         appendLine(deps.ledgerPath, {
           run_id: deps.runId,
           task_id: target.taskId ?? "SWEEP",
@@ -30920,6 +30942,7 @@ async function runSweepPinned(
           pr_number: target.prNumber,
           pr_url: target.prUrl,
           head_sha: target.headSha,
+          ...(refreshed?.ok === true && typeof refreshed.headSha === "string" ? { new_head_sha: refreshed.headSha } : {}),
           ...staleWorkflowFields,
           ...behindFields,
           ...updateReasonFields,
@@ -31353,7 +31376,9 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     try {
       const update = () => updateBranch(chosen);
       const outcome = await (timing ? timing.measure("ready_update", update) : update());
-      appendLine(deps.ledgerPath, { ...row, step: `sweep.update_branch.${outcome}` });
+      const after = outcome === "updated" ? await readLive() : undefined;
+      appendLine(deps.ledgerPath, { ...row, step: `sweep.update_branch.${outcome}`,
+        ...(after?.ok === true && typeof after.headSha === "string" ? { new_head_sha: after.headSha } : {}) });
     } catch (e) {
       appendLine(deps.ledgerPath, { ...row, step: "sweep.update_branch.error", error: String((e as Error)?.message ?? e) });
     }
@@ -31439,7 +31464,18 @@ export async function runArmedRatchetRejudge(
       update_reason: "ratchet-collision", reason: "ratchet_collision", source: "armed_ratchet_rejudge" };
     appendLine(deps.ledgerPath, { ...update, step: "sweep.update_branch.attempted" });
     try {
-      appendLine(deps.ledgerPath, { ...update, step: `sweep.update_branch.${await deps.updateBranch(target)}` });
+      const outcome = await deps.updateBranch(target);
+      let live: LiveStateResult | undefined;
+      if (outcome === "updated" && deps.readLiveState) {
+        try {
+          live = await deps.readLiveState(pr);
+        } catch (error) {
+          appendLine(deps.ledgerPath, { ...update, step: "sweep.update_branch.head_read_failed",
+            error: String((error as Error)?.message ?? error) });
+        }
+      }
+      appendLine(deps.ledgerPath, { ...update, step: `sweep.update_branch.${outcome}`,
+        ...(live?.ok === true && typeof live.headSha === "string" ? { new_head_sha: live.headSha } : {}) });
     } catch (e) {
       appendLine(deps.ledgerPath, { ...update, step: "sweep.update_branch.error", error: String((e as Error)?.message ?? e) });
     }
@@ -33080,8 +33116,7 @@ function reviewInputQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>
   const minted = new Map<string, string>();
   const eligible = new Map<string, string>();
   const eligibleHeads = new Map<string, Set<string>>();
-  const sweepUpdates = new Map<string, Array<{ from: string; at: number }>>();
-  const fixDispatches = new Map<string, number[]>();
+  const sweepUpdates = new Map<string, Array<{ from: string; to?: string; at: number }>>();
   const judgedHeads = new Set<string>();
   const isTime = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
   const first = (values: Map<string, string>, key: string, ts: string): void => {
@@ -33091,11 +33126,10 @@ function reviewInputQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>
     if (!isTime(row.ts)) continue;
     const prKey = String(row.pr_number);
     if (row.step === "sweep.update_branch.updated" && typeof row.head_sha === "string" && row.pr_number !== undefined) {
-      sweepUpdates.set(prKey, [...(sweepUpdates.get(prKey) ?? []), { from: row.head_sha, at: Date.parse(row.ts) }]);
-      continue;
-    }
-    if (row.step === "fix.dispatch" && row.pr_number !== undefined) {
-      fixDispatches.set(prKey, [...(fixDispatches.get(prKey) ?? []), Date.parse(row.ts)]);
+      sweepUpdates.set(prKey, [...(sweepUpdates.get(prKey) ?? []), {
+        from: row.head_sha, ...(typeof row.new_head_sha === "string" ? { to: row.new_head_sha } : {}),
+        at: Date.parse(row.ts),
+      }]);
       continue;
     }
     if (row.step === "review.posted" && (row.state === "success" || row.state === "failure") &&
@@ -33121,16 +33155,12 @@ function reviewInputQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>
   const sweepMadeFrom = (prKey: string, head: string): string | undefined => {
     const seen = eligible.get(`${prKey}@${head}`);
     const headAt = seen === undefined ? now : Date.parse(seen);
-    const update = (sweepUpdates.get(prKey) ?? []).filter((u) => u.from !== head && u.at <= headAt)
+    const update = (sweepUpdates.get(prKey) ?? []).filter((u) => u.to === head && u.from !== head && u.at <= headAt)
       .reduce<{ from: string; at: number } | undefined>((latest, u) => latest === undefined || u.at > latest.at ? u : latest, undefined);
     if (update === undefined || judgedHeads.has(update.from)) return undefined;
     const fromSeen = eligible.get(`${prKey}@${update.from}`);
     if (fromSeen === undefined || Date.parse(fromSeen) > update.at) return undefined;
-    const between = (at: number): boolean => at > update.at && at < headAt;
-    if ((fixDispatches.get(prKey) ?? []).some(between)) return undefined;
-    const otherNewHead = [...(eligibleHeads.get(prKey) ?? [])].some((h) =>
-      h !== head && h !== update.from && between(Date.parse(eligible.get(`${prKey}@${h}`)!)));
-    return otherNewHead ? undefined : update.from;
+    return update.from;
   };
   /** The key a head of a PR queues at; `null` keeps its PR's createdAt (its first head). */
   const keyOfHead = (prKey: string, head: string, depth: number, inherited = false): string | null => {

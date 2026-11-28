@@ -88,10 +88,10 @@ function seed(ledger: ReturnType<typeof fixtureLedger>) {
   return { unreviewed, competitor, updated: { ...unreviewed, headSha: "bb74b21", lastActivityAt: at("12:41:24") } };
 }
 
-const sweepUpdate = (ledger: ReturnType<typeof fixtureLedger>, from: string): void =>
+const sweepUpdate = (ledger: ReturnType<typeof fixtureLedger>, from: string, to: string): void =>
   appendAt(ledger.ledgerPath, {
     run_id: "sweep-update-queue-test", task_id: "W1-T21097", step: "sweep.update_branch.updated",
-    pr_number: 21097, pr_url: "https://github.com/o/r/pull/21097", head_sha: from,
+    pr_number: 21097, pr_url: "https://github.com/o/r/pull/21097", head_sha: from, new_head_sha: to,
   }, at("12:41:24"));
 
 // W1-T15162 criterion 1 in test/review/a-sweep-branch-update-keeps-the-review-queue-place.test.ts
@@ -99,7 +99,7 @@ test("W1-T15162 criterion 1: a head the sweep's branch update made keeps the unr
   const ledger = fixtureLedger();
   try {
     const { competitor, updated } = seed(ledger);
-    sweepUpdate(ledger, "ba824f8");
+    sweepUpdate(ledger, "ba824f8", updated.headSha);
     ledger.observe(at("12:54:33"), [updated]);
     assert.equal(await lightFirst(ledger, at("13:22:05"), [updated, competitor]), 21097,
       "the updated head queues from 11:18:01Z, ahead of the input first eligible at 11:42Z");
@@ -117,8 +117,8 @@ test("W1-T15162 criterion 1: a head the sweep's branch update made keeps the unr
     const competitor = pr(21112, at("11:42:00"), "head-21112");
     firstHeadLedger.observe(at("12:00:00"), [firstHead]);
     firstHeadLedger.observe(at("11:42:00"), [competitor]);
-    sweepUpdate(firstHeadLedger, firstHead.headSha);
     const updated = { ...firstHead, headSha: "first-head-update", lastActivityAt: at("12:41:24") };
+    sweepUpdate(firstHeadLedger, firstHead.headSha, updated.headSha);
     firstHeadLedger.observe(at("12:54:33"), [updated]);
     assert.equal(await lightFirst(firstHeadLedger, at("13:22:05"), [updated, competitor]), 21112,
       "the first head's 12:00Z eligibility precedes createdAt and places the competitor first at 11:42Z");
@@ -129,7 +129,21 @@ test("W1-T15162 criterion 1: a head the sweep's branch update made keeps the unr
 
 // W1-T15162 criterion 2 in test/review/a-sweep-branch-update-keeps-the-review-queue-place.test.ts
 test("W1-T15162 criterion 2: invariant a-new-head-of-new-work-requeues — a pushed head, or one after a judged head, keeps its own eligibility", async () => {
-  // A head pushed by a fix round or an author: no sweep update row precedes it.
+  // A head pushed by an author after the sweep's update is distinct from the head the update produced.
+  {
+    const ledger = fixtureLedger();
+    try {
+      const { competitor, updated } = seed(ledger);
+      sweepUpdate(ledger, "ba824f8", updated.headSha);
+      const pushed = { ...updated, headSha: "author-push", lastActivityAt: at("12:50:00") };
+      ledger.observe(at("12:54:33"), [pushed]);
+      assert.equal(await lightFirst(ledger, at("13:22:05"), [pushed, competitor]), 21112,
+        "an author push after the update is new work and queues from its own eligibility");
+    } finally {
+      ledger.cleanup();
+    }
+  }
+  // A head with no sweep update row is new work.
   {
     const ledger = fixtureLedger();
     try {
@@ -150,7 +164,7 @@ test("W1-T15162 criterion 2: invariant a-new-head-of-new-work-requeues — a pus
         run_id: "sweep-update-queue-test", task_id: "W1-T21097", step: "review.posted", state: "failure",
         pr_url: "https://github.com/o/r/pull/21097", head_sha: "ba824f8",
       }, at("12:00:00"));
-      sweepUpdate(ledger, "ba824f8");
+      sweepUpdate(ledger, "ba824f8", updated.headSha);
       ledger.observe(at("12:54:33"), [updated]);
       assert.equal(await lightFirst(ledger, at("13:22:05"), [updated, competitor]), 21112,
         "the earlier head was judged, so the updated head keeps its own 12:54:33Z key");
@@ -163,10 +177,14 @@ test("W1-T15162 criterion 2: invariant a-new-head-of-new-work-requeues — a pus
     const ledger = fixtureLedger();
     try {
       const { competitor, updated } = seed(ledger);
-      sweepUpdate(ledger, "ba824f8");
+      sweepUpdate(ledger, "ba824f8", updated.headSha);
       appendAt(ledger.ledgerPath, {
-        run_id: "sweep-update-queue-test", task_id: "W1-T21097", step: "fix.dispatch", pr_number: 21097,
-        head_sha: "bb74b21",
+        run_id: "sweep-update-queue-test", task_id: "W1-T21097", step: "fix.retrigger",
+        head_sha: "ba824f8",
+      }, at("12:45:00"));
+      appendAt(ledger.ledgerPath, {
+        run_id: "sweep-update-queue-test", task_id: "W1-T21097", step: "fix.dispatch",
+        head_sha: "ba824f8",
       }, at("12:45:00"));
       const fixed = { ...updated, headSha: "fix-1", lastActivityAt: at("12:54:00") };
       ledger.observe(at("12:54:33"), [fixed]);
