@@ -39,9 +39,10 @@ import { proofDebtPopulationPermit, readInboxGardenerStore, stampMechanicalAsk, 
 import { fixedClock } from "#src/lib/clock.js";
 
 // The shared run-task test helper, not a direct src/run-task.ts import (the affected-suite reach ratchet bounds direct importers).
-import { buildSweepEffects, codeScanningJudgeDeps, fleetLaneSamenessJudge, dispatchAlertFixRun, dispatchMainRepairFixRun, mainRepairLaneFor, runFixRung, runReview, type AlertFixDispatchDeps } from "#test/helpers/run-task-test.js";
+import { buildSweepEffects, codeScanningJudgeDeps, fleetLaneSamenessJudge, dispatchAlertFixRun, dispatchMainRepairFixRun, handedOffHeadRiskJudge, mainRepairLaneFor, runFixRung, runReview, type AlertFixDispatchDeps } from "#test/helpers/run-task-test.js";
 import { readFleetLaneStore, triageFleetLaneAsync, writeClassificationSnapshot } from "#src/lib/fleet-lane.js";
-import { CODE_SCANNING_FIX_STEP, runSweep, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { awaitHandedOffHeadJudgments, CODE_SCANNING_FIX_STEP, handedOffHeadAwaitingJudgment, handedOffHeadJudgmentPool, runSweep,
+  type HandedOffHeadJudgmentPool, type SweepDeps } from "#test/helpers/sweep-test.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 
 type Row = { step: string } & Record<string, unknown>;
@@ -811,6 +812,96 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   for (let i = 0; i < 10; i++) await new Promise<void>((r) => setImmediate(r));
   assert.equal(judged, 1, "control: the successor judges the same head");
   assert.deepEqual(armed, [`${CS_N}@${CS_HEAD}`], "control: the successor's ruling decides the head");
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and a handed-off head whose judgment was in flight at the release is left due and re-judged by the successor", async (t: TestContext) => {
+  const root = ownedFixtureDir(t, "retired-handed-off-judge").dir;
+  const N = 49170, HEAD = "49170aaaa", TASK = `W1-T${N}`;
+  const pr = { prNumber: N, prUrl: `https://github.com/acme/remudero/pull/${N}`, taskId: TASK, reviewState: "success",
+    checksState: "green", unmetCriteria: [], priorStrikes: 0, lastActivityAt: "2026-11-26T11:00:00Z", headSha: HEAD,
+    autoMergeArmed: false } as OpenPrView;
+  const task = { id: TASK, title: "a handed-off head", type: "implement", files: ["src/lib/cache.ts"] } as unknown as Task;
+  const plan = { tasks: [task], byId: new Map([[TASK, task]]) } as unknown as Plan;
+  const config = { claudeBin: "/bin/true", root, installRoot: REPO_ROOT, dailyCapUsd: 25 } as never;
+  const ledgerPath = join(root, "ledger.ndjson");
+  const lines: Array<Record<string, unknown>> = [
+    { ts: "2026-11-26T10:00:00.000Z", run_id: "RUN-49170", task_id: TASK, step: "verdict", verdict: "handed_off",
+      pr_url: pr.prUrl, reason: "pr_open_yield", head_sha: HEAD },
+    { ts: "2026-11-26T10:30:00.000Z", run_id: "REVIEW-49170", task_id: TASK, step: "review.posted", pr_url: pr.prUrl,
+      head_sha: HEAD, capped: false, plan_only: false },
+  ];
+  const log = (step: string, extra: Record<string, unknown> = {}) => { lines.push({ run_id: "SWEEP-14916", task_id: TASK, step, ...extra }); };
+  const view = { files: [{ path: "src/lib/cache.ts", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-const a = 1;\n+const a = 2;" }], truncated: false };
+  const escalations: string[] = [];
+  const escalateIssue = (escalation: { summary: string }) => { escalations.push(escalation.summary); return "https://github.com/acme/remudero/issues/1"; };
+  const armed: string[] = [];
+  const sweepDeps = (judge: NonNullable<SweepDeps["judgeHandedOffHead"]>, pool: HandedOffHeadJudgmentPool): SweepDeps => ({
+    arm: (p) => { armed.push(`${p.prNumber}@${p.headSha}`); }, close: () => {}, dispatchFix: () => {}, escalate: () => {},
+    ledgerPath, runId: "SWEEP-14916", now: () => Date.parse("2026-11-26T12:00:00.000Z"), readLedger: () => lines, log,
+    judgeHandedOffHead: judge, handedOffHeadJudgments: pool,
+  } as SweepDeps);
+  const verdictText = (confidence: string) => ({ text: `RISK_VERDICT: low\nRISK_CONFIDENCE: ${confidence}\nRISK_REASON: a narrow change`,
+    costUsd: 0.01, numTurns: 1 }) as unknown as WorkerResult;
+
+  // The retiring daemon's pass starts the judgment off the pass; its description-tier spawn is still running at the release.
+  const run = retiringExit();
+  const withheld: Array<Record<string, unknown>> = [];
+  const starts: string[] = [];
+  const asks = { tier1: 0, diff: 0, other: 0 };
+  let answerTier1: () => void = () => {};
+  const tier1Answered = new Promise<void>((resolve) => { answerTier1 = resolve; });
+  const judge = handedOffHeadRiskJudge("acme", "remudero", config, plan, ledgerPath, "SWEEP-14916", log, async (args) => {
+    const prompt = String(args.prompt);
+    // Every start after the in-flight one reaches the real spawnWorker, which the retired scope refuses.
+    const real = () => spawnWorker({ ...drafterStart(t, withheld, starts), prompt });
+    if (prompt.includes("const a = 2;")) { asks.diff++; return real(); } // only the diff tier carries the patch
+    if (asks.tier1 > 0) { asks.other++; return real(); }
+    asks.tier1++;
+    await tier1Answered;
+    return verdictText("0.55"); // uncertain, so the judgment goes on to the diff tier
+  }, escalateIssue as never, () => view);
+  const pool = handedOffHeadJudgmentPool();
+  await run.retirement.inSpawnScope(() => run.retirement.refuse("sweep", () => runSweep([pr], sweepDeps(judge, pool)))());
+  assert.deepEqual([asks.tier1, pool.flights.size], [1, 1], "the judgment is in flight when the pass returns");
+  const exit = run.exit();
+  await turns(5);
+  assert.ok(run.lockReleased() && run.retirement.retired(), "the lock is released while the judgment is in flight");
+  answerTier1();
+  await awaitHandedOffHeadJudgments(pool);
+  assert.equal(asks.diff, 1, "the withheld diff-tier start is asked once, never retried as an unparseable answer");
+  assert.deepEqual(starts, [], "no judge worker starts after the release");
+  assert.equal(withheld.length, asks.diff + asks.other, "each refused start is ledgered by the spawn path");
+  const steps = lines.map((line) => String(line.step));
+  for (const step of ["risk_judge.decision", "risk_judge.escalated", "sweep.risk_judge_unavailable"]) {
+    assert.equal(steps.includes(step), false, `no ${step} row for a judgment that never finished: ${steps.join(", ")}`);
+  }
+  assert.deepEqual(escalations, [], "no BLOCKED issue is filed");
+  assert.deepEqual(armed, [], "the head is not armed");
+  assert.equal(handedOffHeadAwaitingJudgment(pr, lines), "pr_open_yield", "the head is still due a judgment");
+  assert.equal(await run.retirement.refuse("sweep", () => runSweep([pr], sweepDeps(judge, pool)))(), undefined,
+    "the retired daemon starts no further sweep pass");
+  run.settlePage();
+  await exit;
+
+  // The successor starts a sweep pass, judges the same head afresh, and its decision then arms it.
+  const successor = retiringExit();
+  let successorAsks = 0;
+  const successorJudge = handedOffHeadRiskJudge("acme", "remudero", config, plan, ledgerPath, "SWEEP-14916-NEXT", log,
+    async () => { successorAsks++; return verdictText("0.97"); }, escalateIssue as never, () => view);
+  const successorPool = handedOffHeadJudgmentPool();
+  const pass = () => successor.retirement.inSpawnScope(() =>
+    successor.retirement.refuse("sweep", () => runSweep([pr], sweepDeps(successorJudge, successorPool)))());
+  assert.notEqual(await pass(), undefined, "the successor's sweep pass runs");
+  await awaitHandedOffHeadJudgments(successorPool);
+  assert.ok(successorAsks >= 1, "the successor re-judges the head");
+  const decision = lines.find((line) => line.step === "risk_judge.decision" && line.head_sha === HEAD);
+  assert.equal(decision?.action, "proceed", "the successor's judgment is recorded for the head");
+  assert.equal(handedOffHeadAwaitingJudgment(pr, lines), undefined);
+  // A judgment that settled inside the first pass's yield armed there; otherwise the next pass reads its decision.
+  if (armed.length === 0) await pass();
+  assert.deepEqual(armed, [`${N}@${HEAD}`], "the successor's ruling decides the head");
+  assert.deepEqual(escalations, []);
 });
 
 test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +

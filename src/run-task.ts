@@ -3043,7 +3043,14 @@ export function handedOffHeadRiskJudge(
           });
           const mount = resolveRiskJudgeRoleMount(loadMounts(mountsPath(repoRoot)));
           const judged = { ...input, change: { ...input.change, changeView: withoutRiskJudgePatches(await readViewOnce()) } };
-          return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend, signal, shadowLog: log })(judged);
+          // W1-T14916: a withheld spawn (either tier) throws rather than parsing its empty text as unparseable.
+          const raw = spawn ?? benchmarkNonDispatchSpawn("risk-judge");
+          const guarded: typeof spawnWorker = async (args) => {
+            const result = await raw(args);
+            if (result.notStarted !== undefined) throw new WorkerNotStartedError(result.notStarted);
+            return result;
+          };
+          return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn: guarded, spend, signal, shadowLog: log })(judged);
         },
         escalate: (verdict, action) =>
           escalateImpl(

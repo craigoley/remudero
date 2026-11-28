@@ -19395,17 +19395,33 @@ export function riskJudgeHandedOffHead(
   planFor: (pr: OpenPrView, signal?: AbortSignal) => HandedOffHeadJudgmentPlan,
 ): NonNullable<SweepDeps["judgeHandedOffHead"]> {
   return async (pr, signal) => {
-    const { input, orchestrator, config } = planFor(pr, signal);
+    // W1-T14916: a judge spawn a retired daemon withheld (either tier) cancels the judgment, so runRiskJudge writes no
+    // decision row and files no escalation; the rethrow below leaves the head due, and the successor judges it afresh.
+    const cancel = new AbortController();
+    if (signal?.aborted) cancel.abort();
+    else signal?.addEventListener("abort", () => cancel.abort(), { once: true });
+    const { input, orchestrator, config } = planFor(pr, cancel.signal);
     const log = orchestrator.log ?? (() => {});
+    let withheld: WorkerNotStartedError | undefined;
+    const judge: typeof orchestrator.judge = async (judgeInput) => {
+      try {
+        return await orchestrator.judge(judgeInput);
+      } catch (error) {
+        if (error instanceof WorkerNotStartedError) { withheld ??= error; cancel.abort(); }
+        throw error;
+      }
+    };
     const result = await runRiskJudge(
       { ...input, prNumber: pr.prNumber, headSha: pr.headSha },
       {
         ...orchestrator,
-        signal, // W1-T5659: the pool's bound cancels the judgment — no late decision row, no late escalation
+        judge,
+        signal: cancel.signal, // W1-T5659: the pool's bound cancels the judgment — no late decision row, no late escalation
         log: (step, extra) => log(step, { ...extra, pr_number: pr.prNumber, head_sha: pr.headSha }),
       },
       { ...config, judgeUnavailableAction: "proceed" },
     );
+    if (withheld !== undefined) throw withheld;
     if (result.verdict.availability === "unavailable") {
       return { action: "unavailable", reason: result.verdict.reasons.join("; ") || result.action.reason };
     }
@@ -19555,7 +19571,7 @@ function startHandedOffHeadJudgment(
   };
   pool.flights.set(key, flight);
   let cancelBound = () => {};
-  const settle = (judgment: HandedOffHeadJudgment): void => {
+  const settle = (judgment: HandedOffHeadJudgment, unattempted = false): void => {
     if (flight.settled !== undefined) return;
     flight.settled = judgment;
     pool.flights.delete(key);
@@ -19564,11 +19580,13 @@ function startHandedOffHeadJudgment(
       pool.settled.set(key, judgment);
     }
     finished();
-    if (judgment.action !== "unavailable") return;
+    if (judgment.action !== "unavailable" || unattempted) return;
     logRiskJudgeUnavailable(pr, handoff, judgment.reason, log);
   };
+  // W1-T14916: a withheld judge never ran, so no unavailable row: spawnWorker already ledgered worker.spawn_withheld.
   const threw = (error: unknown): void =>
-    settle({ action: "unavailable", reason: `risk judge threw: ${String((error as Error)?.message ?? error)}` });
+    settle({ action: "unavailable", reason: `risk judge threw: ${String((error as Error)?.message ?? error)}` },
+      error instanceof WorkerNotStartedError);
   flight.expire = () => {
     if (flight.settled !== undefined) return;
     controller.abort(); // before settle: the aborted call's rejection then reaches `threw`, a no-op once settled
