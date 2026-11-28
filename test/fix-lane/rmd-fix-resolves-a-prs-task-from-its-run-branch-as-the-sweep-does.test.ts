@@ -14,7 +14,9 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 
 const SHA = "2".repeat(40);
-const STAMP = "2026-11-14T16:41:24.000Z";
+// Clock-relative, so the sweep's abandonment gate (staleDays) never reads this fixture PR as idle: a fixed
+// date ages past the threshold as wall time passes and the verb refuses "abandoned" instead of the reason under test.
+const STAMP = new Date(Date.now() - 86_400_000).toISOString();
 const PR = 18449;
 const PR_URL = `https://github.com/fixture/fix-task/pull/${PR}`;
 const UNRECOVERABLE = "criteria unrecoverable (no Remudero-Task: trailer to resolve them from)";
