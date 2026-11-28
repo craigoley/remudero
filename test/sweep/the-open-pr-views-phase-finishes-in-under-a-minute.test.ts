@@ -180,12 +180,12 @@ test("W1-T12530 criterion 1: the stage times name the slow stage", async () => {
   const { pass, cleanup } = setup(b);
   try {
     const slowMerge = async (args: string[]): Promise<unknown> => {
-      if (/\/pulls\/\d+$/.test(args[1] ?? "")) await sleep(150);
+      if (/\/pulls\/\d+$/.test(args[1] ?? "")) await sleep(500);
       return b.fetchAsync(args);
     };
     const stagesMs: Record<string, number> = {};
     await pass({ fetchAsync: slowMerge, stagesMs });
-    assert.ok(stagesMs.merge_states! >= 140, JSON.stringify(stagesMs));
+    assert.ok(stagesMs.merge_states! >= 490, JSON.stringify(stagesMs));
     const others = Object.entries(stagesMs).filter(([stage]) => stage !== "merge_states");
     assert.ok(others.every(([, ms]) => ms < stagesMs.merge_states!), JSON.stringify(stagesMs));
   } finally { cleanup(); }

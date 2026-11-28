@@ -72,7 +72,29 @@ process.stdout.write(kept.join(" "));
   unset RMD_LEARNED_NODE_OPTIONS
 fi
 
-if [ "${1:-}" = "daemon" ] || [ "${1:-}" = "review" ]; then
+# W1-T14921: the host watchdog verbs start from the bundle too. A bundled main has no tsx loader, so a self-sync
+# re-exec of its .ts entry could not start: they use it only where no re-exec can happen. That is: the guard is set, or
+# HEAD is on no branch both in this tree (a daemon's detached tree) and in the cwd's. Self-sync acts on --repo-root,
+# else the cwd's tree, else this one (resolveRepoRoot, src/lib/repo-location.ts), so naming --repo-root is doubt too.
+# Anything else starts tsx exactly as before.
+RMD_MAIN_VERB=""
+case "${1:-}" in
+  daemon|review) RMD_MAIN_VERB="$1" ;;
+  host-alert|live-edits|progress-watchdog|deploy-run)
+    RMD_NAMES_ROOT=""
+    for RMD_ARG in "$@"; do
+      if [ "$RMD_ARG" = "--repo-root" ]; then RMD_NAMES_ROOT=1; fi
+    done
+    if [ "${RMD_SELF_SYNC_DONE:-}" = 1 ]; then
+      RMD_MAIN_VERB="$1"
+    elif [ -z "$RMD_NAMES_ROOT" ] && ! git -C "$DIR" symbolic-ref -q HEAD >/dev/null 2>&1 &&
+      ! git symbolic-ref -q HEAD >/dev/null 2>&1; then
+      RMD_MAIN_VERB="$1"
+    fi
+    unset RMD_NAMES_ROOT RMD_ARG
+    ;;
+esac
+if [ -n "$RMD_MAIN_VERB" ]; then
   RMD_MAIN_CHOICE="$(node "$DIR/scripts/build-child-entries.mjs" --root "$DIR" --main-entry "$1" --main-entry-source "$RMD_MAIN_SOURCE" 2>/dev/null || true)"
   RMD_MAIN_KIND="$(printf '%s' "$RMD_MAIN_CHOICE" | cut -f1)"
   RMD_MAIN_REASON="$(printf '%s' "$RMD_MAIN_CHOICE" | cut -f2)"
@@ -90,8 +112,12 @@ if [ "${1:-}" = "daemon" ] || [ "${1:-}" = "review" ]; then
   if [ "${1:-}" = "review" ]; then
     printf 'tsx\t%s\n' "${RMD_MAIN_REASON:-resolver-gave-no-answer}" 2>/dev/null >&3 || true
   fi
-  export RMD_MAIN_ENTRY="tsx:${RMD_MAIN_REASON:-resolver-gave-no-answer}"
+  # A watchdog verb on tsx starts exactly as it did before W1-T14921, with no entry named.
+  if [ "$RMD_MAIN_VERB" = daemon ] || [ "$RMD_MAIN_VERB" = review ]; then
+    export RMD_MAIN_ENTRY="tsx:${RMD_MAIN_REASON:-resolver-gave-no-answer}"
+  fi
   unset RMD_MAIN_CHOICE RMD_MAIN_KIND RMD_MAIN_REASON RMD_MAIN_BUNDLE
 fi
+unset RMD_MAIN_VERB
 
 exec "$DIR/node_modules/.bin/tsx" "$DIR/src/run-task.ts" "$@"
