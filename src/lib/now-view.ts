@@ -1358,8 +1358,15 @@ export function createNowView(opts: NowViewOptions): {
       const store = readQuestionStore(instance.feedbackRoot);
       if ("reason" in store) reasons.task_question = store.reason;
       else {
-        storeLines = store.lines;
-        if (store.skipped) storeSkipped = `the question store has ${store.skipped} malformed line(s)`;
+        // JSON parsing accepts `null`, arrays, and primitives. Keep only records that can
+        // participate in question/answer projection; malformed values must not crash the view.
+        const validLines = store.lines.filter((line): line is QuestionStoreLine =>
+          typeof line === "object" && line !== null && !Array.isArray(line) &&
+          typeof line.task === "string" && typeof line.ts === "string" &&
+          (typeof line.question === "string" || typeof line.answer === "string"));
+        storeLines = validLines;
+        const skipped = (store.skipped ?? 0) + store.lines.length - validLines.length;
+        if (skipped) storeSkipped = `the question store has ${skipped} malformed line(s)`;
       }
     }
     // A held task is one decision carrying its plan question, on every instance whose plan is loaded; its store QUESTION lines fold into it.
