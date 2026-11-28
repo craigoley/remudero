@@ -213,7 +213,9 @@ test("W1-T15181 criterion 2: the band uses W1-T10085's closed windows, history s
 test("W1-T15181 criterion 2: one stall among hundreds of calm samples does not erase the learned PSI band", () => {
   const now = T1016;
   const samples = calmReadings(now, 284, 3.0, 20 * MIN);
-  const missedAt = now - 3 * MIN;
+  // Every harmed reading's window has closed by `now`, so all six count; at 3 min ago only two did, and the
+  // zero-noise share rule this replaced also kept band 3 on that input.
+  const missedAt = now - 10 * MIN;
   const harmedWindow = Array.from({ length: 5 }, (_, i) => ({
     at_ms: missedAt - (5 - i) * 30_000, events_high: 5000, memory_current_mib: 15_000,
     memory_high_mib: 16_404, psi_full_avg60: 0.1, missed_ticks: 0,
