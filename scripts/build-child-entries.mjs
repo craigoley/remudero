@@ -464,8 +464,15 @@ export function workerBundle(root, module, { outDir = OUT_DIR, treeHash, verifyS
 
 // ── bundlemain: the daemon's own main starts from the run-task bundle (operator ruling 2026-10-19) ─────────────────
 
+/**
+ * W1-T14921: the verbs each rmd-*-fleet-watchdog tick runs from the daemon tree's bin/rmd. Like `review`, they start only
+ * from an existing current bundle: they never build one and never read or write a daemon boot attempt.
+ */
+const HOST_WATCHDOG_VERBS = Object.freeze(["host-alert", "live-edits", "progress-watchdog", "deploy-run"]);
 /** The `rmd` verbs bin/rmd starts from the run-task bundle when it is current. */
-export const BUNDLED_MAIN_VERBS = Object.freeze(["daemon", "review"]);
+export const BUNDLED_MAIN_VERBS = Object.freeze(["daemon", "review", ...HOST_WATCHDOG_VERBS]);
+/** The verbs that use only an existing bundle (the review rule). */
+const EXISTING_BUNDLE_VERBS = new Set(["review", ...HOST_WATCHDOG_VERBS]);
 /** Written beside the bundle before a bundled main starts; settled by that main's first tick (ADR 0006 extension). */
 export const MAIN_ATTEMPT_NAME = "main-attempt.json";
 /** Present beside the bundle: every bundled main starts on tsx instead (the per-tree off switch). */
@@ -499,7 +506,8 @@ export function settleMainAttempt(root, outDir = OUT_DIR, now = () => new Date()
  * AND every declared worker bundle is current AND its linked map is beside it AND no bundled boot of this source has
  * failed before its first tick; tsx on any doubt, with the reason. The daemon builds a stale or missing build once,
  * then writes an attempt marker settled at its first tick ({@link settleMainAttempt}); an unsettled attempt demotes
- * its next boot. Reviews use only existing bundles and never read or write daemon boot attempts. Never throws.
+ * its next boot. Reviews and the host watchdog verbs use only existing bundles and never read or write daemon boot
+ * attempts. Never throws.
  */
 export async function mainEntry(root, verb, { outDir = OUT_DIR, build = buildChildEntries, now = () => new Date().toISOString(), source } = {}) {
   try {
@@ -514,7 +522,7 @@ export async function mainEntry(root, verb, { outDir = OUT_DIR, build = buildChi
     let built = false;
     // A current bundle without its map (a build from before recipe 5's maps) is rebuilt too: source maps stay on.
     if (!verdict.current || !existsSync(`${verdict.bundle}.map`)) {
-      if (verb === "review") return tsx(verdict.current ? "map-missing" : verdict.reason);
+      if (EXISTING_BUNDLE_VERBS.has(verb)) return tsx(verdict.current ? "map-missing" : verdict.reason);
       try {
         await build({ root, outDir, layoutDir: outDir });
       } catch (err) {
@@ -530,7 +538,7 @@ export async function mainEntry(root, verb, { outDir = OUT_DIR, build = buildChi
       if (!worker.current) return tsx(`worker-not-bundled: ${module}: ${worker.reason}`);
     }
     if (!existsSync(`${verdict.bundle}.map`)) return tsx("map-missing");
-    if (verb === "review") return { kind: "bundle", reason: verdict.reason, bundle: verdict.bundle };
+    if (EXISTING_BUNDLE_VERBS.has(verb)) return { kind: "bundle", reason: verdict.reason, bundle: verdict.bundle };
     const attempt = readMainAttempt(root, outDir);
     if (attempt && attempt.sourceHash === treeHash && attempt.settled !== true) {
       return tsx(`demoted: a bundled ${attempt.verb ?? verb} boot of this source never reached its first tick`);
