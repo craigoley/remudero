@@ -6086,8 +6086,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readCommitParents: async (_pr, sha) => {
       const body = await paceGhEntry(pacer, isGhRateLimitError, () => readJsonImpl(["api", `repos/${owner}/${repo}/git/commits/${sha}`])) as
         { parents?: Array<{ sha?: unknown }> } | undefined;
-      if (!Array.isArray(body?.parents)) return undefined;
-      return body.parents.flatMap((p) => (typeof p?.sha === "string" ? [p.sha] : []));
+      const parents = body?.parents;
+      if (!Array.isArray(parents)) return undefined;
+      return parents.flatMap((p) => (typeof p?.sha === "string" ? [p.sha] : []));
     },
 
     // W1-T2752 — the outer, synchronous admission seam `runSweep` consults before EITHER
