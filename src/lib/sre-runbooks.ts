@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 
 import { fixedClock, systemClock } from "./clock.js";
 import { judgeNonWorkerRelease, NON_WORKER_BREAKER_RUNBOOK_ID, readBreakerStrikes, type BreakerRunbookHost } from "./breaker-release.js";
-import { escalate, ghIssueGateway, type Escalation, type IssueGateway } from "./escalate.js";
+import { escalate, ghIssueGateway, issueUrlRepository, type Escalation, type IssueGateway } from "./escalate.js";
 import { isQuietHours, pauseDetail, pendingPrActions, requestPrAction, stopDetail } from "./fleet-control.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { defaultInContainer, writeAtomic } from "./fs-race-safe.js";
@@ -318,7 +318,7 @@ export function sreOperatorEscalation(opts: {
       const out = gh(args);
       if (args[0] !== "issue" || args[1] !== "create") return out;
       try {
-        gh(["issue", "edit", out.trim(), "--repo", repoArg, "--add-assignee", opts.owner]);
+        gh(["issue", "edit", out.trim(), "--repo", issueUrlRepository(out) ?? repoArg, "--add-assignee", opts.owner]);
       } catch (error) {
         opts.log("sre.escalation_assign_failed", { issue_url: out.trim(), reason: String((error as Error)?.message ?? error) });
       }

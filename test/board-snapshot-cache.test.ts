@@ -490,7 +490,7 @@ esac
     }
     const recovered = createBoardSnapshotCache(dir, "o", "r");
     assert.deepEqual([...recovered.closedSeed()!.keys()], [8]);
-    assert.deepEqual([...recovered.issueSeed()!.keys()], [7]);
+    assert.deepEqual([...recovered.issueSeed()!.keys()], ["https://github.com/o/r/issues/7"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

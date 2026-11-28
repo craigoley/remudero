@@ -10,6 +10,8 @@ import {
   type RetroLedgerRowView,
 } from "../src/lib/retro.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for o/r.
+process.env.RMD_ESCALATION_REPOSITORY ??= "o/r";
 
 const NOW = Date.parse("2026-09-06T23:48:02.314Z");
 const ago = (ms: number): string => new Date(NOW - ms).toISOString();
