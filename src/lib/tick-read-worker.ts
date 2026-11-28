@@ -339,10 +339,6 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   });
   return async (request: { plan: Plan; previousProjection?: Array<[string, StatusProjection]> }) => {
     const { plan } = request;
-    // W1-T14883: contiguous laps on one clock, so the stages sum to the read's own elapsed time.
-    const readStageMs: Record<string, number> = {};
-    let lapAt = systemClock.now();
-    const lap = (stage: string) => { const at = systemClock.now(); readStageMs[stage] = at - lapAt; lapAt = at; };
     reads = new Map();
     openFiles = createChangedFilesCache(config.root, owner, repo, fileOptions);
     generationClock++;
@@ -356,7 +352,6 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       log("read_plane.open_failed", { reason: openPrError });
     }
     recordHeadReadCounts(dirname(ledgerPath), headReadGate.counts());
-    lap("open_pr_reads");
     let prior = request.previousProjection;
     if (!prior) {
       const stored = readFileIfExists(join(config.root, "state", "status.json"));
@@ -376,7 +371,6 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       // W1-T14302: the target checkout's own plan holds the override rows; config.root/plan does not exist on the fleet.
       creditOverridePath: planCreditOverridePath(checkoutRoot),
     };
-    lap("prior_reads");
     let openBranches: PrRef[] | undefined;
     // W1-T14644: the settled derivation's phases, the last one written, ride the facts to the selection timing row.
     let projectionPhases: ProjectPlanPhases | undefined;
@@ -387,14 +381,11 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       observePhases: (phases) => { projectionPhases = phases; },
     });
     let projection = derive();
-    lap("projection_warm");
     await files.settle();
     await openFiles.settle();
-    lap("projection_file_settle");
     // Warm-up credit precedes its file evidence; only the settled derivation may publish it.
     credits = creditBefore;
     projection = derive();
-    lap("projection_settled");
     const openPrViews = openPrRows ? await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
       ciGateSource, log, ...io.viewsDeps, fetchAsync, pacer, planFilingFileCache: filingFiles, openPrRows, stageReuse,
       readMainPlan: () => plan, isMerged: (task) => projection.get(task.id)?.merged ?? false,
@@ -404,33 +395,26 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       const saved = filingFiles.save();
       if (!saved.ok) log("plan_filing_files.store_save_failed", { reason: saved.reason });
     }
-    lap("open_pr_views");
     const evidenceRootFor = io.evidenceRootFor ?? (() => checkoutRoot);
     const credit = () => buildCreditCandidates(owner, repo, plan, ledgerPath, log, github, evidenceRootFor, readLedgerLines, creditIo);
     const beforeCreditRead = credits;
     let creditCandidates = credit();
-    lap("credit_warm");
     await files.settle();
     await openFiles.settle();
-    lap("credit_file_settle");
     credits = beforeCreditRead;
     creditCandidates = credit();
-    lap("credit_settled");
     let escalationIntake: EscalationIntake | undefined;
     const escalationCandidates = await attachEscalationConditions(owner, repo, await buildEscalationReconcileCandidatesAsync(owner, repo, plan, ledgerPath, log, {
       github, issues: io.issues, evidenceRootFor, creditIo,
       onIntake: (intake) => { escalationIntake = intake; },
     }), openPrRows, fetchAsync);
-    lap("escalation_reads");
     const boardItems = openPrRows ? defaultBoardReviewItems(config, {
       resolveOwnerRepo: () => ({ owner, repo }), fetchOpenPrs: () => openPrRows,
       loadPlan: () => plan, projectPlan: () => projection,
     }) : [];
     const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, openPrViews);
-    lap("board_and_gate_views");
     const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
     const behindMainByPr = await buildBehindMainByPrAsync(owner, repo, openPrViews, fetchAsync, nextDistanceProbe(), baseChangedFilesByPr);
-    lap("behind_main_probes");
     const mergedFixPrNumbers = [...new Set(DEFAULT_FIX_CLASSES.map((entry) => entry.fixPrNumber))]
       .filter((number) => github.prByRef(number)?.state === "MERGED");
     const rawByNumber = new Map(openPrRows?.map((pr) => [pr.number, pr]));
@@ -443,16 +427,13 @@ export function createTickReadProducer(options: TickReadOptions, io: {
           : await (io.viewsDeps?.fetchCiFailureEvidenceAsync ?? fetchCiFailuresAsync)(owner, repo, raw.statusCheckRollup))
         : pr.ciFailures);
     }
-    lap("ci_failure_reads");
     const creditUpdates = Object.entries(credits)
       .filter(([id, value]) => JSON.stringify(value) !== JSON.stringify(creditBefore[id]))
       .map(([id, after]) => ({ id, before: creditBefore[id], after }));
     const closedPrs: ClosedPrFact[] = closedPrFacts(closedRows, closedAt, new Set(openPrRows?.map((pr) => pr.number)));
-    lap("assembly");
     return { plan, projection: [...projection], openBranches, openPrRows, openPrViews, openPrError, creditUpdates,
       creditCandidates, escalationCandidates, escalationIntake, boardItems,
-      staleGateWorkflowsByPr, behindMainByPr, baseChangedFilesByPr, mergedFixPrNumbers, postFixCiFailuresByPr, closedPrs, projectionPhases,
-      readStageMs };
+      staleGateWorkflowsByPr, behindMainByPr, baseChangedFilesByPr, mergedFixPrNumbers, postFixCiFailuresByPr, closedPrs, projectionPhases };
   };
 }
 
