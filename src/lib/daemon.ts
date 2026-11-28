@@ -1622,6 +1622,8 @@ export interface DaemonDeps {
   refreshMergedForRefill?: (plan?: Plan) => Promise<MergedSet>;
   /** W1-T14644: where the last refreshMerged read's projection spent its time, handed over once; undefined when it measured nothing. */
   takeRefreshMergedPhases?: () => ProjectPlanPhases | undefined;
+  /** W1-T14883: that read's own stage timings in ms, handed over once beside the phases. */
+  takeTickReadStages?: () => Readonly<Record<string, number>> | undefined;
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
     sync_spawn_top?: unknown[] }) & { takeLagInterval?: (consumer?: string) => { top: unknown; sync_spawn_ms: number;
       by_caller?: unknown[]; unnamed_ms?: number; // W1-T9577: the interval's callers by total, and the rest
@@ -2474,6 +2476,7 @@ function dispatchSelectionTiming(
   let measuredMs = 0;
   let candidatesExamined = 0;
   let refreshMergedPhases: ProjectPlanPhases | undefined;
+  let tickReadStages: Readonly<Record<string, number>> | undefined;
   const elapsed = (since: number) => Math.max(0, clock.now() - since);
   const probe = <T>(name: string, read: () => T): T => {
     if (log === undefined) return read();
@@ -2502,6 +2505,7 @@ function dispatchSelectionTiming(
     wrap,
     /** W1-T14644: the refreshMerged probe's phases, written beside its total; undefined adds nothing. */
     noteRefreshMergedPhases(phases: ProjectPlanPhases | undefined) { if (log !== undefined) refreshMergedPhases = phases; },
+    noteTickReadStages(stages: Readonly<Record<string, number>> | undefined) { if (log !== undefined) tickReadStages = stages; },
     selectionInputs(plan: Plan, isMerged: MergedSet, limit: number, opts: NextRunnableOpts) {
       if (log === undefined || limit <= 0) return { isMerged, opts, finish: () => {} };
       const started = clock.now();
@@ -2537,6 +2541,7 @@ function dispatchSelectionTiming(
         log?.("dispatch.selection_timing", {
           site, total_ms: elapsed(startedAt), candidates_examined: candidatesExamined, probe_ms: { ...probeMs },
           ...(refreshMergedPhases ? { refresh_merged_phases: refreshMergedPhases } : {}),
+          ...(tickReadStages ? { tick_read_stages_ms: tickReadStages } : {}),
         });
       } catch (error) { void error; /* A timing row is best-effort and cannot hold a lane. */ }
     },
@@ -10173,11 +10178,13 @@ export async function runDaemon(
             // object that supplies no async port keeps the synchronous read, and its refill stays synchronous.
             // W1-T14644: drop phases an earlier read left, so the row names only this probe's own.
             deps.takeRefreshMergedPhases?.();
+            deps.takeTickReadStages?.();
             const refillRead = deps.refreshMergedAsync ? (deps.refreshMergedForRefill ?? deps.refreshMergedAsync) : undefined;
             if (refillRead) {
               return timing.probe("refreshMerged", () => refillRead(refillPlan)).then(
                 (isMerged) => {
                   timing.noteRefreshMergedPhases(deps.takeRefreshMergedPhases?.());
+                  timing.noteTickReadStages(deps.takeTickReadStages?.());
                   if (deps.readLiveState) return decideLive(refillPlan, isMerged);
                   return decideThenConclude({ plan: refillPlan, isMerged });
                 },
@@ -10186,6 +10193,7 @@ export async function runDaemon(
             }
             const isMerged = timing.probe("refreshMerged", () => deps.refreshMerged(refillPlan));
             timing.noteRefreshMergedPhases(deps.takeRefreshMergedPhases?.());
+            timing.noteTickReadStages(deps.takeTickReadStages?.());
             if (deps.readLiveState) return decideLive(refillPlan, isMerged);
             return decideThenConclude({ plan: refillPlan, isMerged });
           } catch (e) {

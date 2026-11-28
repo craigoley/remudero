@@ -19,13 +19,10 @@ import { originWithClone } from "#test/helpers/git-repo.js";
 
 const TASK = "W1-T12701";
 const PR = 18422;
-// Clock-relative, so the sweep's abandonment gate (staleDays) never reads this fixture PR as idle: a fixed
-// date ages past the threshold as wall time passes and the verb refuses "abandoned" before the judge runs.
-const DAY_MS = 86_400_000;
-const STAMP_MS = Date.now() - DAY_MS;
+// Relative to the clock the verb reads, so the fixture PR never ages past the 14-day abandonment threshold.
+const STAMP_MS = Date.now() - 60 * 60_000;
 const STAMP = new Date(STAMP_MS).toISOString();
-/** The earlier round's row, three hours before the PR's own activity stamp. */
-const PRIOR_ROUND_TS = new Date(STAMP_MS - 3 * 60 * 60 * 1000).toISOString();
+const PRIOR_STRIKE_AT = new Date(STAMP_MS - 3 * 60 * 60_000).toISOString();
 const PR_URL = `https://github.com/acme/fixrepo/pull/${PR}`;
 const WORKER = { sessionId: "T12701", costUsd: 0, text: "REPORT\nno change\n", blocks: [], stderr: "", subtype: "success",
   isError: false, apiError: false, verdict: "success", tokens: {}, compactionEvents: [], childEnvKeys: [] } as unknown as WorkerResult;
@@ -63,7 +60,7 @@ function world(t: TestContext, opts: { priorStrike: boolean }): World {
   clone.git("checkout", "--quiet", "main");
   const ledgerPath = join(root, "state", "ledger.ndjson");
   // One earlier round at this head, so the rung asks the progress judge before it spawns a worker.
-  writeFileSync(ledgerPath, opts.priorStrike ? JSON.stringify({ ts: PRIOR_ROUND_TS, run_id: "FIX-1794600000000",
+  writeFileSync(ledgerPath, opts.priorStrike ? JSON.stringify({ ts: PRIOR_STRIKE_AT, run_id: "FIX-1794600000000",
     task_id: TASK, step: "fix.dispatch", lane: "fix", strike: 1, pr_number: PR, head_sha: head, mode: "ci-log",
     round_id: "r1" }) + "\n" : "");
   const config = { root, claudeBin: "/bin/true",
