@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import * as sweep from "#src/lib/sweep.js";
+import { runReview } from "#src/cli/commands/review.js";
 import type { FixDispatchEnvelope, FixDispatchEvidence, OpenPrView, RollupCheckEntry } from "#src/lib/sweep.js";
 import type { Config } from "#src/lib/config.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
@@ -418,6 +419,52 @@ test("W1-T15005 criterion 1: a daemon review's own live pending claim holds its 
   await settled.dispatch();
   assert.equal(deferrals(settled.rows).length, 0, "once the local review settles, its key releases the round");
   assert.equal(settled.seen.claimKeys, 1);
+});
+
+test("W1-T15005 criterion 1: runReview's pending claim defers the daemon fix until the review settles", async (t) => {
+  const d = dispatcher(t, [], {}, false);
+  let enteredPending!: () => void;
+  const pendingEntered = new Promise<void>((resolve) => { enteredPending = resolve; });
+  let releasePending!: () => void;
+  const pendingGate = new Promise<void>((resolve) => { releasePending = resolve; });
+  let enteredHistory!: () => void;
+  const historyEntered = new Promise<void>((resolve) => { enteredHistory = resolve; });
+  let releaseHistory!: () => void;
+  const historyGate = new Promise<void>((resolve) => { releaseHistory = resolve; });
+  t.after(() => { releasePending(); releaseHistory(); });
+  const review = runReview({ readHeadShaRest: () => HEAD } as never, {
+    owner: "o", repo: "fixture", prUrl: PR_URL,
+    task: { id: TASK, title: "repair", files: [], acceptance: [{ claim: "repair the defect", proof: "unit test: daemon review" }] },
+    report: "daemon review fixture", settingsFile: "unused", config: { root: process.cwd() } as Config,
+    log: () => {}, say: () => {}, account: (result: never) => result,
+    ledgerPath: d.ledgerPath, runId: "review-PR15005-daemon-integration", spawnReviewer: false,
+    postReviewPending: async (options) => {
+      appendFileSync(options.ledgerPath, `${JSON.stringify(claim(options.runId, HEAD, {
+        owner_pid: process.pid, owner_started_at: new Date().toISOString(), host: hostname(),
+      }))}\n`);
+      enteredPending();
+      await pendingGate;
+      return { posted: true };
+    },
+    readReviewStatusHistory: async () => {
+      enteredHistory();
+      await historyGate;
+      return { kind: "unreadable", reason: "fixture complete" };
+    },
+  } as never);
+  await pendingEntered;
+  const waiting = await d.dispatch();
+  assert.equal(waiting, false, "THE CLAIM: the sweep does not dispatch while runReview owns the pending head");
+  assert.deepEqual(deferrals(d.rows).map((row) => [row.pr_number, row.head, row.review_run]),
+    [[15005, HEAD, "review-PR15005-daemon-integration"]], "THE CLAIM: the sweep records the live review run");
+  assert.equal(d.seen.claimKeys, 0);
+  releasePending();
+  await historyEntered;
+  releaseHistory();
+  await review;
+  await d.dispatch();
+  assert.equal(deferrals(d.rows).length, 1, "the prior deferral remains durable after runReview exits");
+  assert.equal(d.seen.claimKeys, 1);
 });
 
 test("W1-T15005: a claim another process owns is live only on an active owner assessment", () => {

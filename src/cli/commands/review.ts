@@ -49,7 +49,7 @@ import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyV
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
-import { holdReviewOfHead, isDispatchedRunBranch } from "../../lib/sweep.js";
+import { holdReviewOfHead, isDispatchedRunBranch, reviewOfHeadRunningHere } from "../../lib/sweep.js";
 import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "../../lib/sweep.js";
 import { readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest } from "../../lib/sweep.js";
 import { REVIEW_RUN_SETTLED_STEPS, REVIEWER_START_FAILED_OUTCOME } from "../../lib/sweep.js";
@@ -1174,6 +1174,8 @@ export async function runReview(host: ReviewCommandHost, args: {
   readReviewReuseFacts?: () => ReviewReuseFacts | undefined;
   /** Shared GitHub status/review history; injected so review tests never contact the network. */
   readReviewStatusHistory?: ReviewStatusHistoryReader;
+  /** W1-T15005 test seam: controls the pending-claim boundary so the daemon/sweep interaction can be exercised in-process. */
+  postReviewPending?: typeof postReviewPending;
   /** Creation time from the PR view, when the caller already has it. */
   prCreatedAt?: string;
   report: string;
@@ -1370,6 +1372,15 @@ export async function runReview(host: ReviewCommandHost, args: {
   // eligible for retry and withhold terminal publication.
   const inputBody = args.reviewInputBody ?? (args.reportIsSubstitute ? undefined : report);
   const inputDigest = inputBody === undefined ? undefined : reviewInputDigest(headSha, inputBody);
+  // W1-T15005: daemon task reviews call runReview directly, without reviewCommand's claim hook.
+  // Register the same exact-head liveness proof before publishing pending, and retain it until
+  // every return or throw from this attempt has settled.
+  const reviewHead = { prNumber: reviewPrNumber(prUrl), headSha, prUrl, taskId: task.id,
+    ...(inputDigest === undefined ? {} : { reviewInputDigest: inputDigest }) };
+  // reviewCommand may already own this same key; leave its claim in place for its outer finally.
+  const releaseHeadClaim = args.shadow || reviewOfHeadRunningHere(reviewHead)
+    ? undefined : holdReviewOfHead(reviewHead);
+  try {
   // W1-T913 (fb-1784901239119-1be356, PR #707): post `remudero-review=pending` the MOMENT this
   // head is detected as needing review — before the diff fetch, the advisory reviewer spawn or
   // worktree materialization consume the review's own latency budget. Before this, the required
@@ -1383,7 +1394,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   // what actually gates the merge, exactly as it always has. A shadow review (W1-T10269) posts nothing.
   let prCreatedAt = args.prCreatedAt;
   if (!args.shadow) try {
-    const pending = await postReviewPending({
+    const pending = await (args.postReviewPending ?? postReviewPending)({
       owner,
       repo,
       sha: headSha,
@@ -2565,6 +2576,9 @@ export async function runReview(host: ReviewCommandHost, args: {
   };
   } finally {
     decisionClaim.release();
+  }
+  } finally {
+    releaseHeadClaim?.();
   }
 }
 
