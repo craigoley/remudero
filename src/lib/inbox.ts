@@ -46,6 +46,7 @@ import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedMode
   OpenWeightRequestTooLargeError, OPENWEIGHT_MAX_COMPLETION_TOKENS, type CashDraftFit, type CashDraftFitInput } from "./worker-provider.js";
 import { mechanicalAskPurpose, inboxMechanicalTaskDigest, inboxMechanicalProposalDigest, isMechanicalProducerObject, isVerificationProducerObject, type MechanicalAskPurpose, type InboxRetirementView } from "./inbox-retirement.js";
 import { inboxDismissalReceipt } from "./inbox-dismissal-audit.js";
+import { DEFAULT_DEPENDS_ON_SHORTLIST_K, dependsOnShortlistWithDependencies, pathsInText, shortlistRecall, type DependsOnCandidateRow, type ShortlistRecall } from "./depends-on-candidates.js";
 
 /**
  * Ratification core (MASTER-PLAN P25(i), W1-T110; docs/forensics/inbox.md): only READY surfaces
@@ -1771,20 +1772,26 @@ export function planProjectionForDependsOn(planText: string, keepIds: ReadonlySe
   return dependsOnIndexFromRows(projectPlanRows(planText), keepIds).text;
 }
 
-/** One projected task row; `landed` is plan.ts's reading of its status. */
+/** One projected task row; `landed` is plan.ts's reading of its status, `candidate` what the shortlist scores. */
 interface ProjectedPlanRow {
   id: string;
   landed: boolean;
   text: string;
+  candidate: DependsOnCandidateRow;
 }
 
-/** The depends_on index a draft prompt carries; `omitsLanded` says whether any landed row was left out. */
+/** The depends_on index a draft prompt carries; `omitsLanded` says whether any landed row was left out, and
+ *  `shortlist` whether open rows were left out too (config `inboxDraftIndex: "topk"`). */
 export interface PlanDependsOnIndex {
   text: string;
   omitsLanded: boolean;
+  shortlist?: true;
   /** A redraft's index: only the rows its last draft cited and the proposal names ({@link citedDependsOnIndex}). */
   cited?: true;
 }
+
+/** config.json `inboxDraftIndex`: "full" lists every open task (the default); "topk" lists the shortlist. */
+export type InboxDraftIndexMode = "full" | "topk";
 
 /** plan.ts's own landed reading (its MERGED_STATUSES behind `unmetDependencies`' default resolver), so this file
  *  keeps no second list: a status is landed exactly when a dependency on a task holding only it is satisfied. */
@@ -1799,16 +1806,80 @@ function dependsOnIndexFromRows(rows: readonly ProjectedPlanRow[], keepIds: Read
   return { text: kept.map((row) => row.text).join("\n"), omitsLanded: kept.length < rows.length };
 }
 
+/** The proposal's own text: its id, summary and live reframe rounds, which {@link proposalNamedTaskIds} and the shortlist read. */
+function proposalText(proposal: Proposal): string {
+  return [proposal.id, proposal.summary, ...(proposal.reframeHistory ?? []).filter((round) => !round.retracted).map((round) => round.feedback)].join("\n");
+}
+
 /** Every whole id-shaped token in the proposal's own text (its id, summary and live reframe rounds): a landed task
  *  it names keeps its index row. Whole tokens, so `W1-T5` never matches inside `W1-T55`. A split, not a matching
  *  regex: a backtracking id pattern is quadratic on a long dashless summary and spun a 300K-char proposal. */
 function proposalNamedTaskIds(proposal: Proposal): Set<string> {
-  const text = [proposal.id, proposal.summary, ...(proposal.reframeHistory ?? []).filter((round) => !round.retracted).map((round) => round.feedback)].join("\n");
+  const text = proposalText(proposal);
   return new Set(text.split(/[^A-Za-z0-9-]+/).map((token) => token.replace(/^-+|-+$/g, "")));
 }
 
 function dependsOnIndexFor(proposal: Proposal, rows: readonly ProjectedPlanRow[]): PlanDependsOnIndex {
   return dependsOnIndexFromRows(rows, proposalNamedTaskIds(proposal));
+}
+
+/** The rows the shortlist may draw on (every open row, and a landed one the proposal names) and the ids it keeps:
+ *  the named rows, the top `k` scored, and every open row one of those depends on (one hop). */
+function shortlistFor(proposal: Proposal, rows: readonly ProjectedPlanRow[], k?: number): { open: ProjectedPlanRow[]; kept: Set<string> } {
+  const named = proposalNamedTaskIds(proposal);
+  const text = proposalText(proposal);
+  const paths = pathsInText(text);
+  const open = rows.filter((row) => !row.landed || named.has(row.id));
+  const kept = new Set(dependsOnShortlistWithDependencies(open.map((row) => row.candidate),
+    { text, files: paths, planRefs: [...named, ...paths], namedIds: new Set(open.filter((row) => named.has(row.id)).map((row) => row.id)) }, k));
+  return { open, kept };
+}
+
+/** The "topk" index: the rows {@link shortlistFor} keeps, a named landed row too (as the full index keeps it). Rows
+ *  keep the full index's text and plan order. */
+function dependsOnShortlistIndexFor(proposal: Proposal, rows: readonly ProjectedPlanRow[], k?: number): PlanDependsOnIndex {
+  const { open, kept } = shortlistFor(proposal, rows, k);
+  const shortlisted = open.filter((row) => kept.has(row.id));
+  return { text: shortlisted.map((row) => row.text).join("\n"), omitsLanded: open.length < rows.length, shortlist: true };
+}
+
+/** The fragment's depends_on ids that are real OPEN plan rows, in citation order: a NEW-n placeholder, a landed id
+ *  and an id the plan lacks all drop. Throws on a fragment that does not parse; the caller logs nothing then. */
+function fragmentOpenDependsOn(fragmentYaml: string, rows: readonly ProjectedPlanRow[]): string[] {
+  const open = new Set(rows.filter((row) => !row.landed).map((row) => row.id));
+  const records = parseYaml(fragmentYaml) as unknown;
+  const cited: string[] = [];
+  for (const record of Array.isArray(records) ? records : []) {
+    const deps = record !== null && typeof record === "object" ? (record as { depends_on?: unknown }).depends_on : undefined;
+    for (const dep of stringList(deps)) if (open.has(dep)) cited.push(dep);
+  }
+  return cited;
+}
+
+/** inbox.draft_shortlist_recall's evidence for one lint-clean fragment, in either index mode: what the shortlist at
+ *  `k` would hold for this proposal against what the fragment cited. Undefined when it cannot be computed (an
+ *  unparseable fragment, say): the row is evidence only, and the draft it describes is cached either way. */
+function draftShortlistRecallFromRows(proposal: Proposal, rows: readonly ProjectedPlanRow[], fragmentYaml: string, k: number): ShortlistRecall | undefined {
+  try {
+    return shortlistRecall(fragmentOpenDependsOn(fragmentYaml, rows), shortlistFor(proposal, rows, k).kept);
+  } catch {
+    // Deliberate: the recall row is optional evidence beside a draft the rung caches regardless; an absent row and a
+    // failed computation both mean "no evidence for this draft", so nothing is logged and the rung carries on.
+    return undefined;
+  }
+}
+
+/** The index a draft prompt carries under `mode`; "full" (and an absent mode) is {@link dependsOnIndexFor} unchanged. */
+export function draftPlanIndex(proposal: Proposal, currentPlanText: string, mode: InboxDraftIndexMode = "full", k?: number): PlanDependsOnIndex {
+  return draftPlanIndexFromRows(proposal, projectPlanRows(currentPlanText), mode, k);
+}
+
+function draftPlanIndexFromRows(proposal: Proposal, rows: readonly ProjectedPlanRow[], mode: InboxDraftIndexMode | undefined, k?: number): PlanDependsOnIndex {
+  return mode === "topk" ? dependsOnShortlistIndexFor(proposal, rows, k) : dependsOnIndexFor(proposal, rows);
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 /** `state/DRAFT_RETRY_FULL_INDEX`: while present, a redraft carries the full index again, as before the cited one. */
@@ -1868,7 +1939,9 @@ function projectPlanRows(planText: string): ProjectedPlanRow[] {
       if (value === undefined || value === null || value === "") continue;
       lines.push(`  ${field}: ${Array.isArray(value) ? value.join(", ") : String(value)}`);
     }
-    rows.push({ id, landed: statusHasLanded(record["status"]), text: lines.join("\n") });
+    rows.push({ id, landed: statusHasLanded(record["status"]), text: lines.join("\n"), candidate: { id,
+      title: typeof record["title"] === "string" ? record["title"] : "", body: typeof record["rationale"] === "string" ? record["rationale"] : undefined,
+      files: stringList(record["files"]), planRefs: stringList(record["plan_refs"]), dependsOn: stringList(record["depends_on"]) } });
   }
   if (rows.length === 0) throw new PlanProjectionError("the plan projected to zero tasks");
   return rows;
@@ -1965,6 +2038,7 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
       "a dependency on a merged or done task is already satisfied, so leave it out of depends_on."] : []),
     "",
     "=== plan/tasks.yaml INDEX (id, title, status, type, depends_on — for depends_on grounding) ===",
+    ...(planIndex.shortlist ? ["This is a shortlist; Grep plan/tasks.yaml and plan/tasks.d/ for any other dependency."] : []),
     planIndex.text,
     "",
     "=== TASK IDS — PLACEHOLDERS ONLY, never a real W1-Tnnn id (feedback#fb-1784766965325-c7b673) ===",
@@ -1986,6 +2060,9 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "The harness supplies the proposal id, UTC date and fragment task ids for MASTER-PLAN.md's stamp.",
     "\"RATIFICATION CANDIDATE\" and \"§7/P25\" above name this PROCESS: never put them in a task title.",
     `Every task MUST declare ${SCOPE_HINT} — never omit it and never leave it empty.`,
+    // W1-T11746's design-invariant-proof check (invariantSlugViolations) was stated only by the example below.
+    "Every `type: implement` task's design: MUST hold one line `INVARIANT <slug>: <statement>` (slug: a-z, 0-9, -) per prior",
+    "behavior it keeps, each mapped by ONE claim `invariant:<slug>` with its own proof, or else the line `NO-INVARIANTS: <reason>`.",
     "Every files: path must exist in this checkout or origin/main: confirm with Glob before listing it.",
     "A new file is either test/<folder>/<task-title-slug>.test.ts, where <folder> is the folder placeTest computes from the src modules in files: (see `rmd test-place`; never directly under test/), or declared in design on its own CREATES: <path> line.",
     "A CREATES path is new-file scope only, never the call site of a call-site proof. Every proof must fail on main.",
@@ -2191,7 +2268,12 @@ export const INBOX_DRAFT_FRAGMENT_SCHEMA = {
         items: { type: "object", required: ["claim", "proof"], properties: { claim: { type: "string", minLength: 1 }, proof: { type: "string", minLength: 1 } } },
       },
       origin: { type: "string", minLength: 1 },
+      design: { type: "string", minLength: 1 },
     },
+    // An implement task without a design always fails invariantSlugViolations, so requiring it here refuses no draft the
+    // lint would have passed; other types keep design optional, as the linter does.
+    if: { properties: { type: { const: "implement" } } },
+    then: { required: ["design"] },
   },
 } as const;
 
@@ -2213,6 +2295,7 @@ export function validateDraftFragmentData(data: unknown): string[] {
       if (!isNonEmptyString(t[key])) errors.push(`${at}.${key} must be a non-empty string`);
     }
     if (!(TASK_TYPES as readonly unknown[]).includes(t.type)) errors.push(`${at}.type must be one of ${TASK_TYPES.join("|")}`);
+    if (t.type === "implement" && !isNonEmptyString(t.design)) errors.push(`${at}.design must be a non-empty string for an implement task`);
     if (!Number.isInteger(t.attempts) || (t.attempts as number) < 0) errors.push(`${at}.attempts must be a non-negative integer`);
     if (!Array.isArray(t.depends_on) || !t.depends_on.every((d) => typeof d === "string")) errors.push(`${at}.depends_on must be an array of strings`);
     if (!Array.isArray(t.files) || t.files.length === 0 || !t.files.every(isNonEmptyString)) errors.push(`${at}.files must be a non-empty array of non-empty strings`);
@@ -2316,6 +2399,11 @@ export interface DraftRungDeps {
   lane?: DraftLaneIdentity;
   cashFit?: (input: CashDraftFitInput) => CashDraftFit;
   cashResumes?: DraftCashResumes;
+  /** config.json `inboxDraftIndex`; absent is "full", the index every open task appears in. */
+  indexMode?: InboxDraftIndexMode;
+  /** config.json `inboxDraftTopK`: the shortlist's scored rows under "topk", and the k the recall row measures in
+   *  both modes; absent is {@link DEFAULT_DEPENDS_ON_SHORTLIST_K}. */
+  topK?: number;
   /** `state/DRAFT_RETRY_FULL_INDEX` is present: a redraft repeats the first prompt's full index. */
   retryFullIndex?: boolean;
   log: (step: string, extra?: Record<string, unknown>) => void;
@@ -2874,11 +2962,10 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
     let lastRequestedModel: string | null = null;
     try {
       // The plan is parsed once per rung; each proposal keeps the landed tasks its own text names.
-      planRows ??= projectPlanRows(currentPlanText);
-      const planIndex = dependsOnIndexFor(proposal, planRows);
+      const rows = planRows ??= projectPlanRows(currentPlanText);
+      const planIndex = draftPlanIndexFromRows(proposal, rows, deps.indexMode, deps.topK);
       const planIndexChars = planIndex.text.length;
       const initialPrompt = inboxDraftPrompt(proposal, currentPlanText, runId, planIndex);
-      const rows = planRows;
       // A redraft is a new session: its prompt is the proposal's own, re-indexed to the rows the failed drafts cite.
       const retryBase = (fragments: readonly string[]) => {
         if (deps.retryFullIndex) return { text: initialPrompt, indexChars: planIndexChars, index: "full" as const };
@@ -2991,6 +3078,8 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           prompt_chars: worker.promptChars ?? prompt.length,
           plan_index_chars: promptIndex?.indexChars ?? planIndexChars,
           ...(promptIndex ? { retry_index: promptIndex.index } : {}),
+          // A "full" retry repeats the first prompt, so it carries the shortlist whenever the first prompt did.
+          ...(planIndex.shortlist && promptIndex?.index !== "cited" ? { plan_index_mode: "topk" } : {}),
           num_turns: worker.numTurns,
           ...workerLedgerFields(worker),
         });
@@ -3039,6 +3128,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
               prompt_chars: escalated.promptChars ?? escalationPrompt.length,
               plan_index_chars: escalationIndex?.indexChars ?? planIndexChars,
               retry_index: escalationIndex?.index ?? "full",
+              ...(planIndex.shortlist && escalationIndex?.index !== "cited" ? { plan_index_mode: "topk" } : {}),
               num_turns: escalated.numTurns,
               ...workerLedgerFields(escalated),
             });
@@ -3098,6 +3188,13 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         stampLine: parsed.stampLine,
         anchorFingerprint: anchorFingerprint(proposal.evidenceAnchors),
       };
+      if (violations.length === 0 && !parsed.releaseTaskId) {
+        // The evidence the operator flips inboxDraftIndex on: under "full", what a shortlist at this k would have
+        // missed; under "topk", a dependency the drafter found by its own search.
+        const k = deps.topK ?? DEFAULT_DEPENDS_ON_SHORTLIST_K;
+        const recall = draftShortlistRecallFromRows(proposal, rows, parsed.fragmentYaml, k);
+        if (recall) deps.log("inbox.draft_shortlist_recall", { proposal_id: proposal.id, mode: deps.indexMode ?? "full", k, ...recall });
+      }
       // A still-dirty draft after the bounded retries is cached anyway and surfaces NOT-READY, but the unresolved set
       // is named on the ledger so the retro sees what the rung could not fix.
       if (!deps.causalScope) deps.log("inbox.drafted", { proposal_id: proposal.id, draft_input_key: draftInputKey(proposal), ...draftModelFields(lastWorker), lint_clean: violations.length === 0, unresolved_violations: violations.map((v) => v.message) });

@@ -17,7 +17,7 @@ import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolv
   type FixProgressWitness, type FixProgressHostedProofResult,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict,
   sameCriterionStall, nextStallRemedy, stallRemedyRows, failedApproaches, rowPrNumber, type StallRemedy,
-  type FixProgressReaskResult, type PriorRoundHold } from "./fix-progress-judge.js";
+  type FixProgressReaskResult, type FixProgressReaskedFrom, type PriorRoundHold } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredNames, resolveCiGateRequiredSource, type CiGateRequiredSource } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehomePorts } from "./head-rehome.js";
@@ -2706,8 +2706,13 @@ export function productionFixProgressJudge(opts: {
     const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge");
     const primaryArgs: SpawnWorkerArgs = { ...args, prompt, memoryShadow: { ...args.memoryShadow, ...lightPassMemoryWaitPorts() },
       ...(mount.provider === undefined ? {} : { mountProvider: mount.provider }) };
-    const result = await spawn(primaryArgs);
-    const verdict = result.subtype !== undefined && result.subtype !== "success" ? undefined : parseFixProgressVerdict(result.text);
+    // W1-T15163: a worker that ended without a result (a non-success subtype, or a throw before one) is asked once
+    // more at once with its provider excluded. A worker that returned a success subtype is never re-asked here.
+    const attempt = await askFixProgressJudgeOnce(spawn, primaryArgs);
+    if (attempt === undefined) return undefined;
+    const { result, reaskedFrom } = attempt;
+    const parsed = result.subtype !== undefined && result.subtype !== "success" ? undefined : parseFixProgressVerdict(result.text);
+    const verdict = parsed === undefined || reaskedFrom === undefined ? parsed : { ...parsed, reasked_from: reaskedFrom };
     const shadowKey = `${input.prNumber === undefined ? input.taskId ?? "unknown" : `PR${input.prNumber}`}@${input.headSha}`;
     if (mount.shadow?.provider === "decisions" && opts.log !== undefined) {
       // W1-T12417: a decision-model arm. Not awaited: the verdict returned below is the primary's.
@@ -2730,6 +2735,46 @@ export function productionFixProgressJudge(opts: {
   };
   PRODUCTION_FIX_PROGRESS_JUDGES.add(judge);
   return judge;
+}
+
+/**
+ * W1-T15163: one fix-progress judge call. INVARIANT an-answer-is-asked-once: the second spawn runs only when the first
+ * ended without a result (a defined non-success subtype, or a throw), with the failed provider excluded so the
+ * auction routes elsewhere. A success subtype, parseable or not, returns as it is. A second failure returns that
+ * result (or rethrows), so the caller sees no verdict exactly as before.
+ */
+async function askFixProgressJudgeOnce(spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>, args: SpawnWorkerArgs):
+  Promise<{ result: WorkerResult; reaskedFrom?: FixProgressReaskedFrom } | undefined> {
+  let first: WorkerResult | undefined;
+  let firstThrew = false;
+  let assigned: { provider: WorkerProviderId; model: string } | undefined;
+  const firstArgs: SpawnWorkerArgs = { ...args, onSelectionAssignment: (assignment) => {
+    assigned = { provider: assignment.selected.provider, model: assignment.selected.model };
+    args.onSelectionAssignment?.(assignment);
+  } };
+  try { first = await spawn(firstArgs); } catch {
+    firstThrew = true;
+    first = undefined; // a throw before a result is an attempt that ended without one: it is re-asked below
+  }
+  if (first !== undefined && (first.subtype === undefined || first.subtype === "success")) return { result: first };
+  const provider = first?.provider ?? assigned?.provider;
+  // `model` is the caller's requested label on routed workers (for example Codex
+  // reports `haiku` there); retain the concrete model that actually ran.
+  const reaskedFrom: FixProgressReaskedFrom = { provider: provider ?? "unknown", model: first?.routedModel || assigned?.model || first?.model || "unknown",
+    subtype: first?.subtype ?? "threw" }; // the error text is never copied: a message may carry a secret
+  const exclude = provider === undefined ? args.excludeProviders : [...new Set([...(args.excludeProviders ?? []), provider])];
+  // Cash is a blocked-auction fallback, not an auction candidate. Excluding it alone can send a
+  // second blocked auction straight back into that same fallback before this spawn returns.
+  // Pin this one re-ask to a subscription provider so the excluded cash route cannot re-enter.
+  const reaskMount = provider === "cash" ? "claude" : args.mountProvider;
+  let result: WorkerResult;
+  try { result = await spawn({ ...args, ...(exclude === undefined || exclude.length === 0 ? {} : { excludeProviders: exclude }),
+    ...(reaskMount === undefined ? {} : { mountProvider: reaskMount }) }); }
+  catch (error) {
+    if (firstThrew) throw error;
+    return undefined; // a returned failure followed by a throw preserves the caller's unparseable/re-ask path
+  }
+  return { result, reaskedFrom };
 }
 
 /** W1-T12711: a second uncorroborated harness answer reruns this head's failed checks once; the next pass judges their red. */
@@ -17928,7 +17973,9 @@ function* fixDispatchHoldAtHeadSteps(
   options: FixDispatchHoldOptions,
 ): Steps<FixDispatchHold | undefined> {
   const atHead = (l: Record<string, unknown>) => l.pr_number === pr.prNumber && l.head_sha === pr.headSha;
-  const failed = (l: Record<string, unknown>) => isOwnerClaimDecline(l) || isDetachedFixDispatchFailure(l);
+  // W1-T15181: a round the container-shed rung ended is no failure of its dispatch, so it neither holds nor paces one.
+  const failed = (l: Record<string, unknown>) => (isOwnerClaimDecline(l) || isDetachedFixDispatchFailure(l)) &&
+    l.memory_shed !== true;
   const history: Record<string, unknown>[] = [];
   for (const row of lines) {
     if (fixDispatchSuccess(row, pr) && row.head_sha === pr.headSha) history.length = 0;
@@ -20067,7 +20114,12 @@ function priorActionsFromLedger(
   const missingTaskTrailerRepairs = new Set<string>();
   const realFixDispatches = new Set<string>();
   const voidedFixes = new Map<string, string>();
+  const shedFixes = new Map<string, string>(); // head sha -> PR@head of a shed round no later round has superseded
   for (const line of lines) {
+    // W1-T15181: a later round's own row at a shed head ends that shed's release of the dedup, applied after the walk.
+    if (line.step === "fix.dispatch" || line.step === "fix.retrigger" || line.step === "fix.stood_down" || line.step === "fix.done") {
+      shedFixes.delete(String(line.head_sha));
+    }
     if (line.step === "sweep.reviewer_freshness_probe" && typeof line.review_key === "string") {
       const refusal = reviewFreshnessRefusals.get(line.review_key);
       const at = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
@@ -20229,6 +20281,11 @@ function priorActionsFromLedger(
       realFixDispatches.add(`${String(line.task_id)}@${line.head_sha}`);
       continue;
     }
+    // W1-T15181: a shed round gives its dedup back even when it wrote fix.dispatch before the shed ended it.
+    if (isDetachedFixDispatchFailure(line) && line.memory_shed === true) {
+      shedFixes.set(String(line.head_sha), `${line.pr_number}@${String(line.head_sha)}`);
+      continue;
+    }
     if (isOwnerClaimDecline(line) || isDetachedFixDispatchFailure(line)) {
       voidedFixes.set(`${line.pr_number}@${line.head_sha}`, `${String(line.task_id)}@${String(line.head_sha)}`);
       continue;
@@ -20288,6 +20345,7 @@ function priorActionsFromLedger(
     }
   }
   for (const [prHead, taskHead] of voidedFixes) if (!realFixDispatches.has(taskHead)) fixed.delete(prHead);
+  for (const prHead of shedFixes.values()) fixed.delete(prHead);
   // W1-T5840 — a delivered FAILURE that a newer GitHub success contradicts is not a standing
   // verdict: release its key so the supersedes demand fires and the claim admits ONE re-review.
   for (const pr of openPrs ?? []) {
@@ -21842,6 +21900,8 @@ export interface RestartDrainInventoryEntry {
   phase: string;
   admitted_at_ms: number;
   settled: Promise<void>;
+  /** W1-T15181: a run child's run id, set only on the entries `restartDrainInventory({ children: true })` adds. */
+  run_id?: string;
 }
 function detachedRestartItem(settled: Promise<void>, action: DetachedSweepActionRegistration): RestartDrainInventoryEntry {
   return { what: "detached", kind: action.actionKind, task_id: action.taskId,
@@ -21860,11 +21920,21 @@ export function directMergeRestartItem(operation: DirectMergeOperation): Restart
     ...(operation.headSha === undefined ? {} : { head_sha: operation.headSha }),
     admitted_at_ms: operation.admittedAtMs, settled: operation.settled };
 }
-export function restartDrainInventory(): RestartDrainInventoryEntry[] {
-  return [...inFlightReviewRuns].map(([work, review]) => reviewRestartItem(work, review)).concat(
+/** W1-T15181: a review or detached action hosted in a run child, as the container-shed rung reads it: a restart never
+ *  waits for one (W1-T9114), so only `restartDrainInventory({ children: true })` lists it. Admitted when registered. */
+function childRestartItem(work: RegisteredChildWork, settled: Promise<void>): RestartDrainInventoryEntry {
+  return { what: work.kind === "review" ? "review" : "detached", kind: work.kind, task_id: work.taskId,
+    ...(work.prNumber === undefined ? {} : { pr: work.prNumber }),
+    ...(work.headSha === undefined ? {} : { head_sha: work.headSha }),
+    phase: work.phase ?? "child", admitted_at_ms: work.admittedAtMs ?? work.registeredAtMs, settled, run_id: work.runId };
+}
+export function restartDrainInventory(opts: { children?: boolean } = {}): RestartDrainInventoryEntry[] {
+  const owned = [...inFlightReviewRuns].map(([work, review]) => reviewRestartItem(work, review)).concat(
     [...detachedSweepActions].filter(([, action]) => isRestartInterruptible(action))
       .map(([work, action]) => detachedRestartItem(work, action)),
     directMergeOperationsInFlight().map(directMergeRestartItem));
+  if (opts.children !== true) return owned;
+  return owned.concat([...childWork.values()].flatMap((work) => work.settled === undefined ? [] : [childRestartItem(work, work.settled)]));
 }
 
 /** Hand one review attempt to {@link inFlightReviewRuns}; returns `work` unchanged for the caller to await. */
@@ -21998,6 +22068,10 @@ export async function drainInFlightReviews(opts: {
  *  does not own. A posted review frees admission but retains its mutex key until settlement (W1-T11151). */
 export interface ChildWorkRegistration {
   runId: string; kind: string; taskId: string; prNumber?: number; headSha?: string; pid?: number; reviewKey?: string; fixKey?: string;
+  /** Original run admission recovered from run_child.spawned on boot. */
+  admittedAtMs?: number;
+  /** W1-T15181: set when the container-shed rung signalled this child, in this process or before the boot adopting it. */
+  memoryShed?: boolean;
   readPhase?: () => string | undefined;
   planLane?: boolean;
 }
@@ -22008,8 +22082,15 @@ interface RegisteredChildWork extends ChildWorkRegistration {
   phase?: string;
   /** W1-T11149: the provider-refusal epoch when this review registered, so its settlement knows whether it ran refusal-free. */
   refusalEpoch?: number;
+  /** W1-T15181: resolves once {@link adoptChildWork} has settled this child; unset, the child is never a shed candidate. */
+  settled?: Promise<void>;
 }
 const childWork = new Map<string, RegisteredChildWork>();
+/** W1-T15181: the container-shed rung signalled this child; its settlement's dispatch failure row says so. */
+export function markChildWorkShed(runId: string): void {
+  const work = childWork.get(runId);
+  if (work !== undefined) work.memoryShed = true;
+}
 const settledChildWork = new Set<string>();
 const childWorkSettleKey = (runId: string, headSha?: string): string => `${runId}@${headSha ?? ""}`;
 
@@ -22438,6 +22519,8 @@ export function installedDetachedWorkHost(): DetachedWorkHost | undefined {
 export interface AdoptedWorkChild {
   runId: string; taskId: string;
   pid?: number;
+  admittedAtMs?: number;
+  memoryShed?: boolean;
   work: { kind: string; prNumber?: number; headSha?: string; pid?: number; reviewKey?: string; fixKey?: string; planLane?: boolean; inputs?: Record<string, unknown> };
   settled: Promise<unknown>;
   readPhase?: () => string | undefined;
@@ -22457,8 +22540,10 @@ export function adoptChildWork(child: AdoptedWorkChild, log: (step: string, extr
   registerChildWork({
     runId: child.runId, taskId: child.taskId, ...registered, pid: child.pid ?? registered.pid,
     ...(planLane ? { planLane } : {}), readPhase: child.readPhase,
+    ...(child.admittedAtMs === undefined ? {} : { admittedAtMs: child.admittedAtMs }),
+    ...(child.memoryShed ? { memoryShed: true } : {}),
   });
-  return child.settled.then(
+  const done = child.settled.then(
     (value) => ({ status: "fulfilled" as const, value }),
     (reason: unknown) => ({ status: "rejected" as const, reason }),
   ).then((outcome) => {
@@ -22473,6 +22558,7 @@ export function adoptChildWork(child: AdoptedWorkChild, log: (step: string, extr
       log("sweep.fix.dispatch_failed", {
         pr_number: child.work.prNumber, head_sha: child.work.headSha, child_run_id: child.runId,
         ...(typeof dedupeKey === "string" ? { dedupe_key: dedupeKey } : {}),
+        ...(work?.memoryShed ? { memory_shed: true } : {}),
         error: capStderrExcerpt(String((outcome.reason as Error)?.message ?? outcome.reason), STDERR_EXCERPT_CAP),
       });
     }
@@ -22484,6 +22570,9 @@ export function adoptChildWork(child: AdoptedWorkChild, log: (step: string, extr
       outcome: outcome.status === "fulfilled" ? "terminal" : "lost", first_settlement: first,
     });
   });
+  const held = childWork.get(child.runId);
+  if (held !== undefined && held.settled === undefined) held.settled = done;
+  return done;
 }
 
 /** W1-T2981 — is an action of this kind already detached? A second concurrent retro would race the

@@ -179,8 +179,10 @@ export type FixProgressVerdict =
   | { verdict: "continue"; reason: string }
   | { verdict: "change-approach"; approach: string; reason: string }
   | { verdict: "escalate"; loop: string; reason: string };
-export type FixProgressJudge = (input: FixProgressInput) => Promise<FixProgressVerdict |
-  { verdict: "harness"; reason: string } | undefined>;
+/** W1-T15163: the attempt a re-asked judgment replaced: provider, model and result subtype. */
+export interface FixProgressReaskedFrom { provider: string; model: string; subtype: string }
+export type FixProgressJudge = (input: FixProgressInput) => Promise<((FixProgressVerdict |
+  { verdict: "harness"; reason: string }) & { reasked_from?: FixProgressReaskedFrom }) | undefined>;
 export type FixProgressResult = FixProgressVerdict | { verdict: "unavailable"; reason: string };
 /** W1-T12711: the second answer was again an uncorroborated harness: rerun the head's failed checks once. */
 export interface FixProgressRerun { verdict: "rerun-checks"; reason: string; reask: 1 }
@@ -637,6 +639,8 @@ type FixProgressAnswer = { result: FixProgressResult } | { refused: "harness" | 
 async function askFixProgress(input: FixProgressInput, judge?: FixProgressJudge): Promise<FixProgressAnswer> {
   const verdict = judge ? await judge(input) : { verdict: "harness", reason: "the persisted proof passes off-host" };
   const parsed = verdict && parseFixProgressVerdict(JSON.stringify(verdict));
+  // Preserve the failed attempt for both ordinary and corroborated harness answers.
+  const reaskedFrom = verdict && "reasked_from" in verdict ? verdict.reasked_from : undefined;
   if (parsed?.verdict === "escalate" && parsed.loop === "harness") {
     if (!input.signals.offHostPass || input.offHostPassEvidence === undefined || input.offHostPassEvidence.length === 0)
       return { refused: "harness", reason: UNCORROBORATED_HARNESS_REASON };
@@ -646,9 +650,12 @@ async function askFixProgress(input: FixProgressInput, judge?: FixProgressJudge)
       `Worker ${e.worker.result} at ${e.worker.headSha}: ${e.worker.output}`,
       ...e.ci.map(c => `CI ${c.check} ${c.result} at ${c.headSha} (${c.testFile}): ${c.output}`),
     ].join("\n")).join("\n\n");
-    return { result: { ...parsed, reason: `${parsed.reason}\n${evidence}` } };
+    return { result: { ...parsed, reason: `${parsed.reason}\n${evidence}`,
+      ...(reaskedFrom === undefined ? {} : { reasked_from: reaskedFrom }) } };
   }
-  return parsed ? { result: parsed } : { refused: "unparseable", reason: UNPARSEABLE_REASON };
+  // W1-T15163: a judgment the judge re-asked on another provider names the attempt it replaced on the judged row.
+  return parsed ? { result: reaskedFrom ? Object.assign({}, parsed, { reasked_from: reaskedFrom }) : parsed }
+    : { refused: "unparseable", reason: UNPARSEABLE_REASON };
 }
 
 /**
