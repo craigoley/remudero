@@ -37,7 +37,7 @@ function fillLaunchTree(root: string): void {
   symlinkSync(join(REPO_ROOT, "node_modules"), join(root, "node_modules"));
 }
 
-function launch(root: string, verb: string, selfSynced: boolean): { bundled: boolean; entry?: string } {
+function launch(root: string, verb: string, selfSynced: boolean): { bundled: boolean; entry?: string; argv: string[] } {
   const env = { ...process.env };
   delete env.RMD_MAIN_ENTRY;
   delete env.RMD_SELF_SYNC_DONE;
@@ -55,8 +55,13 @@ test("W1-T14921 a tree on a branch keeps the watchdog verbs on tsx", async () =>
     fillLaunchTree(root);
     await build.buildChildEntries({ root });
     for (const verb of VERBS) {
-      assert.deepEqual(launch(root, verb, false), { bundled: false }, `${verb} on branch main starts tsx before self-sync`);
-      assert.deepEqual(launch(root, verb, true), { bundled: true, entry: "bundle:source-hash-match" }, `${verb} after self-sync starts the current bundle`);
+      // The fixture main also echoes its argv: either entry must hand the verb through unchanged.
+      assert.deepEqual(launch(root, verb, false), { bundled: false, argv: [verb] }, `${verb} on branch main starts tsx before self-sync`);
+      assert.deepEqual(
+        launch(root, verb, true),
+        { bundled: true, entry: "bundle:source-hash-match", argv: [verb] },
+        `${verb} after self-sync starts the current bundle`,
+      );
     }
   } finally {
     repo.cleanup();
