@@ -30,6 +30,8 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { pendingKicks } from "../src/lib/fleet-control.js";
 import type { Config } from "../src/lib/config.js";
 import type { EscalationJudgeVerdict } from "../src/lib/escalate.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for o/r.
+process.env.RMD_ESCALATION_REPOSITORY ??= "o/r";
 
 function ledger(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-triage-")), "ledger.ndjson");
@@ -614,7 +616,7 @@ test("W1-T8868: the sweep's default label edit uses the guarded async GitHub tra
   });
   await withLiveWritesAllowed(f.run);
   assert.deepEqual(calls, [[
-    "issue", "edit", f.url, "--repo", "o/r", "--add-label", FLEET_NOTICE_LABEL, "--remove-label", NEEDS_HUMAN_LABEL,
+    "issue", "edit", f.url, "--repo", "craigoley/remudero" /* W1-T14998: the issue URL's own repository */, "--add-label", FLEET_NOTICE_LABEL, "--remove-label", NEEDS_HUMAN_LABEL,
   ]]);
 });
 

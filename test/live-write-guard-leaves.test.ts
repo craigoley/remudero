@@ -10,6 +10,8 @@ import { ghPrCreateFillCommand, lastCommitSubject } from "#src/run-task.js";
 import { ghIssueGateway } from "#src/lib/escalate.js";
 import { defaultGitCapture, defaultPushExec, gitPushRunBranch } from "#src/lib/git-push.js";
 import { LiveWriteBlockedError, withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for acme/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "acme/remudero";
 
 /** ghPrMergeSquash requires the closing-reference guard; these tests are about the merge call itself. */
 const CLEAN_GUARD = () => ({ state: "clean" as const, defused: [] });

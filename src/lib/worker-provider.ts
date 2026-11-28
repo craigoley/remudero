@@ -4147,8 +4147,9 @@ async function withPrivateRegistryCodexProfile<T>(
     // A parent deny also hides any grant nested under it, so a layout with a grant beside the worktree keeps today's shape.
     // W1-T11564: Codex reads AGENTS.md upward from cwd to the project root and aborts on a denied read, so only a git
     // checkout root (where that walk stops) gets the deny; a plain probe directory keeps today's shape.
+    // W1-T15268: only a run that can write gets it; a reader's cwd is granted under it, so the deny hid its AGENTS.md.
     const parent = dirname(cwd);
-    if (parent !== cwd && existsSync(join(cwd, ".git"))
+    if (!readOnly && parent !== cwd && existsSync(join(cwd, ".git"))
       && !grantRoots.some(root => root !== cwd && isWithin(parent, root) && !isWithin(cwd, root))) {
       filesystem.set(parent, "deny");
     }

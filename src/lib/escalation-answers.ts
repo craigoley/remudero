@@ -69,9 +69,14 @@ import {
   escalationTaskId,
   escalationIssueTitle,
   ghIssueGatewayAsync,
+  issueGatewayRepository,
   labelledIssuesRestArgs,
   parseLabelledIssuesRest,
+  pooledIssueIsCodeRepositorys,
+  issueUrlRepository,
+  recordsAnotherCodeRepository,
   renderIssueBody,
+  scopedToCodeRepository,
   splitConcatenatedJsonPages,
   tryEscalateAsync,
   type AsyncIssueGateway,
@@ -125,13 +130,13 @@ export interface EscalationAnswerGateway {
   listOpen(label: string): ListedIssue[] | Promise<ListedIssue[]>;
   /** Every comment on one issue, oldest first (GitHub's own order). THROWS on a `gh` read
    *  failure; the caller skips just that issue this pass. */
-  listComments(issueNumber: number): EscalationIssueComment[] | Promise<EscalationIssueComment[]>;
+  listComments(issueNumber: number, issueUrl?: string): EscalationIssueComment[] | Promise<EscalationIssueComment[]>;
   /** W1-T13710: the repository's comments created or edited at or after `since`. THROWS on a failed or odd read; the
    *  caller then reads every issue. With no since, gives only the newest comment's updated_at. Optional. */
   listCommentsSince?(since: string | undefined): Promise<CommentsSinceRead>;
   /** Every reaction on the issue ITSELF, oldest first. THROWS on a `gh` read failure; the caller
    *  skips just that issue's reactions this pass. Optional — see the interface's own header. */
-  listReactions?(issueNumber: number): EscalationIssueReaction[] | Promise<EscalationIssueReaction[]>;
+  listReactions?(issueNumber: number, issueUrl?: string): EscalationIssueReaction[] | Promise<EscalationIssueReaction[]>;
   /** The repository owner's own GitHub login — the ONLY login {@link readEscalationAnswers}
    *  ever accepts a reaction from (see this module's header on why a reaction, unlike a comment,
    *  cannot be checked via `author_association`). Optional — see the interface's own header. */
@@ -141,16 +146,16 @@ export interface EscalationAnswerGateway {
   /** W1-T13223: whether `login` holds admin permission on this repository. An organization's owner comments as
    *  MEMBER, never OWNER, so the owner rule alone refused the operator (#17274). THROWS on an unreadable read; the
    *  caller then skips that comment this pass. Comments only: never consulted for a reaction. Optional. */
-  isRepoAdmin?(login: string): Promise<boolean>;
+  isRepoAdmin?(login: string, issueUrl?: string): Promise<boolean>;
   /** Refusal alarms use the escalation writer, separate from answer acknowledgements. */
   readonly refusalIssues?: AsyncIssueGateway;
   /** Acknowledge an ACCEPTED reply with a `+1` reaction — never a posted comment (design iv).
    *  Best-effort: a failed reaction never blocks the answer from landing. */
-  reactPlusOne(commentId: number): void;
+  reactPlusOne(commentId: number, issueUrl?: string): void;
   /** Acknowledge an ACCEPTED issue-level reaction with the fleet's OWN `+1` on the SAME issue —
    *  mirrors {@link reactPlusOne} for a channel with no comment id to react to. Best-effort, and
    *  optional — see the interface's own header. */
-  reactPlusOneOnIssue?(issueNumber: number): void;
+  reactPlusOneOnIssue?(issueNumber: number, issueUrl?: string): void;
 }
 
 /** W1-T13688: an open issue with the comment and reaction counts its list row gave, as given (absent when not). */
@@ -204,8 +209,67 @@ export function ghEscalationAnswerGateway(
   readText: (args: string[]) => Promise<string> = (args) => ghTextAsync(args),
   operatorLogins?: readonly string[],
   feedback?: { settings: AdmissionSettings; read?: AdmissionRead },
+  // W1-T14998: the code repository whose replies this reader lands; `owner/repo` is where its escalation issues live.
+  codeRepository = `${owner}/${repo}`,
+  // W1-T14998: a routed pool can also have legacy issues in the code repository. Keep each issue's
+  // comment/reaction reads and acknowledgements on the repository named by its URL.
+  additionalRepositories: readonly string[] = [],
 ): EscalationAnswerGateway {
+  const repositories = [...new Set([`${owner}/${repo}`, ...additionalRepositories].map(value => value.toLowerCase()))];
+  if (repositories.length > 1) {
+    const readers = repositories.map(repository => {
+      const [readOwner, readRepo] = repository.split("/") as [string, string];
+      return ghEscalationAnswerGateway(readOwner, readRepo, readText, operatorLogins, feedback, codeRepository);
+    });
+    const byUrl = (url?: string): EscalationAnswerGateway => {
+      const named = url === undefined ? undefined : issueUrlRepository(url)?.toLowerCase();
+      const index = named === undefined ? -1 : repositories.indexOf(named);
+      if (index < 0) throw new Error(`issue URL does not name a configured escalation repository: ${url ?? "missing"}`);
+      return readers[index]!;
+    };
+    const primary = readers[0]!;
+    const cursors = new Map<string, string>();
+    return {
+      ...primary,
+      async listOpen(label) {
+        const lists = await Promise.all(readers.map(reader => reader.listOpen(label)));
+        return lists.flat();
+      },
+      listComments(issueNumber, issueUrl) { return byUrl(issueUrl).listComments(issueNumber, issueUrl); },
+      async listCommentsSince(since) {
+        const reads: CommentsSinceRead[] = await Promise.all(readers.map((reader, index) => {
+          const repository = repositories[index]!;
+          return reader.listCommentsSince?.(cursors.get(repository) ?? since) ?? {};
+        }));
+        const issueNumbers = new Set<number>();
+        const newest: string[] = [];
+        reads.forEach((read, index) => {
+          const repository = repositories[index]!;
+          if (read.newestUpdatedAt !== undefined) {
+            cursors.set(repository, read.newestUpdatedAt);
+            newest.push(read.newestUpdatedAt);
+          }
+          for (const number of read.issueNumbers ?? []) issueNumbers.add(number);
+        });
+        const newestUpdatedAt = newest.sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+        return since === undefined ? { newestUpdatedAt }
+          : { issueNumbers: [...issueNumbers], newestUpdatedAt };
+      },
+      listReactions(issueNumber, issueUrl) { return byUrl(issueUrl).listReactions?.(issueNumber, issueUrl) ?? []; },
+      isRepoAdmin(login, issueUrl) { return byUrl(issueUrl).isRepoAdmin?.(login, issueUrl) ?? Promise.resolve(false); },
+      reactPlusOne(commentId, issueUrl) { byUrl(issueUrl).reactPlusOne(commentId, issueUrl); },
+      reactPlusOneOnIssue(issueNumber, issueUrl) { byUrl(issueUrl).reactPlusOneOnIssue?.(issueNumber, issueUrl); },
+    };
+  }
   const repoArg = `${owner}/${repo}`;
+  // The alarm gateway, unscoped: it names the host's route for `repoArg`, so it says whether these issues are a pool.
+  const refusalRaw = ghIssueGatewayAsync(owner, repo, { exec: readText, scopeToCodeRepository: false });
+  // W1-T14998: a pool when the issues live in another repository than the code one, or when a configured escalation
+  // repository is this one (the ops catalog's daemon reads the pool core and site file in). Only a pool is filtered,
+  // with the reconciler's rule; an unrouted reader answers its own issues as on main, never one recording another.
+  const routed = codeRepository.toLowerCase() !== repoArg.toLowerCase() || issueGatewayRepository(refusalRaw) !== undefined;
+  const own = (issue: ListedIssue): boolean => routed ? pooledIssueIsCodeRepositorys(issue, codeRepository, repoArg)
+    : !recordsAnotherCodeRepository(issue.body, codeRepository);
   const run = (args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   const parents = new Map<number, FeedbackAdmissionSubject>();
   const adminReads = new Map<string, Promise<boolean>>();
@@ -239,7 +303,9 @@ export function ghEscalationAnswerGateway(
       }
       return read;
     },
-    refusalIssues: ghIssueGatewayAsync(owner, repo, { exec: readText }),
+    // Routed, its alarm lists, dedupes onto and stamps only this code repository's pooled issues, the pool being this
+    // repository itself included; unrouted, it is the repository's own gateway, unfiltered and unstamped.
+    refusalIssues: scopedToCodeRepository(refusalRaw, repoArg, codeRepository, routed),
     async listOpen(label) {
       const raw = await readText(labelledIssuesRestArgs(repoArg, label, "open"));
       const listed = parseLabelledIssuesRest(raw);
@@ -248,7 +314,7 @@ export function ghEscalationAnswerGateway(
         reactions?: { total_count?: unknown } | null;
       }>;
       const counts = new Map(rows.map(item => [item.number, item]));
-      const issues: ListedIssue[] = listed.map(issue => {
+      const issues: ListedIssue[] = listed.filter(own).map(issue => {
         const row = counts.get(issue.number);
         return { ...issue,
           ...(row?.comments === undefined ? {} : { listedComments: row.comments }),
@@ -665,7 +731,7 @@ function rememberBotIgnored(origins: Set<string>, origin: string): void {
  */
 interface KeptCommentReads {
   since?: string;
-  issues: Map<number, { listed: number; comments: EscalationIssueComment[] }>;
+  issues: Map<string, { listed: number; comments: EscalationIssueComment[] }>;
 }
 const keptCommentReadsByGateway = new WeakMap<EscalationAnswerGateway, KeptCommentReads>();
 function keptCommentReads(gateway: EscalationAnswerGateway): KeptCommentReads {
@@ -733,8 +799,8 @@ export async function readEscalationAnswers(
     return { accepted, ignored, unreadable: 1 }; // the list itself was unreadable this pass
   }
   const kept = keptCommentReads(gateway);
-  const open = new Set(issues.map(issue => issue.number));
-  for (const issueNumber of kept.issues.keys()) if (!open.has(issueNumber)) kept.issues.delete(issueNumber);
+  const open = new Set(issues.map(issue => issue.url));
+  for (const issueUrl of kept.issues.keys()) if (!open.has(issueUrl)) kept.issues.delete(issueUrl);
   const namedSince = await issuesNamedSince(gateway, kept);
   let stage: EscalationAnswerStage = "refusal_history_read";
   try {
@@ -795,16 +861,16 @@ export async function readEscalationAnswers(
       const taskId = escalationTaskId(issue.body);
       if (!taskId) continue; // an issue with no recoverable task referent steers nothing
       let comments: EscalationIssueComment[];
-      const keptRead = kept.issues.get(issue.number);
+      const keptRead = kept.issues.get(issue.url);
       const listed = issue.listedComments;
       try {
         if (listedNone(listed)) comments = [];
         else if (namedSince !== undefined && keptRead !== undefined && keptRead.listed === listed && !namedSince.has(issue.number)) {
           comments = keptRead.comments;
         } else {
-          kept.issues.delete(issue.number);
-          comments = await gateway.listComments(issue.number);
-          if (gateway.listCommentsSince && Number.isSafeInteger(listed)) kept.issues.set(issue.number, { listed: listed as number, comments });
+          kept.issues.delete(issue.url);
+          comments = await gateway.listComments(issue.number, issue.url);
+          if (gateway.listCommentsSince && Number.isSafeInteger(listed)) kept.issues.set(issue.url, { listed: listed as number, comments });
         }
       } catch {
         unreadable++; // counted, then just this issue is skipped this pass
@@ -823,7 +889,7 @@ export async function readEscalationAnswers(
           // W1-T13223: a repository admin is the operator, whatever GitHub's association or the configured list says.
           let admin: boolean;
           try {
-            admin = await gateway.isRepoAdmin(comment.authorLogin);
+            admin = await gateway.isRepoAdmin(comment.authorLogin, issue.url);
           } catch {
             // deliberate: an unreadable permission is neither an acceptance nor a refusal, so the
             // comment is counted unreadable, left unledgered, and read again next pass.
@@ -867,7 +933,7 @@ export async function readEscalationAnswers(
         stage = "answer_parse";
         accepted();
         try {
-          gateway.reactPlusOne(comment.id);
+          gateway.reactPlusOne(comment.id, issue.url);
         } catch {
           // best-effort acknowledgement — a failed reaction never un-lands the answer.
         }
@@ -876,7 +942,7 @@ export async function readEscalationAnswers(
       if (gateway.listReactions && (gateway.ownerLogin || gateway.operatorLogins !== undefined)) {
         let reactions: EscalationIssueReaction[] = [];
         try {
-          reactions = listedNone(issue.listedReactions) ? [] : await gateway.listReactions(issue.number);
+          reactions = listedNone(issue.listedReactions) ? [] : await gateway.listReactions(issue.number, issue.url);
         } catch {
           unreadable++; // counted, then just this issue's reactions are skipped this pass
         }
@@ -895,7 +961,7 @@ export async function readEscalationAnswers(
           stage = "answer_parse";
           acceptedAnswers.push({ origin, text: answer, namesOption });
           try {
-            gateway.reactPlusOneOnIssue?.(issue.number);
+            gateway.reactPlusOneOnIssue?.(issue.number, issue.url);
           } catch {
             // best-effort acknowledgement — a failed reaction never un-lands the answer.
           }

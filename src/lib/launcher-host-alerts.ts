@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { systemClock, type Clock } from "./clock.js";
 import { githubSlugOf, REFUSAL_ESCALATE_AT, REFUSAL_PERSISTING_AT } from "./deployer.js";
-import { escalate, ghIssueGateway, type Escalation, type EscalationOption, type IssueGateway } from "./escalate.js";
+import { escalate, escalationDestinationAt, ghIssueGateway, type Escalation, type EscalationOption, type IssueGateway } from "./escalate.js";
 import { GH_APP_ID_ENV, GH_APP_INSTALLATION_ID_ENV, GH_APP_PRIVATE_KEY_PATH_ENV, signAppJwt } from "./github-app.js";
 import { ghExec } from "./github-transport.js";
 import {
@@ -464,9 +464,15 @@ export function postAsHost(
   const token = (seams.token ?? hostGithubToken)();
   const { owner, repo } = (seams.repo ?? hostAlertRepo)();
   const env = { ...process.env, GH_TOKEN: token };
-  const issues = (seams.issues ?? ((o: string, r: string, childEnv: NodeJS.ProcessEnv) =>
-    ghIssueGateway(o, r, { exec: (args) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: childEnv }) })))(owner, repo, env);
+  const issues = (seams.issues ?? ((o: string, r: string, childEnv: NodeJS.ProcessEnv) => hostAlertIssueGateway(stateDir, o, r,
+    (args) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: childEnv }))))(owner, repo, env);
   return escalate(e, { issues, ledgerPath: join(stateDir, LEDGER_FILENAME), runId: e.runId ?? e.taskId });
+}
+
+/** W1-T14998 — the host's needs-human gateway for `owner/repo`: filed where `stateDir` (the verb's `--state-root`)
+ *  routes escalations, never where this machine's HOME config would, which on the host names another directory. */
+export function hostAlertIssueGateway(stateDir: string, owner: string, repo: string, exec: (args: string[]) => string): IssueGateway {
+  return ghIssueGateway(owner, repo, { exec, destination: escalationDestinationAt(stateDir) });
 }
 
 /** The launcher saw the step succeed: end the run, and withdraw or close what it escalated. */
