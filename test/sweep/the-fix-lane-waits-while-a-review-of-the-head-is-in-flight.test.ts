@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -19,6 +19,8 @@ import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { reviewCommand, runReview, type ReviewCommandDeps, type ReviewCommandHost } from "#src/cli/commands/review.js";
 import { postReviewPending } from "#src/lib/review.js";
+import { createDetachedWorkHost, readWorkSpec, spawnRunChild } from "#src/lib/run-child.js";
+import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { ghStubPath } from "#test/helpers/gh-stub.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -45,7 +47,8 @@ function liveReview(view: Pick<OpenPrView, "prNumber" | "taskId" | "reviewInputD
 
 /** The sweep's real fix dispatch over a ledger holding `ledger`, with every effect past the deferral point faked. By
  *  default a review of the head is running (`live`); `live: false` is a review that ended by an exit writing no row. */
-function dispatcher(t: TestContext, ledger: Row[] | "unreadable", view: Partial<OpenPrView> = {}, live: boolean | string = true) {
+function dispatcher(t: TestContext, ledger: Row[] | "unreadable", view: Partial<OpenPrView> = {}, live: boolean | string = true,
+  beforeBranchClaim?: (ledgerPath: string) => void) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t15005-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const head = view.headSha ?? HEAD;
@@ -65,7 +68,7 @@ function dispatcher(t: TestContext, ledger: Row[] | "unreadable", view: Partial<
     stallNotice: () => {}, armImpl: () => "armed", armSessionPrsOverride: false, updateBranchImpl: async () => "updated",
     captureRepairFeedbackImpl: () => {}, ghRunImpl: () => {}, disarmImpl: () => undefined,
     readJsonImpl: async () => ({}), updatePrBodyImpl: async () => {},
-    registeredWorktreeOwnerImpl: () => undefined,
+    registeredWorktreeOwnerImpl: () => { beforeBranchClaim?.(ledgerPath); return undefined; },
     registeredOwnerRecovery: { capture: () => { throw new Error("owner snapshot unreadable in this fixture"); }, remove: () => undefined },
     boundedWorktreeOwnerPathImpl: (path: string) => path,
     dispatchFixPreflightStandDownImpl: async () => undefined,
@@ -163,6 +166,134 @@ test("W1-T15005 criterion 2: a fix round dispatches once the review ends or its 
   await gone.dispatch();
   assert.equal(deferrals(gone.rows).length, 0, "THE CLAIM: an owner process that died ends the wait");
   assert.equal(gone.seen.claimKeys, 1, "the round takes its branch claim as today");
+});
+
+test("W1-T15005 criterion 1: a fix round waits while a review of the current head is in flight after dispatch preparation", async (t) => {
+  const { owner } = await otherProcessOwner(t);
+  const run = "review-PR15005-during-prep";
+  let prepared = false;
+  const d = dispatcher(t, [], { reviewState: "none" }, false, (ledgerPath) => {
+    prepared = true;
+    appendFileSync(ledgerPath, `${JSON.stringify(claim(run, HEAD, owner))}\n`);
+  });
+  const carried = sweep.decideReviewInFlight(d.pr, EVIDENCE, d.ledgerPath);
+  assert.deepEqual(carried.reviewInFlight, { headSha: HEAD, checked: true });
+
+  assert.equal(await d.effects.dispatchFix!(d.pr, carried), false);
+  assert.equal(prepared, true, "the review arrives during dispatch preparation");
+  assert.deepEqual(d.seen, { claimKeys: 0, dispatched: 0 });
+  assert.deepEqual(deferrals(d.rows).map((row) => [row.pr_number, row.head, row.review_run]), [[15005, HEAD, run]]);
+});
+
+test("W1-T15005 criterion 1: a fix round waits while a review of the current head is in flight across child admission", async (t) => {
+  const oldRun = "review-PR15005-ended-in-daemon";
+  const oldClaim = claim(oldRun, HEAD, { owner_pid: process.pid, owner_started_at: new Date().toISOString(), host: hostname() });
+  const d = dispatcher(t, [oldClaim], { reviewState: "none" }, false);
+  const stateRoot = dirname(d.ledgerPath);
+  const engineHash = "b".repeat(64);
+  const engine = join(stateRoot, "engines", engineHash);
+  mkdirSync(engine, { recursive: true });
+  writeFileSync(join(engine, "engine.json"), JSON.stringify({ sha: HEAD, sourceHash: engineHash, builtAt: Date.now() }));
+  const entry = join(engine, "entry.cjs");
+  writeFileSync(entry, 'process.stdout.write("detached-work-v1:" + process.argv[3]);\n');
+
+  const rows: Row[] = [];
+  const log = (step: string, extra?: Record<string, unknown>) => { rows.push({ step, ...extra }); };
+  let spawnCalls = 0;
+  let childReviewReads: unknown;
+  let inProcessCalls = 0;
+  let reservationReleases = 0;
+  let permits = 0;
+  let reservations = 0;
+  const reservation = { id: "fix-memory", releaseOccupancy: () => { reservationReleases++; } } as LearnedReservation;
+  let enter!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  let grant!: (reservation: LearnedReservation) => void;
+  const pending = new Promise<LearnedReservation>((resolve) => { grant = resolve; });
+  sweep.installDetachedWorkHost(createDetachedWorkHost({
+    stateRoot, root: d.root, repoDir: d.root, repo: "fixture", log, readMode: () => "on",
+    readLedger: () => [{ step: "daemon.freshness_drain.completed", duration_ms: 9_000,
+      waited_on: [{ what: "detached", kind: "fix-dispatch", settled_after_ms: 6_000 }] }],
+    spawn: (input) => spawnRunChild(input, {
+      mainSha: async () => HEAD, engine: { isCurrent: () => true },
+      launch: () => ({ kind: "bundle", argv: [entry], cwd: d.root, engineRoot: engine, reason: "fixture" }),
+      reserve: async () => {
+        if (++reservations !== 1) return reservation;
+        enter();
+        return pending;
+      },
+      spawn: (_command, argv) => {
+        spawnCalls++;
+        const work = readWorkSpec(argv.at(-1)!);
+        assert.ok(work && work !== "malformed");
+        const envelope = sweep.readFixDispatchEnvelope(work.inputs?.envelope);
+        assert.ok(envelope);
+        childReviewReads = JSON.parse(execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+          import { reviewInFlightAtDispatch } from "#src/lib/sweep.js";
+          const [path, raw] = process.argv.slice(1);
+          const { pr, evidence } = JSON.parse(raw);
+          console.log(JSON.stringify([
+            reviewInFlightAtDispatch(pr, path),
+            reviewInFlightAtDispatch(pr, path, evidence.reviewInFlight?.inactiveLocalClaims),
+          ]));
+        `, d.ledgerPath, JSON.stringify(envelope)], { cwd: REPO_ROOT, encoding: "utf8" }));
+        throw new Error("fixture stops at child spawn");
+      },
+    }),
+  }));
+  t.after(() => { sweep.installDetachedWorkHost(undefined); sweep.resetChildWork(); });
+  const deps = {
+    ledgerPath: d.ledgerPath, runId: "SWEEP-T15005-admission", detachFixWait: true,
+    readLedger: () => rows, appendLine: (_path: string, row: Row) => { rows.push(row); }, log,
+    arm: () => {}, close: () => assert.fail("a red PR cannot merge"), escalate: () => {},
+    dispatchFix: () => { inProcessCalls++; },
+    fixAdmissionLockDir: join(stateRoot, "fix-admission"),
+    claimFixAdmission: () => {
+      permits++;
+      return { admitted: true, release: () => { permits--; } };
+    },
+    readActiveWorkerCount: () => 0, readFixPressure: () => ({ availableMib: 8192, floorMib: 1024 }),
+  } as unknown as sweep.SweepDeps;
+
+  const run = "review-PR15005-during-admission";
+  await withLiveWritesAllowed(async () => {
+    const pass = sweep.runSweep([d.pr], deps);
+    await Promise.race([entered, pass.then(() => assert.fail("the first fix must reach the reservation wait"))]);
+    try {
+      const reviewer = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+        import { postReviewPending } from "#src/lib/review.js";
+        const [ledgerPath, sha, taskId, runId, prUrl] = process.argv.slice(1);
+        const result = await postReviewPending({ owner: "o", repo: "fixture", ledgerPath, sha, taskId, runId, prUrl,
+          reviewInputDigest: "operator-fixture-input",
+          fetchLifecycle: () => ({ merged: false, closed: false }), fetchStatus: () => ({ statuses: [] }), post: () => {} });
+        process.send(result.posted);
+        setInterval(() => {}, 60_000);
+      `, d.ledgerPath, HEAD, TASK, run, PR_URL], { cwd: REPO_ROOT, stdio: ["ignore", "ignore", "inherit", "ipc"] });
+      const exited = once(reviewer, "exit");
+      t.after(async () => { reviewer.kill(); await exited; });
+      assert.equal(await Promise.race([once(reviewer, "message").then(([posted]) => posted),
+        exited.then(([code]) => assert.fail(`review exited before posting its claim (${code})`))]), true);
+      assert.equal(readLedgerLines(d.ledgerPath).find((row) => row.run_id === run)?.owner_pid, reviewer.pid);
+    } finally {
+      grant(reservation);
+      await pass;
+      await sweep.drainDetachedSweepActions();
+    }
+    assert.equal(spawnCalls, 0, "the live claim prevents a fix child spawn");
+    assert.equal(inProcessCalls, 0, "the wait does not fall back to an in-process fix");
+    assert.equal(existsSync(join(stateRoot, "runs")), false, "the withheld child has no run spec");
+    assert.equal(permits, 0, "the sweep released its admission charge");
+    assert.equal(reservationReleases, 1, "the child released the granted memory reservation");
+    assert.equal(rows.some((row) => row.step === "sweep.fix.dispatch_failed"), false);
+    assert.deepEqual(deferrals(rows).map((row) => [row.pr_number, row.head, row.review_run]), [[15005, HEAD, run]]);
+
+    appendFileSync(d.ledgerPath, `${JSON.stringify(settled(run))}\n`);
+    await sweep.runSweep([d.pr], deps);
+    await sweep.drainDetachedSweepActions();
+    assert.equal(spawnCalls, 1, "the same head can dispatch after the verdict even while the reviewer process is alive");
+    assert.deepEqual(childReviewReads, [oldRun, null], "the child distinguishes the daemon's ended review from a live owner");
+    assert.equal(deferrals(rows).length, 1);
+  });
 });
 
 test("W1-T15005 criterion 3: a PR with no review in flight dispatches as today", async (t) => {
@@ -544,14 +675,20 @@ test("W1-T15005 criterion 1: an owned conflicted head whose round waits on a rev
   const branch = "review-replay-garden-1795700000000";
   const prUrl = "https://github.com/example/fixture/pull/15006";
   const pending = { step: "review.pending_posted", run_id: "review-PR15006-1", pr_url: prUrl, head_sha: HEAD };
-  const pass = async (onDisk: Row[]) => {
+  const pass = async (onDisk: Row[], reviewArrivesDuringPreparation = false) => {
     writeFileSync(ledgerPath, onDisk.map((row) => `${JSON.stringify(row)}\n`).join(""));
     const ledger: Record<string, unknown>[] = [];
     let dispatched = 0;
     const deps = {
       ledgerPath, runId: "owned-conflict-t15005", readLedger: () => ledger, appendLine: (_p: string, row: Record<string, unknown>) => { ledger.push(row); },
       arm: () => assert.fail("a dirty PR cannot arm"), close: () => assert.fail("a dirty PR is not closed"), escalate: () => {},
-      readMainTip: () => "b".repeat(40), dispatchFix: () => { dispatched++; return false; },
+      readMainTip: () => "b".repeat(40),
+      dispatchFix: (_pr: OpenPrView, evidence: FixDispatchEvidence, _phase: sweep.DetachedFixPhaseObserver, control: sweep.DetachedFixControl) => {
+        dispatched++;
+        if (evidence.reviewInFlight?.reviewRun !== undefined || reviewArrivesDuringPreparation) return false;
+        control.onBranchClaim?.();
+        return true;
+      },
       claimFixAdmission: () => ({ admitted: true }), readActiveWorkerCount: () => 0,
       readFixPressure: () => ({ availableMib: 8192, floorMib: 1024 }),
       readPlanRepairFacts: () => ({ authorLogin: "remudero-fleet[bot]", headRepoFork: false }),
@@ -570,6 +707,9 @@ test("W1-T15005 criterion 1: an owned conflicted head whose round waits on a rev
   const waiting = await pass([pending]).finally(settle);
   assert.equal(waiting.dispatched, 1, "the dispatch still decides, and defers");
   assert.deepEqual(waiting.rounds, [], "THE CLAIM: a round the review holds back records no worker round");
+  const late = await pass([], true);
+  assert.equal(late.dispatched, 1);
+  assert.deepEqual(late.rounds, [], "a review that arrives before branch acquisition spends no owned conflict round");
   // Positive control: once that review posts, the round is recorded before it runs, as today.
   const free = await pass([pending, { ...pending, step: "review.posted", state: "failure" }]);
   assert.equal(free.rounds.length, 1, "the worker round is recorded when no review is in flight");

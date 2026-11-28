@@ -5055,16 +5055,17 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             return { roundNotRun: true, reason: held.reason };
           }
         }
-        // W1-T15005: a fix round pushed mid-review supersedes that review ("review input changed after this verdict
-        // started"), so the round waits while a live review owns this exact head; a verdict or a proven-dead owner ends it.
-        // Read off the loop; a ledger not yet written holds no review in flight, so the round dispatches as before.
-        // A decision the sweep carried for this head is used as made; otherwise (a caller that made none, or a moved head) it is made here.
-        evidence = decideReviewInFlight(pr, evidence, ledgerPath);
-        const reviewRun = evidence.reviewInFlight?.reviewRun;
-        if (reviewRun !== undefined) {
-          log(FIX_DEFERRED_REVIEW_IN_FLIGHT_STEP, { pr_number: pr.prNumber, head: pr.headSha, review_run: reviewRun });
-          return false;
-        }
+        const deferForLiveReview = (): boolean => {
+          const checked = evidence.reviewInFlight;
+          const reviewRun = reviewInFlightAtDispatch(pr, ledgerPath, checked?.headSha === pr.headSha ? checked.inactiveLocalClaims : undefined);
+          if (reviewRun === undefined) return false;
+          log(FIX_DEFERRED_REVIEW_IN_FLIGHT_STEP, { pr_number: pr.prNumber, head: pr.headSha, head_sha: pr.headSha,
+            review_run: reviewRun, ...(evidence.codeqlDedupeKey === undefined ? {} : { dedupe_key: evidence.codeqlDedupeKey }) });
+          return true;
+        };
+        // Keep active reviews clear of registered worktree recovery as well as the fix round.
+        if ((evidence.reviewInFlight?.headSha !== pr.headSha || evidence.reviewInFlight.reviewRun !== undefined) &&
+            deferForLiveReview()) return false;
         const realBranch = headRef.headRefName;
         const changedPaths = (headRef.files ?? []).map((f) => f.path);
         // impl-FY: a PR with no plan task is STILL repairable — see fixRungTaskFor. The rung used to
@@ -5175,6 +5176,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           throw e;
         }
         if (registeredOwner) {
+          if (deferForLiveReview()) return false;
           let snapshot: RegisteredFixOwnerSnapshot;
           try {
             snapshot = registeredOwnerRecovery.capture({
@@ -5569,6 +5571,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // rounds for the same task share, not the task id alone. A round that loses the race
         // DECLINES this poll — ledgered exactly like `sweep.fix.uncreditable_head` above — and
         // the sweep is level-triggered, so the next pass simply retries it.
+        // W1-T15005: prep can yield to a review even when the sweep carried a clear decision.
+        if (deferForLiveReview()) return false;
         const claimKey = fixBranchClaimKey(owner, repo, realBranch);
         roundClaimKey = claimKey;
         try {
@@ -5617,6 +5621,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           throw e;
         }
 
+        control?.onBranchClaim?.();
         const dispatchNowMs = nowMsImpl();
         worktreePath = join(worktreesDir(config), `sweep-${task.id}-${dispatchNowMs}`);
         // W1-T12537: the run lane's lock, before the add, so another run's start-up prune keeps it.
@@ -7606,6 +7611,11 @@ export function reviewInFlightOnHead(
   ownerLive: (claim: Record<string, unknown>) => boolean = (claim) => reviewClaimOwnerLiveElsewhere(claim),
 ): string | undefined {
   if (pr.reviewState !== "pending") return undefined;
+  return liveReviewClaim(pr, outstandingReviewClaimsOnHead(pr, lines), isLive, ownerLive);
+}
+
+function outstandingReviewClaimsOnHead(pr: Parameters<typeof reviewInFlightOnHead>[0],
+  lines: ReadonlyArray<Record<string, unknown>>): Map<string, Record<string, unknown>> {
   const key = reviewLedgerKeyFor(pr.taskId, pr.prNumber);
   const live = new Map<string, Record<string, unknown>>();
   for (const line of lines) {
@@ -7626,18 +7636,40 @@ export function reviewInFlightOnHead(
     }
   }
   if (pr.reviewPendingOwnerDead === true && pr.reviewPendingOwnerRunId !== undefined) live.delete(pr.reviewPendingOwnerRunId);
-  const newest = [...live].at(-1);
+  return live;
+}
+
+function liveReviewClaim(
+  pr: Parameters<typeof reviewInFlightOnHead>[0],
+  claims: Map<string, Record<string, unknown>>,
+  isLive: (pr: Parameters<typeof reviewOfHeadRunningHere>[0]) => boolean,
+  ownerLive: (claim: Record<string, unknown>) => boolean,
+): string | undefined {
+  const newest = [...claims].at(-1);
   if (newest === undefined) return undefined;
   const [run, claim] = newest;
   return isLive(pr) || ownerLive(claim) ? run : undefined;
 }
+
+const reviewClaimIdentity = (claim: Record<string, unknown>): string =>
+  JSON.stringify([claim.run_id, claim.ts, claim.owner_pid, claim.owner_started_at, claim.host]);
 
 /** W1-T15005: {@link reviewInFlightOnHead} over the live ledger, read off the loop. A ledger not yet written holds no
  *  review in flight; any other read failure propagates. The fix dispatch and the owned-conflict round share this read. */
 export function reviewInFlightAtDispatch(
   pr: Parameters<typeof reviewInFlightOnHead>[0],
   ledgerPath: string,
+  inactiveLocalClaims?: readonly string[],
 ): string | undefined {
+  return readReviewAtFixDispatch(pr, ledgerPath, inactiveLocalClaims).reviewRun;
+}
+
+function readReviewAtFixDispatch(
+  pr: Parameters<typeof reviewInFlightOnHead>[0],
+  ledgerPath: string,
+  inactiveLocalClaims?: readonly string[],
+  captureLocalClaims = false,
+): ReviewInFlightDecision {
   let text: string;
   try {
     text = readFileSync(ledgerPath, "utf8");
@@ -7645,20 +7677,22 @@ export function reviewInFlightAtDispatch(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") text = "";
     else throw error;
   }
-  // This is an action-time read for the exact head being dispatched. The view may predate a
-  // review claim (or may have adopted a moved head while carrying `reviewState: "none"`), so
-  // the snapshot's state cannot veto a fresh, live claim in the ledger.
-  return reviewInFlightOnHead({ ...pr, reviewState: "pending" }, parseLedger(text));
+  const claims = outstandingReviewClaimsOnHead(pr, parseLedger(text));
+  const runningHere = reviewOfHeadRunningHere(pr);
+  const reviewRun = liveReviewClaim(pr, claims, () => runningHere,
+    (claim) => inactiveLocalClaims?.includes(reviewClaimIdentity(claim)) !== true && reviewClaimOwnerLiveElsewhere(claim));
+  // A fix child sees the daemon's PID as foreign. Carry its mutex's answer for the exact rows
+  // checked at admission, so an ended daemon review cannot reappear as a live foreign claim.
+  const inactive = captureLocalClaims && !runningHere
+    ? [...claims.values()].filter((claim) => claim.owner_pid === process.pid).map(reviewClaimIdentity) : [];
+  return { headSha: pr.headSha, checked: true, ...(reviewRun === undefined ? {} : { reviewRun }),
+    ...(inactive.length === 0 ? {} : { inactiveLocalClaims: inactive }) };
 }
 
 /** W1-T15005: a {@link reviewInFlightAtDispatch} answer for one head. `reviewRun` absent: no review of `headSha` was in flight. */
-export interface ReviewInFlightDecision { headSha: string; reviewRun?: string; checked?: true }
+export interface ReviewInFlightDecision { headSha: string; reviewRun?: string; checked?: true; inactiveLocalClaims?: string[] }
 
-/** W1-T15005: `evidence` carrying the review-in-flight decision for `pr`'s head. Its prior answer is only a snapshot:
- *  a review may have claimed this head since it was made, or the dispatch may have adopted a moved head whose view still
- *  says `none`. Re-read the exact head's claim from the live ledger at the spending point. The liveness half reads THIS
- *  process's review mutex (another process's claim is judged by its owner pid instead), so the sweep decides before a fix
- *  child is started: {@link detachFixDispatch} decides before {@link hostFixDispatch} spawns. */
+/** W1-T15005: the sweep's early decision for this head. Admission and branch checkout re-read the live claim. */
 export function decideReviewInFlight(
   pr: Parameters<typeof reviewInFlightOnHead>[0],
   evidence: FixDispatchEvidence,
@@ -7666,8 +7700,7 @@ export function decideReviewInFlight(
 ): FixDispatchEvidence & { reviewInFlight: ReviewInFlightDecision } {
   const carried = evidence.reviewInFlight;
   if (carried?.headSha === pr.headSha && carried.checked === true) return { ...evidence, reviewInFlight: carried };
-  const reviewRun = reviewInFlightAtDispatch(pr, ledgerPath);
-  return { ...evidence, reviewInFlight: { headSha: pr.headSha, checked: true, ...(reviewRun === undefined ? {} : { reviewRun }) } };
+  return { ...evidence, reviewInFlight: readReviewAtFixDispatch(pr, ledgerPath) };
 }
 
 /** W1-T15005: the deferral row a fix round writes when a review of its head is in flight. One shape for every site. */
@@ -17018,9 +17051,10 @@ export interface FixDispatchEvidence {
   ownedConflictHead?: { kind: OwnedConflictHeadKind; push: "leased" | "merge-commit-no-force"; ownership?: SessionOwnershipReads };
   /** W1-T12710: a stronger-worker round for a stalled criterion: the mount it asks for and the approaches that did not work. */
   stallRemedy?: { criterion: string; mount: string; approaches: string[] };
-  /** W1-T15005: whether a review of this head was in flight, decided ONCE by the sweep that holds the review mutex
-   *  ({@link decideReviewInFlight}). It crosses into a fix child in the envelope, whose own mutex is empty. */
+  /** W1-T15005: the dispatching sweep's early review decision for this head. */
   reviewInFlight?: ReviewInFlightDecision;
+  /** A review deferral after dispatch preparation reopens this CodeQL fix key for retry. */
+  codeqlDedupeKey?: string;
 }
 
 export type ConflictIntent = { prBody: string; mainByPath: readonly { path: string; log: string }[] };
@@ -21770,7 +21804,7 @@ export type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-
   | "light-pass-action" | "plan-task-move";
 export type DetachedFixPhase = "admission" | "worker" | "ci-wait";
 export type DetachedFixPhaseObserver = (phase: DetachedFixPhase, wait?: { sinceMs: number; attempts: number }) => void;
-export interface DetachedFixControl { signal: AbortSignal; admissionSinceMs?: number }
+export interface DetachedFixControl { signal: AbortSignal; admissionSinceMs?: number; onBranchClaim?: () => void }
 interface DetachedFixClaim {
   fixKey: string; release: () => void; abandon: AbortController; control: DetachedFixControl;
   run: <T>(fn: () => T | Promise<T>) => Promise<T>;
@@ -22305,7 +22339,8 @@ export interface ReviewChildLaunch {
 }
 
 /** Abandoned admission refuses the dispatch; only ordinary unavailability permits an in-process fallback. */
-export type FixChildLaunch = ReviewChildLaunch | { abandoned: true; reason: "admission-abandoned"; runId: string; waitedMs: number };
+export type FixChildLaunch = ReviewChildLaunch | ({ abandoned: true; runId: string; waitedMs: number } &
+  ({ reason: "admission-abandoned" } | { reason: "review-in-flight"; reviewRun: string }));
 
 /**
  * W1-T9114: what starts detached work as a run child in this process, installed by the daemon's composition root. Unset, every kind
@@ -22328,6 +22363,8 @@ export interface DetachedWorkHost {
     envelope: FixDispatchEnvelope;
     /** W1-T13440: told the run id and an abort while the run child waits for the work host's admission. */
     onPending?: (pending: { runId: string; abort: () => Promise<void> }) => void;
+    /** Re-reads the exact-head review claim in the daemon after child admission. */
+    reviewInFlight?: () => string | undefined;
   }) => Promise<FixChildLaunch | undefined>;
   /** Hosts the existing retro subprocess's settle when its measured drain cost moves it. */
   spawnRetro?: (input: { decision: Record<string, unknown> }) => Promise<FixChildLaunch | undefined>;
@@ -22563,7 +22600,8 @@ async function runAdmittedFixDispatchChild(decided: FixDispatchEnvelope | undefi
     }
     refuseOnHold("before the fix dispatch");
     const outcome = await effects.dispatchFix(
-      envelope.pr, { ...envelope.evidence, ...(effects.fixProgressJudge === undefined ? {} : { progressJudge: effects.fixProgressJudge }) },
+      envelope.pr, { ...envelope.evidence, ...(envelope.dedupeKey === undefined ? {} : { codeqlDedupeKey: envelope.dedupeKey }),
+        ...(effects.fixProgressJudge === undefined ? {} : { progressJudge: effects.fixProgressJudge }) },
       (phase) => {
         // W1-T13991: the CI wait frees the charge only. The PR's admission lock stays held, so no second round on this PR,
         // on any head, is admitted while this child still holds the host's memory reservation.
@@ -25971,7 +26009,7 @@ async function runSweepPinned(
   /** W1-T9114 — a fix dispatch the installed host starts as a run child. SPAWNED BEFORE THE FIX-BRANCH CLAIM: nothing here takes it, the
    *  child takes its own through the native helper once it has rechecked the PR. What this pass held is the in-process mutex key,
    *  which the registry takes over (it holds until the child settles), so a restart waits for nothing it does not own. `false`: stay in process. */
-  async function hostFixDispatch(pr: OpenPrView, evidence: FixDispatchEvidence, claim: DetachedFixClaim, dedupeKey?: string): Promise<boolean> {
+  async function hostFixDispatch(pr: OpenPrView, evidence: FixDispatchEvidence, claim: DetachedFixClaim, dedupeKey?: string): Promise<boolean | string> {
     const host = installedWorkHost;
     if (deps.dryRun || host?.spawnFix === undefined || host.mode() !== "on") return false;
     let envelope: FixDispatchEnvelope;
@@ -26006,7 +26044,12 @@ async function runSweepPinned(
         markFixAdmissionChargeReleased(heldAdmission.lock);
       } else if (deps.fixAdmissionLockDir !== undefined) releaseFixCapacity(pr);
       pendingFixLaunches.set(claim.fixKey, deps.now?.() ?? systemClock.now());
-      hosted = await host.spawnFix({ pr: { prNumber: pr.prNumber, headSha: pr.headSha, taskId: escalationTaskIdFor(pr) }, fixKey: claim.fixKey, envelope, onPending });
+      hosted = await host.spawnFix({ pr: { prNumber: pr.prNumber, headSha: pr.headSha, taskId: escalationTaskIdFor(pr) },
+        fixKey: claim.fixKey, envelope, onPending, reviewInFlight: () => {
+          const checked = readReviewAtFixDispatch(pr, deps.ledgerPath, undefined, true);
+          envelope.evidence.reviewInFlight = checked;
+          return checked.reviewRun;
+        } });
       launched = hosted !== undefined && !("abandoned" in hosted);
     } catch (error) {
       log("sweep.fix.child_spawn_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
@@ -26027,6 +26070,7 @@ async function runSweepPinned(
     }
     if (hosted === undefined) return false;
     if ("abandoned" in hosted) {
+      if (hosted.reason === "review-in-flight") return deferFixForReview(pr, claim, hosted.reviewRun, dedupeKey);
       claim.release();
       appendLine(deps.ledgerPath, {
         run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: "sweep.fix.dispatch_failed",
@@ -26048,6 +26092,15 @@ async function runSweepPinned(
     return true;
   }
 
+  function deferFixForReview(pr: OpenPrView, claim: DetachedFixClaim, reviewRun: string, dedupeKey?: string): string {
+    claim.release();
+    releaseFixCapacity(pr);
+    appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: FIX_DEFERRED_REVIEW_IN_FLIGHT_STEP,
+      pr_number: pr.prNumber, head: pr.headSha, head_sha: pr.headSha, review_run: reviewRun,
+      ...(dedupeKey === undefined ? {} : { dedupe_key: dedupeKey }) });
+    return `fix round waits: review ${reviewRun} of head ${pr.headSha} is in flight`;
+  }
+
   /** The detached fix dispatch: hosted as a run child when the installed host takes it (`evidence` names the decision to carry),
    *  otherwise started in this process and handed to the registry a restart drains. */
   async function detachFixDispatch(pr: OpenPrView,
@@ -26058,20 +26111,13 @@ async function runSweepPinned(
     if (evidence !== undefined) {
       evidence = decideReviewInFlight(pr, evidence, deps.ledgerPath);
       const reviewRun = evidence.reviewInFlight?.reviewRun;
-      if (reviewRun !== undefined) {
-        const fields = { pr_number: pr.prNumber, head: pr.headSha, head_sha: pr.headSha, review_run: reviewRun,
-          ...(dedupeKey === undefined ? {} : { dedupe_key: dedupeKey }) };
-        // The CLI's log() sink also appends to this ledger. Write the durable row once through
-        // appendLine; calling both sinks here duplicates the CodeQL dedupe-key deferral.
-        appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
-          step: FIX_DEFERRED_REVIEW_IN_FLIGHT_STEP, ...fields });
-        claim.release();
-        releaseFixCapacity(pr);
-        return `fix round waits: review ${reviewRun} of head ${pr.headSha} is in flight`;
-      }
+      if (reviewRun !== undefined) return deferFixForReview(pr, claim, reviewRun, dedupeKey);
     }
     const decided = evidence;
-    if (decided !== undefined && await hostFixDispatch(pr, decided, claim, dedupeKey)) return;
+    if (decided !== undefined) {
+      const hosted = await hostFixDispatch(pr, decided, claim, dedupeKey);
+      if (hosted) return typeof hosted === "string" ? hosted : undefined;
+    }
     if (deps.fixAdmissionLockDir !== undefined && !fixCapacityReleases.has(fixCapacityKey(pr))) {
       const admission = claimFixAdmission?.(pr);
       if (admission && !admission.admitted) {
@@ -28913,7 +28959,7 @@ async function runSweepPinned(
                 });
                 extraDisposedFields = { codeql_blocker_dedupe_key: dedupeKey };
                 const codeqlEvidence = { unmetCriteria: [], ciFailures: [codeqlBlockerCiFailure(codeqlAlert)] };
-                const judgedCodeqlEvidence: FixDispatchEvidence = { ...codeqlEvidence, progressDecision,
+                const judgedCodeqlEvidence: FixDispatchEvidence = { ...codeqlEvidence, progressDecision, codeqlDedupeKey: dedupeKey,
                   progressApproach: progressDecision?.verdict === "change-approach" ? progressDecision.approach : undefined };
                 if (deps.detachFixWait) {
                   const refusal = await detachFixDispatch(pr, (onPhase, decided) => codeqlClaim.run(() => deps.dispatchFix(pr, decided ?? judgedCodeqlEvidence, onPhase, codeqlClaim.control)), codeqlClaim, dedupeKey, judgedCodeqlEvidence);
@@ -29888,18 +29934,21 @@ async function runSweepPinned(
               }
               // W1-T11170: an owned head's worker round is recorded before it starts, and comments after it lands.
               const ownedDispatch = (onPhase?: DetachedFixPhaseObserver, control?: DetachedFixControl, carried?: FixDispatchEvidence) => async () => {
-                // W1-T15005: a round the dispatch defers for a review in flight never ran, so it records no worker round. The
-                // decision is made once (or carried from detachFixDispatch) and the dispatch below uses that same decision.
                 const decided = decideReviewInFlight(pr, carried ?? conflictedEvidence, deps.ledgerPath);
-                if (!ownedRound || decided.reviewInFlight.reviewRun !== undefined) {
-                  return deps.dispatchFix(pr, decided, onPhase, control);
-                }
-                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: OWNED_CONFLICT_ROUND_STEP,
-                  pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainTipSha ?? null, round: "worker",
-                  head_kind: ownedRound.kind, push: conflictedEvidence.ownedConflictHead!.push,
-                  paths: (pr.mergeConflict?.files ?? []).map((f) => f.path),
-                  ...(ownedRound.ownership ? { ownership: ownedRound.ownership } : {}) });
-                const outcome = await deps.dispatchFix(pr, decided, onPhase, control);
+                if (!ownedRound) return deps.dispatchFix(pr, decided, onPhase, control);
+                // Record the attempt at the branch claim so a review that arrives during preparation spends no round.
+                let recorded = false;
+                const recordRound = () => {
+                  recorded = true;
+                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: OWNED_CONFLICT_ROUND_STEP,
+                    pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainTipSha ?? null, round: "worker",
+                    head_kind: ownedRound.kind, push: conflictedEvidence.ownedConflictHead!.push,
+                    paths: (pr.mergeConflict?.files ?? []).map((f) => f.path),
+                    ...(ownedRound.ownership ? { ownership: ownedRound.ownership } : {}) });
+                };
+                const outcome = await deps.dispatchFix(pr, decided, onPhase,
+                  { ...(control ?? conflictedFixClaim.control), onBranchClaim: recordRound });
+                if (!recorded && dispatchFixSpent(outcome)) recordRound();
                 // A session branch is commented on only once the round's merge commit landed (the push's own row).
                 const landed = ownedRound.kind === "session"
                   ? readLedger(deps.ledgerPath).findLast((row) => row.step === OWNED_SESSION_PUSH_STEP &&
