@@ -371,6 +371,7 @@ import {
   type AsyncIssueGateway,
   type IssueGateway,
   type OpenIssue,
+  operatorNotifyLogins,
 } from "./escalate.js";
 import { triageEscalation, type EscalationTriageMode, type TriageEvidence, type TriageAction } from "./escalation-triage.js";
 import {
@@ -4584,12 +4585,16 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           if (issues.ensureLabel && !issues.ensureLabel(label)) return { outcome: "hold", reason: `strike ladder hold: label ${label} unavailable` };
         }
         const url = issues.create(`Strike exhaustion: ${causeKey}`, `**Cause-Key:** ${causeKey}\n\n${entry}`, labels);
-        try {
-          ghRunImpl("gh", ["issue", "edit", url, "--repo", `${owner}/${repo}`, "--add-assignee", owner]);
-        } catch (error) {
-          log("sweep.strike_ladder.assign_failed", { issue_url: url, assignee: owner, reason: String(error) });
+        // W1-T15282: the configured operators, never the repo owner (an organization here); no list assigns nobody.
+        const assignee = operatorNotifyLogins(config.operatorGithubLogins).join(",");
+        if (assignee) {
+          try {
+            ghRunImpl("gh", ["issue", "edit", url, "--repo", `${owner}/${repo}`, "--add-assignee", assignee]);
+          } catch (error) {
+            log("sweep.strike_ladder.assign_failed", { issue_url: url, assignee, reason: String(error) });
+          }
         }
-        return { outcome: "opened", reason: "strike ladder digest: opened one cause issue", issueUrl: url, assignee: owner };
+        return { outcome: "opened", reason: "strike ladder digest: opened one cause issue", issueUrl: url, ...(assignee ? { assignee } : {}) };
       },
     },
     // W1-T7998: the claim path's own capture and decision, local only; the head is the one this pass listed.

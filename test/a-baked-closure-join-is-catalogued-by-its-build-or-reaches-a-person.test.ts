@@ -220,6 +220,22 @@ test("W1-T9851: a fix round whose scope need names a workflow escalates and requ
   assert.equal(f.asks.length, 1, "the same head and path set is delivered once");
 });
 
+// W1-T15282: the scope question opened with `@<repo owner>:`; the owner is an organization here, and mentioning
+// an organization notifies nobody.
+test("W1-T15282 criterion 3: the fix lane's scope question mentions the configured operator, never the owner organization", async (t) => {
+  const f = fixFixture(t, [workflow, installer]);
+  f.opts.config = { ...f.opts.config, operatorGithubLogins: ["cao825"] } as Config;
+  await runFixRung(f.opts);
+  assert.equal(f.asks.length, 1);
+  assert.ok(f.asks[0].includes("@cao825: https://github.com/acme/remudero/pull/42 needs workflow edits"), f.asks[0]);
+  assert.equal(f.asks[0].includes("@acme"), false, "the owner organization is never mentioned");
+  const bare = fixFixture(t, [workflow, installer]);
+  await runFixRung(bare.opts);
+  assert.equal(bare.asks.length, 1);
+  assert.equal(bare.asks[0].includes("@acme"), false, "with no operator list nobody is mentioned");
+  assert.ok(bare.asks[0].includes("https://github.com/acme/remudero/pull/42 needs workflow edits"), bare.asks[0]);
+});
+
 test("W1-T9851: a non-workflow scope need still requests amendment", async (t) => {
   const f = fixFixture(t, [installer]);
   await runFixRung(f.opts);

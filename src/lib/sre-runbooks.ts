@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 
 import { fixedClock, systemClock } from "./clock.js";
 import { judgeNonWorkerRelease, NON_WORKER_BREAKER_RUNBOOK_ID, readBreakerStrikes, type BreakerRunbookHost } from "./breaker-release.js";
-import { escalate, ghIssueGateway, type Escalation, type IssueGateway } from "./escalate.js";
+import { escalate, ghIssueGateway, operatorNotifyLogins, type Escalation, type IssueGateway } from "./escalate.js";
 import { isQuietHours, pauseDetail, pendingPrActions, requestPrAction, stopDetail } from "./fleet-control.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { defaultInContainer, writeAtomic } from "./fs-race-safe.js";
@@ -286,39 +286,44 @@ export function ledgerGovernorVerdict(
 
 /** The daemon's runbook gates around a catalog (src/run-task.ts builds the catalog, so a test can
  *  inject its own): receipts from this daemon's ledger, the governor over that same ledger, and the
- *  operator's assigned needs-human issue. */
+ *  operator's assigned needs-human issue (`operatorLogins` is `config.operatorGithubLogins`). */
 export function daemonSreRunbookPass(
   runbooks: readonly SreRunbook[],
   ledgerPath: string,
   owner: string,
   repo: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  operatorLogins?: readonly string[],
 ): (incident: IncidentEvidence) => Promise<RunbookPassResult> {
   const receipts = () => readRunbookReceipts(ledgerPath);
-  const escalate = sreOperatorEscalation({ owner, repo, ledgerPath, log });
+  const escalate = sreOperatorEscalation({ owner, repo, ledgerPath, log, operatorLogins });
   const nowMs = () => systemClock.now();
   const governor = ledgerGovernorVerdict(ledgerPath, runbooks.map((r) => r.id), nowMs);
   return (incident) => runMatchingRunbook(incident, runbooks, (id) => governor(id), receipts, escalate, log, nowMs);
 }
 
-/** The needs-human issue path, each issue assigned to the repo's owner — the operator — so GitHub
- *  delivers an email and a GitHub Mobile push. An unassignable issue still opens (logged). */
+/** The needs-human issue path, each issue assigned to the configured operator logins (W1-T15282: never
+ *  the repo owner, an organization here) so GitHub delivers an email and a GitHub Mobile push. With no
+ *  list nobody is assigned. An unassignable issue still opens (logged). */
 export function sreOperatorEscalation(opts: {
   owner: string;
   repo: string;
   ledgerPath: string;
   log: (step: string, extra?: Record<string, unknown>) => void;
+  /** `config.operatorGithubLogins`. */
+  operatorLogins?: readonly string[];
   gh?: (args: string[]) => string;
   nowMs?: () => number;
 }): (e: Escalation) => string | null {
   const repoArg = `${opts.owner}/${opts.repo}`;
+  const assignees = operatorNotifyLogins(opts.operatorLogins);
   const gh = opts.gh ?? ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   const issues: IssueGateway = ghIssueGateway(opts.owner, opts.repo, {
     exec: (args) => {
       const out = gh(args);
-      if (args[0] !== "issue" || args[1] !== "create") return out;
+      if (args[0] !== "issue" || args[1] !== "create" || assignees.length === 0) return out;
       try {
-        gh(["issue", "edit", out.trim(), "--repo", repoArg, "--add-assignee", opts.owner]);
+        gh(["issue", "edit", out.trim(), "--repo", repoArg, "--add-assignee", assignees.join(",")]);
       } catch (error) {
         opts.log("sre.escalation_assign_failed", { issue_url: out.trim(), reason: String((error as Error)?.message ?? error) });
       }

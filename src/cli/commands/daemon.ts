@@ -3210,6 +3210,7 @@ export async function daemonCommand(
                         self.owner,
                         self.repo,
                         log,
+                        config.operatorGithubLogins,
                       ),
                     }),
                     () => mergedInLastDayAsync(repoRoot),

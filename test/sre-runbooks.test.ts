@@ -293,7 +293,8 @@ test("an escalation opens the needs-human issue assigned to the operator", () =>
     return "";
   };
   const logged: string[] = [];
-  const escalateToOperator = sreOperatorEscalation({ owner: "craigoley", repo: "remudero", ledgerPath, gh, log: (s) => logged.push(s), nowMs: () => NOW });
+  const escalateToOperator = sreOperatorEscalation({ owner: "craigoley", repo: "remudero", ledgerPath, gh, log: (s) => logged.push(s), nowMs: () => NOW,
+    operatorLogins: ["cao825"] });
 
   // Drive it through the real matcher, so the escalation carries the matcher's own evidence.
   const d = deps([]);
@@ -309,8 +310,8 @@ test("an escalation opens the needs-human issue assigned to the operator", () =>
     assert.equal(create[create.indexOf("--label") + 1], "needs-human", "on the needs-human queue");
     assert.deepEqual(
       calls.find((a) => a[0] === "issue" && a[1] === "edit"),
-      ["issue", "edit", "https://github.com/craigoley/remudero/issues/9", "--repo", "craigoley/remudero", "--add-assignee", "craigoley"],
-      "assigned to the operator, so GitHub emails and pushes",
+      ["issue", "edit", "https://github.com/craigoley/remudero/issues/9", "--repo", "craigoley/remudero", "--add-assignee", "cao825"],
+      "assigned to the configured operator (W1-T15282: never the owner organization), so GitHub emails and pushes",
     );
     const body = create[create.indexOf("--body") + 1];
     assert.ok(body.includes("dispatch-stall") && body.includes("fast burn"), "the issue carries the incident's evidence");

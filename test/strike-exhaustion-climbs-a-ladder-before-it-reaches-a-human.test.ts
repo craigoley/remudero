@@ -59,7 +59,7 @@ function fixture(t: { after: (fn: () => void) => void }) {
   };
   const effects = buildSweepEffects({
     owner: "acme", repo: "remudero", repoRoot: root,
-    config: { root, claudeBin: "/bin/true" } as Config,
+    config: { root, claudeBin: "/bin/true", operatorGithubLogins: ["acme-operator"] } as Config,
     plan: { tasks: [], byId: new Map() } as unknown as Plan,
     ledgerPath: join(root, "ledger.ndjson"), runId: "ladder-test",
     log: (step, extra) => { rows.push({ step, ...extra }); },
@@ -159,7 +159,7 @@ test("W1-T5536: a spent rebuild budget or an unrequeueable PR opens one assigned
     assert.equal(f.open.length, 1, JSON.stringify({ over, calls: f.calls, actions: first.actions,
       rows: f.rows.filter(row => String(row.step).includes("strike_ladder") || row.step === "sweep.disposed") }));
     assert.equal(f.calls.some(c => c.startsWith("close:")), false);
-    assert.ok(f.commands.some(args => args.includes("--add-assignee") && args.includes("acme")));
+    assert.ok(f.commands.some(args => args.includes("--add-assignee") && args.includes("acme-operator") && !args.includes("acme")));
     await f.sweep([pr(over)]);
     assert.equal(f.open.length, 1);
     assert.equal(f.calls.includes("comment"), false, "the first PR is already in the issue body");
@@ -313,7 +313,7 @@ test("W1-T5536: the default digest gateway shells out and assignment failure kee
   process.env.PATH = `${shim.dir}:${oldPath}`;
   t.after(() => { process.env.PATH = oldPath; rmSync(shim.dir, { recursive: true, force: true }); });
   const effects = buildSweepEffects({
-    owner: "acme", repo: "remudero", repoRoot: f.root, config: { root: f.root, claudeBin: "/bin/true" } as Config,
+    owner: "acme", repo: "remudero", repoRoot: f.root, config: { root: f.root, claudeBin: "/bin/true", operatorGithubLogins: ["acme-operator"] } as Config,
     plan: { tasks: [], byId: new Map() } as unknown as Plan, ledgerPath: join(f.root, "ledger.ndjson"), runId: "default-ladder",
     log: (step, extra) => { f.rows.push({ step, ...extra }); },
   });
@@ -321,7 +321,7 @@ test("W1-T5536: the default digest gateway shells out and assignment failure kee
   assert.equal(result.outcome, "opened");
   assert.equal(result.issueUrl, "https://github.com/acme/remudero/issues/99");
   assert.ok(shim.calls().some(call => call.includes("labels=strike-ladder-digest")));
-  assert.ok(shim.calls().some(call => call.startsWith("issue edit") && call.includes("--add-assignee acme")));
+  assert.ok(shim.calls().some(call => call.startsWith("issue edit") && call.endsWith("--add-assignee acme-operator")));
   assert.ok(f.rows.some(row => row.step === "sweep.strike_ladder.assign_failed" && String(row.reason).includes("owner cannot be assigned")));
 });
 

@@ -26,7 +26,7 @@ import { dirname, join } from "node:path";
 import { coldAnalyticsSnapshot, createAnalyticsSnapshotCache, type AnalyticsSnapshot, type AnalyticsSnapshotCache } from "./analytics-route.js";
 import { buildRecentRoute, buildStatusRoute, STALE_SOURCE_HEADER, type BoardDeps } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
-import { escalate, ghIssueGateway, type IssueGateway } from "./escalate.js";
+import { escalate, ghIssueGateway, operatorNotifyLogins, type IssueGateway } from "./escalate.js";
 import { evaluateFleetLiveness, livenessEscalation, readLivenessRows, type InstanceLiveness, type LivenessInstance, type ReadLastRows } from "./fleet-liveness.js";
 import { ghExec } from "./github-transport.js";
 import { appendLedger } from "./ledger.js";
@@ -112,6 +112,8 @@ export interface InstanceGatewayOptions {
   /** W1-T4418 liveness seams: the row reader, the `gh` runner behind its escalation, the clock, the timer. */
   readLastRows?: ReadLastRows;
   gh?: (args: string[]) => string;
+  /** W1-T15282: `config.operatorGithubLogins`, the logins a DOWN alarm assigns; absent assigns nobody. */
+  operatorGithubLogins?: readonly string[];
   clock?: Clock;
   every?: (run: () => void, ms: number) => () => void;
   /** Core's inbox root (serve's `fleetControlRoot`); defaults to `assistantClaimRoot`, the same root in serve. */
@@ -472,15 +474,18 @@ export function livenessInstances(opts: InstanceGatewayOptions): LivenessInstanc
 
 const realGh = (args: string[]): string => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
-/** The escalation's issue transport, assigning each issue it opens to the repo's owner — the operator. */
-function operatorIssues(repo: string, gh: (args: string[]) => string, log: InstanceGatewayOptions["log"]): IssueGateway {
+/** The escalation's issue transport, assigning each issue it opens to the configured operator logins
+ *  (W1-T15282: never the repo owner, an organization here); with no list nobody is assigned. */
+function operatorIssues(repo: string, gh: (args: string[]) => string, log: InstanceGatewayOptions["log"],
+  operatorLogins: readonly string[] | undefined): IssueGateway {
   const [owner, name] = repo.split("/");
+  const assignees = operatorNotifyLogins(operatorLogins);
   return ghIssueGateway(owner, name, {
     exec: (args) => {
       const out = gh(args);
-      if (args[0] !== "issue" || args[1] !== "create") return out;
+      if (args[0] !== "issue" || args[1] !== "create" || assignees.length === 0) return out;
       try {
-        gh(["issue", "edit", out.trim(), "--repo", repo, "--add-assignee", owner]);
+        gh(["issue", "edit", out.trim(), "--repo", repo, "--add-assignee", assignees.join(",")]);
       } catch (error) {
         log?.("fleet.liveness_assign_failed", { repo, issue_url: out.trim(), reason: String((error as Error).message ?? error) });
       }
@@ -513,7 +518,7 @@ export function checkInstanceLiveness(
   const results = evaluateFleetLiveness(roots, guardedRead, clock.now()).filter((r) => !unreadable.has(r.instance));
   for (const r of results) {
     if (r.state === "down" && !deps.down.has(r.instance)) {
-      const issues = operatorIssues(r.repo, deps.gh ?? realGh, deps.log);
+      const issues = operatorIssues(r.repo, deps.gh ?? realGh, deps.log, deps.operatorGithubLogins);
       let url = "";
       try {
         url = escalate(livenessEscalation(r), { issues, ledgerPath: deps.ledgerPath, runId: `LIVENESS-${clock.now()}` });
