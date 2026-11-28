@@ -2653,6 +2653,14 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
       ...(from === undefined ? {} : { from }), to } };
 }
 
+// W1-T14916: a daemon's worker spawn scope. runInWorkerSpawnScope runs the daemon's work in it, so every pass, timer and
+// callback inherits it and no caller outside it does. Its drain release sets `retiredBy`; from then on spawnWorker,
+// spawnRunChild and each provider adapter (after its last wait: the Codex worktree probe and registry recheck, the
+// open-weight registry invocation) refuse to launch. An adapter refuses with WorkerSpawnRetiredError, which spawnWorker
+// turns into a not-started result and a `worker.spawn_withheld` row. The scope lives beside the adapters (worker-provider.ts).
+export { currentWorkerSpawnScope, runInWorkerSpawnScope, workerSpawnRetiredBy, WorkerSpawnRetiredError, type WorkerSpawnScope } from "./worker-provider.js";
+import { workerSpawnRetiredBy, WorkerSpawnRetiredError } from "./worker-provider.js";
+
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // W1-T13868: a wrapper may replace this call's result with its own error; the call's table keeps the result's model.
   forgetReturnedServedModel();
@@ -2726,7 +2734,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // start would not fit. It never throws, and an error admits the start (host-memory-admission.ts).
   const childReservationId = currentRunChildReservationId();
   const admissionStartedAtMs = systemClock.now();
-  const admission = childReservationId ? undefined : await (args.admitWorkerMemory ?? awaitMemoryAdmission)({
+  const retiredBy = workerSpawnRetiredBy();
+  const admission = childReservationId || retiredBy ? undefined : await (args.admitWorkerMemory ?? awaitMemoryAdmission)({
     workerClass: workerClassOf(args),
     signal: args.signal,
     sinceMs: args.memoryAdmissionSinceMs,
@@ -2735,34 +2744,61 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     ...(args.taskId ? { taskId: args.taskId } : {}),
   }, args.memoryShadow);
   args.onMemoryAdmissionEnd?.();
-  const admissionAbandoned = (): WorkerResult => {
-    if (admission && "reservation" in admission) admission.reservation?.releaseOccupancy();
-    if (admission?.kind === "admitted") admission.endAged?.();
-    return { notStarted: "admission-abandoned", subtype: "admission_abandoned",
+  const notStartedResult = (): WorkerResult => ({ notStarted: "admission-abandoned", subtype: "admission_abandoned",
       admissionSinceMs: Math.min(admissionStartedAtMs, args.memoryAdmissionSinceMs ?? admissionStartedAtMs),
       sessionId: "", costUsd: 0, numTurns: 0,
       text: "", blocks: [], stderr: "", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
       model: args.model ?? "", effort: args.effort ?? "", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
-      modelUsage: {}, compactionEvents: [], qualitySuspect: false };
+      modelUsage: {}, compactionEvents: [], qualitySuspect: false });
+  const admissionAbandoned = (): WorkerResult => {
+    if (admission && "reservation" in admission) admission.reservation?.releaseOccupancy();
+    if (admission?.kind === "admitted") admission.endAged?.();
+    return notStartedResult();
   };
   if (admission?.kind === "abandoned" || args.signal?.aborted) return admissionAbandoned();
+  const logSpawnWithheld = (hold: string): void => {
+    const row = { step: "worker.spawn_withheld", ...(args.taskId ? { task_id: args.taskId } : {}),
+      ...(args.runId ? { run_id: args.runId } : {}), hold };
+    try {
+      if (args.logWorkerSpawnWithheld) args.logWorkerSpawnWithheld(row);
+      else process.stderr.write(`${JSON.stringify(row)}\n`);
+    } catch (error) {
+      try { process.stderr.write(`${JSON.stringify(row)}\n`); } catch { /* diagnostics cannot reopen a refused start */ }
+    }
+  };
+  const spawnWithheld = (hold: string): WorkerResult => {
+    const abandoned = admissionAbandoned();
+    logSpawnWithheld(hold);
+    return abandoned;
+  };
+  // W1-T14916: once a daemon releases its drain lock, the successor owns new work. A pass already running in the
+  // retired process reaches this boundary from many rungs (fix, review, triage, inbox drafts), so it is refused here,
+  // read again now because memory admission can outlast the release.
+  const retiredAfterAdmission = retiredBy ?? workerSpawnRetiredBy();
+  if (retiredAfterAdmission) return spawnWithheld(`retired: ${retiredAfterAdmission}`);
+  // Provider preparation awaits too, so each provider launch reads the mark once more. The outer finally releases the
+  // occupancy and reservation there, so this path only ledgers and returns not-started.
+  const retiredAtLaunch = (): WorkerResult | undefined => {
+    const reason = workerSpawnRetiredBy();
+    if (reason === undefined) return undefined;
+    logSpawnWithheld(`retired: ${reason}`);
+    return notStartedResult();
+  };
+  // An adapter's own launch reads the mark after its last wait (worker-provider.ts) and refuses with a typed error.
+  const retiredInAdapter = async (launch: () => Promise<WorkerResult>): Promise<WorkerResult> => {
+    try { return await launch(); }
+    catch (error) {
+      if (!(error instanceof WorkerSpawnRetiredError)) throw error;
+      logSpawnWithheld(`retired: ${error.reason}`);
+      return notStartedResult();
+    }
+  };
   // W1-T11336, W1-T12497: the sweep's admission may precede a fleet PAUSE by tens of minutes. Every fix start,
   // in process or in a run child, re-reads the hold here; reviews and other classes retain their existing path.
   if (workerClassOf(args) === "fix") {
     const root = (args.config ?? loadConfig()).root;
     const hold = (args.readWorkerAdmissionHold ?? workerAdmissionHold)(root);
-    if (hold) {
-      const abandoned = admissionAbandoned();
-      const row = { step: "worker.spawn_withheld", ...(args.taskId ? { task_id: args.taskId } : {}),
-        ...(args.runId ? { run_id: args.runId } : {}), hold: `fleet ${hold.control} hold: ${hold.detail}` };
-      try {
-        if (args.logWorkerSpawnWithheld) args.logWorkerSpawnWithheld(row);
-        else process.stderr.write(`${JSON.stringify(row)}\n`);
-      } catch (error) {
-        try { process.stderr.write(`${JSON.stringify(row)}\n`); } catch { /* diagnostics cannot reopen a refused start */ }
-      }
-      return abandoned;
-    }
+    if (hold) return spawnWithheld(`fleet ${hold.control} hold: ${hold.detail}`);
   }
   const releaseWorkerOccupancy = claimWorkerOccupancy();
   const memoryReservation = childReservationId ? undefined :
@@ -3235,9 +3271,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
         args.providerRouting?.spawnCodex ?? spawnCodexWorker;
       const execution = executionFor("codex");
-      const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
+      const runCodex: typeof spawnCodex = async (codexArgs, workerConfig, capacity) => retiredAtLaunch() ?? retiredInAdapter(() =>
         spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
-          containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
+          containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity));
       if (args.providerRouting?.spawnCodex === undefined) {
         assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
       }
@@ -3330,9 +3366,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
       args.providerRouting?.spawnCodex ?? spawnCodexWorker;
     const execution = executionFor("codex");
-    const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
+    const runCodex: typeof spawnCodex = async (codexArgs, workerConfig, capacity) => retiredAtLaunch() ?? retiredInAdapter(() =>
       spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
-        containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
+        containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity));
     if (args.providerRouting?.spawnCodex === undefined) {
       assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -3378,7 +3414,10 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         if (!(error instanceof ProviderCapacityBlockedError)) throw error;
       }
     }
-    const runOpenWeight = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
+    const openWeightAdapter = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
+    const runOpenWeight: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnOpenWeight"]> =
+      async (openWeightArgs, workerConfig, selection) => retiredAtLaunch()
+        ?? retiredInAdapter(() => openWeightAdapter(openWeightArgs, workerConfig, selection));
     const execution = executionFor("cash");
     const executionPrompt = execution.prompt;
     // env means child extras here, but a complete daemon override in the adapter. Keep custody distinct.
@@ -3896,6 +3935,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         privatePolicyArtifact = createPrivateRegistryWorkerPolicy(options.settings, privateRegistry!, workerHome, scope);
         options.settings = privatePolicyArtifact.path;
       }
+      const retiredAtQuery = retiredAtLaunch();
+      if (retiredAtQuery) return retiredAtQuery;
       const sdkRequest: SdkRequestEvidence = {
         model: sdkRequestedModel(options),
         effort: sdkRequestedEffort(options),
@@ -5785,6 +5826,15 @@ type WorktreeNodeModulesOutcome = NodeModulesLinkOutcome | { outcome: "refused";
 /** Thrown by `worktreeAdd`, only when its caller opts in, instead of linking a SAME-package tree whose install inputs differ
  * from the worktree's (W1-T4193). `reasonClass` is the `blocked_toolchain` tag daemon.ts's `isSpawnInfraBlocked` defers
  * WITHOUT a strike: every daemon installs its install root before a freshness restart, so the mismatch clears. */
+/** W1-T14916: a consumer whose port returns only a transcript throws this on a `notStarted` result, so its caller can
+ *  record a round no worker ran instead of judging an empty transcript as the worker's answer. */
+export class WorkerNotStartedError extends RmdError {
+  constructor(readonly notStarted: NonNullable<WorkerResult["notStarted"]>) {
+    super("child_process", 1, `worker not started: ${notStarted}`, { notStarted });
+    this.name = "WorkerNotStartedError";
+  }
+}
+
 /** A subscription-only (frontier) model was pinned or forced onto cash; it waits for a subscription instead. */
 export class SubscriptionOnlyRefusedError extends RmdError {
   readonly reasonClass = "blocked_toolchain" as const;

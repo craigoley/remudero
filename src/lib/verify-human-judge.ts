@@ -23,7 +23,7 @@ import { shadowJudgeCall } from "./judge-shadow.js";
 import { canonicalWorkerProviderId, enabledWorkerProviders, type Config, type WorkerProviderId } from "./config.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { createHash } from "node:crypto";
-import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { spawnWorker, WorkerNotStartedError, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { benchmarkNonDispatchSpawn, withReceiptIdentity } from "./benchmark-run.js";
 
 /** What the judge decides for ONE parked shard. None of the values edits or releases a task. */
@@ -331,6 +331,8 @@ export async function judgeVerifyHumanShard(
   try {
     return await deps.judge(shard);
   } catch (err) {
+    // W1-T14916: a judge that never started judged nothing; the caller leaves the shard due.
+    if (err instanceof WorkerNotStartedError) throw err;
     return {
       ...FAIL_OPEN_VERIFY_HUMAN_VERDICT,
       reason: `judge unavailable (${err instanceof Error ? err.message : String(err)}) — failing open to needs_operator`,
@@ -496,6 +498,7 @@ export function realVerifyHumanJudge(opts: {
     const result = await spawnVerifyHumanJudgeWorker({
       shard, mount, cwd: opts.cwd, settingsFile: opts.settingsFile, spawn,
     });
+    if (result.notStarted !== undefined) throw new WorkerNotStartedError(result.notStarted);
     const verdict = parseVerifyHumanVerdict(result.text);
     if (opts.shadowLog !== undefined && verdict.judgeFailed !== true) {
       const answered = (text: string): VerifyHumanVerdict | undefined => {

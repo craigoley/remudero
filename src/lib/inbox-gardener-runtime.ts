@@ -6,7 +6,7 @@ import { inboxSemanticDigest } from "./inbox-retirement.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { loadMounts, mountsPath, type Mount } from "./mounts.js";
 import { resolveVerifyHumanJudgeMount } from "./verify-human-judge.js";
-import type { spawnWorker } from "./worker.js";
+import { WorkerNotStartedError, type spawnWorker } from "./worker.js";
 import type { ghJsonAsync } from "./github-transport.js";
 
 export interface InboxGardenerRuntimeContext {
@@ -34,6 +34,7 @@ export async function inboxGardenerRunTaskPorts(ctx: InboxGardenerRuntimeContext
         permissionMode: "bypassPermissions", prompt: `${prompt}\nRespond with only JSON: {"decision":"needs_triage"|"mechanical_followup","reason":"..."}.`,
         model: mount.model, effort: mount.effort, maxTurns: 1, tools: [], ...(mount.provider ? { mountProvider: mount.provider } : {}) },
       { taskId: "INBOX-GARDENER", runId: `inbox-gardener-${inboxSemanticDigest([candidate.proposal.id, prompt])}` }));
+      if (result.notStarted) throw new WorkerNotStartedError(result.notStarted); // W1-T14916: no verdict, nothing spent
       return JSON.parse(result.text);
     } }) };
 }

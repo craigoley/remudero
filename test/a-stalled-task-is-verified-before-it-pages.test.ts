@@ -8,6 +8,7 @@ import { productionDispatchBreakJudge } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { onCircuitBreakWithVerifier } from "../src/run-task.js";
+import { WorkerNotStartedError } from "#src/lib/worker.js";
 import type { Task } from "../src/lib/plan.js";
 import {
   decideStallVerdict,
@@ -300,6 +301,21 @@ test("W1-T7742: a tripped breaker pages only when its judge rules escalate", asy
     const rulings = readLedgerLines(ledgerPath).filter((row) => row.step === DISPATCH_BREAKER_JUDGED_STEP).map((row) => row.decision);
     assert.deepEqual(rulings, ["continue", "escalate", "unavailable", "unavailable"]);
 
+    const markersBeforeWithheld = readLedgerLines(ledgerPath).filter((row) => row.step === "dispatch.circuit_broken.escalated").length;
+    let retiredSpawnCalls = 0;
+    const retiredJudge = productionDispatchBreakJudge({ cwd: ".", settingsFile: "settings/worker.json",
+      mount: { model: "test-model", effort: "low", maxTurns: 1, contextBudget: 10000 }, spawn: async () => {
+        retiredSpawnCalls++;
+        return { notStarted: "admission-abandoned", subtype: "admission_abandoned", text: "" } as never;
+      } });
+    await onCircuitBreakWithVerifier(gate, () => undefined, { ...base, judge: retiredJudge })(breakerTask("W1-N"));
+    assert.equal(retiredSpawnCalls, 1, "the production judge adapter receives the retired worker result");
+    assert.equal(pages.length, 3, "a retired daemon whose judge never started does not page the operator");
+    assert.deepEqual(readLedgerLines(ledgerPath).filter((row) => row.step === DISPATCH_BREAKER_JUDGED_STEP)
+      .map((row) => row.decision), [...rulings, "unavailable"], "the withheld judge remains an un-settled ruling for the successor");
+    assert.equal(readLedgerLines(ledgerPath).filter((row) => row.step === "dispatch.circuit_broken.escalated").length,
+      markersBeforeWithheld, "a withheld judge writes no permanent escalation marker");
+
     let asked = 0;
     await onCircuitBreakWithVerifier(gate, () => undefined, { ...base,
       judge: async () => { asked++; return { verdict: "continue", reason: "late" }; } })(breakerTask("W1-K"));
@@ -324,6 +340,12 @@ test("W1-T7742: the production dispatch-break judge asks the risk mount with no 
   const failed = productionDispatchBreakJudge({ cwd: ".", settingsFile: "settings/worker.json",
     mount: { model: "m", effort: "low", maxTurns: 1, contextBudget: 1 }, spawn: async () => ({ text: "", subtype: "error_max_turns" }) as never });
   assert.equal(await failed(input), undefined);
+  const retired = productionDispatchBreakJudge({ cwd: ".", settingsFile: "settings/worker.json",
+    mount: { model: "m", effort: "low", maxTurns: 1, contextBudget: 1 }, spawn: async () => ({
+      notStarted: "admission-abandoned", subtype: "admission_abandoned", text: "",
+    }) as never });
+  await assert.rejects(retired(input), (error: unknown) => error instanceof WorkerNotStartedError &&
+    error.notStarted === "admission-abandoned", "the production adapter propagates a withheld spawn, not an absent verdict");
 });
 
 test("W1-T7742: the dispatch-break judge reads only the attempts since the streak last reset", () => {

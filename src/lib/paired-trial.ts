@@ -595,7 +595,8 @@ export function sealedPairedAttemptDispatcher(options: SealedPairedAttemptOption
       const reading = (options.probeIsolation ?? probeSealedIsolation)({ repoDir: options.repoDir, dir, base,
         text: [result.text, ...result.blocks].join("\n") });
       const sealed = reading.pushedRef === null && reading.prUrl === null && reading.breach === null;
-      const measurable = sealed && !result.apiError && result.usageRefusal === undefined;
+      // W1-T14916: a worker that never started left the base tree untouched; it is no head to grade.
+      const measurable = sealed && !result.apiError && result.usageRefusal === undefined && result.notStarted === undefined;
       if (measurable) commitSealedEdits(dir);
       return { headDir: measurable ? dir : null, headSha: gitProbe(dir, ["rev-parse", "HEAD"]), servedModel: result.servedModel ?? null,
         ...("harnessContract" in result ? { harnessContract: result.harnessContract } : {}),

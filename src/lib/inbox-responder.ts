@@ -33,7 +33,7 @@ import {
 import type { Mount } from "./mounts.js";
 import { appendPanelLedger } from "./panel-actions.js";
 import { readLedgerLines } from "./status.js";
-import { spawnWorker } from "./worker.js";
+import { spawnWorker, WorkerNotStartedError } from "./worker.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 
 /**
@@ -461,7 +461,9 @@ async function decideFor(ctx: ThreadDecisionContext, deps: InboxResponderDeps): 
   if (deps.decide) {
     try {
       decision = validateDecision(await deps.decide(ctx));
-    } catch {
+    } catch (error) {
+      // W1-T14916: no answer is saved for a reply no reader read; the tick ledgers it and the reply stays pending.
+      if (error instanceof WorkerNotStartedError) throw error;
       // deliberate: a writer outage falls back to the keyword reading below, never to silence.
       decision = null;
     }
@@ -747,6 +749,8 @@ export function realThreadDecider(opts: {
   return async (ctx) => {
     const args = buildDecisionSummarySpawnArgs({ input: { context: "" }, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
     const result = await spawn({ ...args, prompt: buildThreadDecisionPrompt(ctx) });
+    // W1-T14916: a reader that never started read nothing; the reply stays pending for the next answer.
+    if (result.notStarted) throw new WorkerNotStartedError(result.notStarted);
     if (result.isError) return null;
     const match = /\{[\s\S]*\}/.exec(result.text);
     if (!match) return null;

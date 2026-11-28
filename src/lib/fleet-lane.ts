@@ -563,7 +563,9 @@ function* mergeFollowupRestatements(deps: FleetLaneDeps<number | Promise<number>
         verdict = yield* step(async (): Promise<Sameness> => {
           try {
             return await ask(earlier.text, later.text);
-          } catch {
+          } catch (e) {
+            // W1-T14916: a judge a retired daemon withheld ends the pass, storing no verdict and filing nothing.
+            if ((e as { name?: unknown } | undefined)?.name === "WorkerNotStartedError") throw e;
             // deliberate: a judge that threw answered nothing; "unavailable" is its own value, written as a row below.
             return "unavailable";
           }

@@ -322,6 +322,8 @@ import {
   worktreesDir,
   writeRunLock,
   runLockRecord,
+  WorkerNotStartedError,
+  workerSpawnRetiredBy,
   type QuestionEntry,
   type SpawnWorkerArgs,
   type WorkerResult,
@@ -2753,10 +2755,15 @@ async function askFixProgressJudgeOnce(spawn: (args: SpawnWorkerArgs) => Promise
     assigned = { provider: assignment.selected.provider, model: assignment.selected.model };
     args.onSelectionAssignment?.(assignment);
   } };
-  try { first = await spawn(firstArgs); } catch {
+  try { first = await spawn(firstArgs); } catch (error) {
+    // Retirement withheld the launch; it is not a provider failure and cannot be retried elsewhere.
+    if (error instanceof WorkerNotStartedError) throw error;
     firstThrew = true;
     first = undefined; // a throw before a result is an attempt that ended without one: it is re-asked below
   }
+  // A withheld launch answered nothing because this daemon is retired. Keep it visible to the caller
+  // instead of turning it into an absent verdict or spending a second spawn on another provider.
+  if (first?.notStarted !== undefined) throw new WorkerNotStartedError(first.notStarted);
   if (first !== undefined && (first.subtype === undefined || first.subtype === "success")) return { result: first };
   const provider = first?.provider ?? assigned?.provider;
   // `model` is the caller's requested label on routed workers (for example Codex
@@ -2772,9 +2779,12 @@ async function askFixProgressJudgeOnce(spawn: (args: SpawnWorkerArgs) => Promise
   try { result = await spawn({ ...args, ...(exclude === undefined || exclude.length === 0 ? {} : { excludeProviders: exclude }),
     ...(reaskMount === undefined ? {} : { mountProvider: reaskMount }) }); }
   catch (error) {
+    if (error instanceof WorkerNotStartedError) throw error;
     if (firstThrew) throw error;
     return undefined; // a returned failure followed by a throw preserves the caller's unparseable/re-ask path
   }
+  // Retirement may begin during the retry gap too; that refusal is still not a provider result.
+  if (result.notStarted !== undefined) throw new WorkerNotStartedError(result.notStarted);
   return { result, reaskedFrom };
 }
 
@@ -2824,6 +2834,9 @@ export function productionDispatchBreakJudge(opts: {
       scrubRiskJudgeText(JSON.stringify(input)).text,
     ].join("\n");
     const result = await (opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge"))({ ...args, prompt });
+    // W1-T14916: a retired daemon withheld this judge; it produced no ruling, so preserve that
+    // distinction for the caller instead of treating the empty transcript as an unavailable answer.
+    if (result.notStarted !== undefined) throw new WorkerNotStartedError(result.notStarted);
     if (result.subtype !== undefined && result.subtype !== "success") return undefined;
     return parseFixProgressVerdict(result.text);
   };
@@ -4091,6 +4104,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         if (value === "posted" && postedAtMs === undefined) postedAtMs = systemClock.now();
         onPhase?.(value);
       };
+      // W1-T14916: a retired daemon (drain lock released) starts no review here, in a child or in-process, and writes no
+      // attempt for one: the successor owns this head.
+      if (workerSpawnRetiredBy() !== undefined) return;
       await observePr(pr, "review");
       log("sweep.post_review.attempt", {
         pr_number: pr.prNumber,
@@ -4117,6 +4133,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             ...(hosted.acknowledge === undefined ? {} : { acknowledge: hosted.acknowledge }),
           }, log);
           log("sweep.post_review.child", { pr_number: pr.prNumber, head_sha: pr.headSha, review_key: reviewKey, child_run_id: hosted.runId });
+          return;
+        }
+        // A child withheld because the release landed during its admission wait never falls back to an in-process review.
+        if (workerSpawnRetiredBy() !== undefined) {
+          log("sweep.post_review.done", { pr_number: pr.prNumber, head_sha: pr.headSha, exit: "retired", review_mode: mode.kind });
           return;
         }
         // W1-T11729: a restore never falls back to a full review; without its runner it does nothing.
@@ -4892,6 +4913,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               tools: ["Read", "Write", "Edit", "Grep", "Glob"], cashTools: ["Read", "Write", "Edit", "Grep", "Glob", "RunCheck"],
               runId, taskId: task.id,
             });
+            if (result.notStarted) throw new WorkerNotStartedError(result.notStarted);
             log("sweep.plan_round.worker", { pr_number: pr.prNumber, head_sha: pr.headSha, cost_usd: result.costUsd,
               num_turns: result.numTurns, subtype: result.subtype });
             return workerTranscript(result);
@@ -18341,7 +18363,7 @@ export interface SweepDeps {
    *  (closed, the judge's pending state cleared), never sent to a plan-scoped round machine-author-verify must refuse. */
   withdrawStaleJudgePr?: (pr: OpenPrView) => Promise<{ withdrawn: boolean; reason?: string }>;
   dispatchPlanGateRound?: (pr: OpenPrView) => Promise<{
-    outcome: "pushed" | "refused" | "metadata-repaired";
+    outcome: "pushed" | "refused" | "metadata-repaired" | "not-started";
     headSha?: string;
     reason?: string;
     preflight?: PlanPrPreflightResult;
@@ -19387,17 +19409,33 @@ export function riskJudgeHandedOffHead(
   planFor: (pr: OpenPrView, signal?: AbortSignal) => HandedOffHeadJudgmentPlan,
 ): NonNullable<SweepDeps["judgeHandedOffHead"]> {
   return async (pr, signal) => {
-    const { input, orchestrator, config } = planFor(pr, signal);
+    // W1-T14916: a judge spawn a retired daemon withheld (either tier) cancels the judgment, so runRiskJudge writes no
+    // decision row and files no escalation; the rethrow below leaves the head due, and the successor judges it afresh.
+    const cancel = new AbortController();
+    if (signal?.aborted) cancel.abort();
+    else signal?.addEventListener("abort", () => cancel.abort(), { once: true });
+    const { input, orchestrator, config } = planFor(pr, cancel.signal);
     const log = orchestrator.log ?? (() => {});
+    let withheld: WorkerNotStartedError | undefined;
+    const judge: typeof orchestrator.judge = async (judgeInput) => {
+      try {
+        return await orchestrator.judge(judgeInput);
+      } catch (error) {
+        if (error instanceof WorkerNotStartedError) { withheld ??= error; cancel.abort(); }
+        throw error;
+      }
+    };
     const result = await runRiskJudge(
       { ...input, prNumber: pr.prNumber, headSha: pr.headSha },
       {
         ...orchestrator,
-        signal, // W1-T5659: the pool's bound cancels the judgment — no late decision row, no late escalation
+        judge,
+        signal: cancel.signal, // W1-T5659: the pool's bound cancels the judgment — no late decision row, no late escalation
         log: (step, extra) => log(step, { ...extra, pr_number: pr.prNumber, head_sha: pr.headSha }),
       },
       { ...config, judgeUnavailableAction: "proceed" },
     );
+    if (withheld !== undefined) throw withheld;
     if (result.verdict.availability === "unavailable") {
       return { action: "unavailable", reason: result.verdict.reasons.join("; ") || result.action.reason };
     }
@@ -19547,7 +19585,7 @@ function startHandedOffHeadJudgment(
   };
   pool.flights.set(key, flight);
   let cancelBound = () => {};
-  const settle = (judgment: HandedOffHeadJudgment): void => {
+  const settle = (judgment: HandedOffHeadJudgment, unattempted = false): void => {
     if (flight.settled !== undefined) return;
     flight.settled = judgment;
     pool.flights.delete(key);
@@ -19556,11 +19594,13 @@ function startHandedOffHeadJudgment(
       pool.settled.set(key, judgment);
     }
     finished();
-    if (judgment.action !== "unavailable") return;
+    if (judgment.action !== "unavailable" || unattempted) return;
     logRiskJudgeUnavailable(pr, handoff, judgment.reason, log);
   };
+  // W1-T14916: a withheld judge never ran, so no unavailable row: spawnWorker already ledgered worker.spawn_withheld.
   const threw = (error: unknown): void =>
-    settle({ action: "unavailable", reason: `risk judge threw: ${String((error as Error)?.message ?? error)}` });
+    settle({ action: "unavailable", reason: `risk judge threw: ${String((error as Error)?.message ?? error)}` },
+      error instanceof WorkerNotStartedError);
   flight.expire = () => {
     if (flight.settled !== undefined) return;
     controller.abort(); // before settle: the aborted call's rejection then reaches `threw`, a no-op once settled
@@ -19650,11 +19690,23 @@ export function riskJudgeCodeScanning(
   return async (pr, alerts) => {
     const { input, orchestrator, config } = await planFor(pr, alerts);
     const log = orchestrator.log ?? (() => {});
+    // W1-T14916: a judge a retired daemon withheld answered nothing. runRiskJudge reads its throw as an
+    // unavailable judge, so remember it and rethrow after: the gate then writes no ruling and the head stays due.
+    let withheld: WorkerNotStartedError | undefined;
+    const judge: typeof orchestrator.judge = async (judgeInput) => {
+      try {
+        return await orchestrator.judge(judgeInput);
+      } catch (error) {
+        if (error instanceof WorkerNotStartedError) withheld = error;
+        throw error;
+      }
+    };
     const result = await runRiskJudge(
       input,
-      { ...orchestrator, log: (step, extra) => log(step, { ...extra, code_scanning_pr: pr.prNumber, code_scanning_head: pr.headSha }) },
+      { ...orchestrator, judge, log: (step, extra) => log(step, { ...extra, code_scanning_pr: pr.prNumber, code_scanning_head: pr.headSha }) },
       { ...config, judgeUnavailableAction: "proceed" },
     );
+    if (withheld !== undefined) throw withheld;
     if (result.verdict.availability === "unavailable") {
       return { ruling: "unavailable", reason: result.verdict.reasons.join("; ") || result.action.reason };
     }
@@ -20056,11 +20108,12 @@ async function codeScanningGateForHead(
     return settleFix("pool-cap", `${pool.flights.size} judgments in flight at the cap of ${pool.limit}`);
   }
   let settled: CodeScanningJudgment | undefined;
+  let withheld = false;
   const flight: HandedOffHeadJudgmentFlight = {};
   pool.flights.set(key, flight);
   let cancelBound = () => {};
   const settle = (judgment: CodeScanningJudgment): void => {
-    if (settled !== undefined) return;
+    if (settled !== undefined || withheld) return;
     settled = judgment;
     pool.flights.delete(key);
     cancelBound();
@@ -20074,8 +20127,18 @@ async function codeScanningGateForHead(
     void Promise.resolve().then(() => deps.postCodeScanningRuling?.(pr, body)).catch((error) =>
       log("code_scanning.comment_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) }));
   };
-  const threw = (error: unknown): void =>
+  const threw = (error: unknown): void => {
+    if (error instanceof WorkerNotStartedError) {
+      // W1-T14916: a retired daemon withheld the judge. It ruled nothing, so no ruling row is written and the
+      // head stays due for the successor, which judges it afresh.
+      if (settled !== undefined || withheld) return;
+      withheld = true;
+      pool.flights.delete(key);
+      cancelBound();
+      return;
+    }
     settle({ ruling: "unavailable", reason: `code-scanning judge threw: ${String((error as Error)?.message ?? error)}` });
+  };
   cancelBound = pool.schedule(pool.timeoutMs, () =>
     settle({ ruling: "unavailable", reason: `code-scanning judgment outlived its ${pool.timeoutMs}ms bound` }));
   try {
@@ -20084,6 +20147,9 @@ async function codeScanningGateForHead(
     threw(error); // ruled unavailable and ledgered, exactly as a rejection is
   }
   await new Promise<void>((resolve) => setImmediate(resolve));
+  if (withheld) {
+    return { kind: "hold", reason: `code-scanning judge withheld by a retiring daemon for head ${head} — no ruling; the successor judges it` };
+  }
   if (settled === undefined) {
     return { kind: "hold", reason: `code-scanning judgment in flight for head ${head} — holding the arm; the next pass reads its ruling` };
   }
@@ -27534,6 +27600,11 @@ async function runSweepPinned(
                 result = await deps.dispatchPlanGateRound!(pr);
               } catch (error) {
                 result = { outcome: "refused", reason: String((error as Error)?.message ?? error) };
+              }
+              // W1-T14916: no worker ran, so the round is no refusal and no push; the next pass re-derives it.
+              if (result.outcome === "not-started") {
+                repair.reason = `plan-scoped round not started: ${result.reason ?? "worker not started"}`;
+                return;
               }
               appendLine(deps.ledgerPath, { ...row, step: result.outcome === "refused" ? "sweep.plan_round.refused" : "sweep.plan_round.pushed", ...result });
               repair.reason = `plan-scoped round ${result.outcome}${result.reason ? `: ${result.reason}` : ""}`;
@@ -35060,7 +35131,7 @@ export interface StaleEscalationRejudgeOptions {
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** dryRun leaves no trace (no demote call, no ledger line) — mirrors runEscalationReconcile. */
   dryRun?: boolean;
-  /** Bound on judge spawns this cycle; defaults to {@link MAX_ESCALATION_REJUDGES_PER_CYCLE}. */
+  /** Bound on candidates taken up for judgment this cycle; defaults to {@link MAX_ESCALATION_REJUDGES_PER_CYCLE}. */
   maxRejudges?: number;
   /** Dwell before an item is eligible; defaults to {@link STALE_ESCALATION_REJUDGE_DWELL_MS}. */
   dwellMs?: number;
@@ -35081,7 +35152,7 @@ export interface StaleEscalationRejudgeResult {
   issueUrl: string;
   taskId: string;
   stateKey: string;
-  outcome: "too-fresh" | "unchanged-state" | "deferred-cap" | "demoted" | "left-needs-human" | "demote-failed";
+  outcome: "too-fresh" | "unchanged-state" | "deferred-cap" | "not-started" | "demoted" | "left-needs-human" | "demote-failed";
   decision?: EscalationJudgeDecision;
   reason?: string;
 }
@@ -35089,8 +35160,7 @@ export interface StaleEscalationRejudgeResult {
 /** The whole re-judge pass's outcome. */
 export interface StaleEscalationRejudgeSummary {
   total: number;
-  /** How many candidates actually spawned a judge this pass (excludes too-fresh, unchanged-state
-   *  and deferred-cap — the three ways a candidate is skipped WITHOUT a spawn). */
+  /** How many candidates received a verdict this pass, including deterministic verdicts. */
   rejudged: number;
   demoted: number;
   results: StaleEscalationRejudgeResult[];
@@ -35146,7 +35216,7 @@ export async function runStaleEscalationRejudge(
 
   const results: StaleEscalationRejudgeResult[] = [];
   const judgedStateKeys: string[] = [];
-  let rejudged = 0;
+  let considered = 0;
   let demoted = 0;
 
   for (const c of candidates) {
@@ -35164,11 +35234,11 @@ export async function runStaleEscalationRejudge(
     }
     // BOUNDED PER CYCLE (design iv): the rest drain on the next sweep, never spend an unbounded
     // number of spawns in one pass.
-    if (rejudged >= maxRejudges) {
+    if (considered >= maxRejudges) {
       results.push({ issueUrl: c.issueUrl, taskId: c.escalation.taskId, stateKey: c.stateKey, outcome: "deferred-cap" });
       continue;
     }
-    rejudged++;
+    considered++;
 
     // EXEMPT AT BIRTH, EXEMPT ON RE-JUDGE: MANUAL/GRILL stay operator-owned by rule, mirroring
     // {@link judgeEscalation}'s own exemption check — never spend a spawn asking a question the
@@ -35195,6 +35265,11 @@ export async function runStaleEscalationRejudge(
         verdict = proposed && (proposed.decision === "deliver" || proposed.decision === "demote") && typeof proposed.reason === "string"
           ? proposed : { decision: "deliver", reason: "unreadable rejudge verdict" };
       } catch (err) {
+        if (err instanceof WorkerNotStartedError) {
+          results.push({ issueUrl: c.issueUrl, taskId: c.escalation.taskId, stateKey: c.stateKey,
+            outcome: "not-started", reason: err.message });
+          continue;
+        }
         // FAIL-OPEN (acceptance criterion 5): a spawn throw, a timeout or an unparseable verdict
         // all leave the item on needs-human, unchanged — the SAME polarity as the birth judge,
         // never risking a silently-hidden escalation because a spawn misbehaved.
@@ -35206,7 +35281,6 @@ export async function runStaleEscalationRejudge(
         };
       }
     }
-
     // Preserve the original producer receipt before shadow/act triage replaces the verdict.
     const judgeReceipt = escalationJudgeReceiptFields(verdict);
     const triaged = evidenceError !== undefined
@@ -35305,7 +35379,7 @@ export async function runStaleEscalationRejudge(
     }
   }
 
-  const summary: StaleEscalationRejudgeSummary = { total: candidates.length, rejudged, demoted, results, judgedStateKeys };
+  const summary: StaleEscalationRejudgeSummary = { total: candidates.length, rejudged: judgedStateKeys.length, demoted, results, judgedStateKeys };
   log("sweep.escalation_rejudge.summary", { total: summary.total, rejudged: summary.rejudged, demoted: summary.demoted });
   return summary;
 }
@@ -36002,6 +36076,11 @@ export function trackRepairLadder<A extends SpawnWorkerArgs, R>(
         }
       }
       throw error;
+    }
+    // W1-T14916: a spawn a retired daemon withheld proves nothing about provider capacity, so it
+    // neither clears the stall nor reports a recovery.
+    if (typeof result === "object" && result !== null && (result as { notStarted?: unknown }).notStarted !== undefined) {
+      return result;
     }
     try {
       const cleared = clearRepairLadderStall(root);

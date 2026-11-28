@@ -888,6 +888,26 @@ test("retroCommand: a clean run advances its marker without an index artifact", 
   });
 });
 
+test("W1-T14916: a retro whose worker never started opens no PR and leaves its marker where it was", async (t) => {
+  const fx = setupFakeRetroFixture(t);
+  await fx.run(async () => {
+    const markerPath = join(fx.root, "state", "last-retro.json");
+    const before = existsSync(markerPath) ? readFileSync(markerPath, "utf8") : undefined;
+    const notStarted = async (args?: SpawnWorkerArgs): Promise<WorkerResult> => ({ ...(await fx.fakeSpawn(args)), text: "",
+      notStarted: "admission-abandoned", subtype: "admission_abandoned", costUsd: 0, numTurns: 0 }) as WorkerResult;
+    const exitCode = await withLiveWritesAllowed(() => retroCommand([], { repoRoot: fx.gatherRoot, spawn: notStarted, github: offlineGh,
+      prepublishPreflight: fx.prepublishPreflight }));
+    assert.equal(exitCode, 1);
+    assert.equal(existsSync(markerPath) ? readFileSync(markerPath, "utf8") : undefined, before, "the marker does not advance");
+    const steps = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const noOp = steps.find((l) => l.step === "retro.no_op");
+    assert.equal(noOp?.reason, "admission abandoned before a worker started");
+    for (const step of ["orientation.regenerated", "pr.opened", "retro.marker.advanced"]) {
+      assert.equal(steps.some((l) => l.step === step), false, step);
+    }
+  });
+});
+
 // Driven for BOTH open-weight spellings, and W1-T3607 is why. This case existed to catch exactly
 // the leak that rename introduced, and it did not: it pinned the literal `openweight`, so when the
 // canonical id became `cash` the case went on guarding a spelling production normalises away and

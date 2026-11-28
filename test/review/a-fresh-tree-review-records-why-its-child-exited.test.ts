@@ -16,6 +16,7 @@ import { REVIEW_EXIT_CAUSES } from "#src/cli/commands/review.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { buildFreshTreeReviewRunner, buildReviewerCodeFreshnessGate, spawnRmdReviewForFreshTree } from "#test/helpers/run-task-test.js";
+import { runInWorkerSpawnScope, WorkerSpawnRetiredError } from "#src/lib/worker.js";
 
 const MAIN_SHA = "b".repeat(40);
 const STALE = { status: "stale" as const, codeSha: "a".repeat(12), originMainSha: MAIN_SHA, changedPaths: ["src/lib/review.ts"] };
@@ -229,5 +230,35 @@ test("W1-T12225 criterion 5: `exit_cause` is one short name, never stderr text, 
     const cause = String((await commandRun(scenario)).row.exit_cause);
     assert.match(cause, NAME_FORM);
     assert.ok((REVIEW_EXIT_CAUSES as readonly string[]).includes(cause), `${cause} is from the fixed list of the command`);
+  }
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, nor a fresh-tree review child", async () => {
+  // A sweep review whose freshness read outlasts the release reaches this spawn; the retired scope launches no child.
+  const root = makeTempDir("t14916-fresh-tree");
+  try {
+    const tree = join(root, "reviewer");
+    const marker = join(root, "child-started");
+    mkdirSync(join(tree, "bin"), { recursive: true });
+    writeFileSync(join(tree, "bin", "rmd"), `#!/usr/bin/env bash\necho started > ${JSON.stringify(marker)}\n`);
+    chmodSync(join(tree, "bin", "rmd"), 0o755);
+    const retired = { retiredBy: "drain lock released; the successor owns this work" };
+    await runInWorkerSpawnScope(retired, async () => {
+      await assert.rejects(spawnRmdReviewForFreshTree(tree, ["7"]), WorkerSpawnRetiredError);
+      const failures: string[] = [];
+      const runner = buildFreshTreeReviewRunner("/repo", {
+        git: () => "", addWorktree: () => {}, inspectExistingWorktree: () => "reusable", prepareWorktree: () => true,
+        withWorktreeLease: async (_tree, action) => action(), spawnReview: spawnRmdReviewForFreshTree, worktreeRoot: root,
+      });
+      assert.equal(await runner("7", [], { originMainSha: MAIN_SHA }, (why) => failures.push(why)), undefined,
+        "the runner skips the review: never a verdict");
+      assert.match(failures.join("\n"), /drain lock released/);
+    });
+    assert.equal(existsSync(marker), false, "no review child started in the retired scope");
+    // Control: outside the retired scope the same spawn starts the child.
+    assert.equal(await spawnRmdReviewForFreshTree(tree, ["7"]), 0);
+    assert.equal(existsSync(marker), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

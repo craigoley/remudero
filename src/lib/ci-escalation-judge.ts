@@ -19,6 +19,7 @@
  * the PR's own diff alone needs no new verdict. `state/CI_JUDGE_REUSE_OFF` turns the reuse off;
  * `state/CI_JUDGE_OFF` still wins over both.
  */
+import { RmdError } from "./errors.js";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -262,6 +263,14 @@ function writeState(stateDir: string, file: string, value: unknown): void {
   renameSync(`${path}.tmp`, path);
 }
 
+/** W1-T14916: the judge worker was withheld (a retired daemon, an abandoned admission), so no judgment happened. */
+export class CiJudgeNotStartedError extends RmdError {
+  constructor(readonly notStarted: string) {
+    super("child_process", 1, `ci judge worker not started: ${notStarted}`, { notStarted });
+    this.name = "CiJudgeNotStartedError";
+  }
+}
+
 /** One PR's last posted verdict: the patch id of the diff judged, the floor's key and the posted status. */
 interface CiJudgeVerdict {
   patchId: string;
@@ -323,6 +332,7 @@ export async function judgeCiEscalation(ports: CiJudgePorts): Promise<CiJudgePas
   for (const pr of due) {
     // Recorded before the call: a head that fails is not re-spent on every sweep.
     const key = String(pr.number);
+    const previous = heads[key];
     heads[key] = pr.headSha;
     try {
       const changed = await ports.changedFiles(pr);
@@ -359,6 +369,12 @@ export async function judgeCiEscalation(ports: CiJudgePorts): Promise<CiJudgePas
         patch_id: patch.id ?? null, ...(patch.error === undefined ? {} : { patch_id_error: patch.error }),
       });
     } catch (error) {
+      if (error instanceof CiJudgeNotStartedError) {
+        // Nothing ran (spawnWorker logged its worker.spawn_withheld row), so the head stays due for the next pass.
+        if (previous === undefined) delete heads[String(pr.number)];
+        else heads[String(pr.number)] = previous;
+        continue;
+      }
       failed.push(pr.number);
       ports.log("ci_judge.failed", { pr: pr.number, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
     }
@@ -480,6 +496,7 @@ export function productionCiJudgePorts(opts: {
         ...(mount.provider === undefined ? {} : { mountProvider: mount.provider }),
       };
       const result = await spawn(args);
+      if (result.notStarted) throw new CiJudgeNotStartedError(result.notStarted);
       opts.log("ci_judge.spend", { cost_usd: result.costUsd, num_turns: result.numTurns, model: mount.model, effort: mount.effort,
         provider: mount.provider ?? null });
       if (mount.shadow !== undefined) {

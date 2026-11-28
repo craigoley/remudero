@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { appendLedger } from "./ledger.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { WorkerNotStartedError } from "./worker.js";
 import { readLedgerLines } from "./status.js";
 import { alertOriginId, alertTaskId, priorEscalatedAlertIds, type AlertSeverity, type RawAlert } from "./ops.js";
 
@@ -328,7 +329,14 @@ export async function runAlertLane(
       skippedDuplicateDispatch.push(alert);
       continue;
     }
-    await deps.dispatch(alert);
+    try {
+      await deps.dispatch(alert);
+    } catch (error) {
+      // W1-T14916: a fix worker that never started leaves the alert undispatched, so the
+      // successor daemon's lane still owns it; any other failure keeps its prior behavior.
+      if (error instanceof WorkerNotStartedError) continue;
+      throw error;
+    }
     appendLedger(deps.ledgerPath, {
       run_id: deps.runId,
       task_id: taskId,

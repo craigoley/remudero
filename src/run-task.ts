@@ -2363,6 +2363,9 @@ export function spawnRmdReviewForFreshTree(
   onExit?: (exit: FreshTreeExit) => void,
 ): Promise<number> {
   return new Promise<number>((resolve, reject) => {
+    // W1-T14916: a review whose freshness read outlasted the drain lock release starts no child; the runner skips it.
+    const retiredBy = workerSpawnRetiredBy();
+    if (retiredBy !== undefined) { reject(new WorkerSpawnRetiredError(retiredBy)); return; }
     const prepared = materializeMainEntryFromStore(worktree, store.storeRoot);
     // W1-T12227: a commit the store has no build for gets one, not awaited; this child still runs tsx, a later one the bundle.
     if (store.fill !== undefined && prepared.lookup.outcome === "miss" && FILLABLE_STORE_MISSES.has(prepared.lookup.reason)) {
@@ -2971,7 +2974,14 @@ export function codeScanningJudgeDeps(
               outPath: join(config.root, "tmp", `risk-judge-settings-${runId}.json`),
             });
             const mount = resolveRiskJudgeRoleMount(loadMounts(mountsPath(repoRoot)));
-            return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend, shadowLog: log })(input);
+            // W1-T14916: a spawn a retired daemon withheld is not an empty answer; throw so the gate writes no ruling.
+            const raw = spawn ?? benchmarkNonDispatchSpawn("risk-judge");
+            const guarded: typeof spawnWorker = async (args) => {
+              const result = await raw(args);
+              if (result.notStarted !== undefined) throw new WorkerNotStartedError(result.notStarted);
+              return result;
+            };
+            return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn: guarded, spend, shadowLog: log })(input);
           },
           escalate: () => "",
         },
@@ -3036,7 +3046,14 @@ export function handedOffHeadRiskJudge(
           });
           const mount = resolveRiskJudgeRoleMount(loadMounts(mountsPath(repoRoot)));
           const judged = { ...input, change: { ...input.change, changeView: withoutRiskJudgePatches(await readViewOnce()) } };
-          return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend, signal, shadowLog: log })(judged);
+          // W1-T14916: a withheld spawn (either tier) throws rather than parsing its empty text as unparseable.
+          const raw = spawn ?? benchmarkNonDispatchSpawn("risk-judge");
+          const guarded: typeof spawnWorker = async (args) => {
+            const result = await raw(args);
+            if (result.notStarted !== undefined) throw new WorkerNotStartedError(result.notStarted);
+            return result;
+          };
+          return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn: guarded, spend, signal, shadowLog: log })(judged);
         },
         escalate: (verdict, action) =>
           escalateImpl(
@@ -3065,7 +3082,7 @@ import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js
 import { applyCorrection } from "./lib/correct.js";
 import { projectHeldTaskQuestionGates, renderHeldTaskQuestions } from "./lib/human-gate.js";
 import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, runLockRecord, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreeRemoveIfPresent, worktreeRemoveIfPresentAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, wireCredentialHelperSocket, workerContinuation, workerExecutionForProvider, taskInputAnswerWithLedger } from "./lib/worker.js";
-import { healedReviewerTreeTools, workerHeadroomTiming } from "./lib/worker.js";
+import { healedReviewerTreeTools, workerHeadroomTiming, workerSpawnRetiredBy, WorkerNotStartedError, WorkerSpawnRetiredError } from "./lib/worker.js";
 import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
   runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
@@ -3231,6 +3248,7 @@ export function buildEscalationTriageRuntime(
     windowMs?: () => number;
     client?: () => Pick<DaemonClient, "submitFeedback" | "listFeedback">;
     judge?: (e: Escalation) => Promise<EscalationJudgeVerdict>;
+    spawnJudge?: typeof spawnWorker;
     amend?: (e: Escalation, deps: EscalateDeps<AsyncIssueGateway>) => Promise<string>;
     kick?: (e: Escalation) => void;
   } = {},
@@ -3317,8 +3335,17 @@ export function buildEscalationTriageRuntime(
             !!previousCause && !!e.cause && previousCause !== e.cause },
         };
       },
-      judge: io.judge ?? (async (e) => realEscalationJudge({ mounts: loadMounts(mountsPath(root)),
-        cwd: root, settingsFile: join(resolveInstallRoot(config), "settings", "worker.json") })(e)),
+      judge: io.judge ?? (async (e) => {
+        const spawn = io.spawnJudge ?? benchmarkNonDispatchSpawn("escalation-summary");
+        return realEscalationJudge({ mounts: loadMounts(mountsPath(root)),
+          cwd: root, settingsFile: join(resolveInstallRoot(config), "settings", "worker.json"),
+          spawn: async (args) => {
+            const result = await spawn(args);
+            if (result.notStarted !== undefined) throw new WorkerNotStartedError(result.notStarted);
+            return result;
+          },
+        })(e);
+      }),
       execute: {
         feedback_reply: async (e) => {
           const id = feedbackId(e);
@@ -6426,7 +6453,15 @@ function gitStatusResult(git: (args: string[]) => string, args: string[]): { sta
  * re-applies the branch's change only where it still applies to the merged task and edits ONLY the conflicted plan
  * paths. The pushed merge commit must preflight clean, so a head that fails `planPrPreflight` is never pushed.
  */
-async function runPlanScopedConflictRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
+/** W1-T14916: a plan round whose worker never started is no refusal; its `fix.done` matches the fix rung's, spending no
+ *  strike, so a retired daemon's withheld round cannot count toward the refused-twice exhaustion. */
+function planRoundNotStarted(error: WorkerNotStartedError, round: Record<string, unknown> | undefined,
+  log: (step: string, fields: Record<string, unknown>) => void): { outcome: "not-started"; reason: string } {
+  if (round) log("fix.done", { ...round, subtype: "admission_abandoned", worker_exit: "not_spawned", cost_usd: 0, num_turns: 0 });
+  return { outcome: "not-started", reason: error.message };
+}
+
+async function runPlanScopedConflictRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired" | "not-started"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
   const { pr, deps, worktreePath } = input;
   const git = deps.runGit ?? ((args: string[]) => hostWorktreeGit(worktreePath, args));
   const preflight = (tree: string, sha: string, meta: { title: string; body: string }) => deps.preflight
@@ -6501,6 +6536,7 @@ async function runPlanScopedConflictRound(input: PlanScopedFixRoundInput): Promi
     if (roundId) deps.log("fix.done", { ...roundFields(), subtype: "success", pushed_head_sha: sha });
     return { outcome: "pushed", headSha: sha, preflight: verdict };
   } catch (error) {
+    if (error instanceof WorkerNotStartedError) return planRoundNotStarted(error, roundId ? roundFields() : undefined, deps.log);
     const reason = String((error as Error)?.message ?? error);
     deps.log("sweep.plan_round.error", { pr_number: pr.prNumber, head_sha: pr.headSha, reason });
     return refuse(reason);
@@ -6513,7 +6549,7 @@ function fixRoundCommitMessage(report: string, subject: string): string {
   return [subject, ...trailers].join("\n\n");
 }
 
-export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
+export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired" | "not-started"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
   if (input.conflict === true) return runPlanScopedConflictRound(input);
   const { pr, deps, worktreePath } = input;
   const git = deps.runGit ?? ((args: string[]) => hostWorktreeGit(worktreePath, args));
@@ -6615,6 +6651,7 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
     deps.log("fix.done", { ...roundFields(), subtype: "success", pushed_head_sha: sha });
     return { outcome: "pushed", headSha: sha, preflight: verdict };
   } catch (error) {
+    if (error instanceof WorkerNotStartedError) return planRoundNotStarted(error, roundId ? roundFields() : undefined, deps.log);
     const reason = String((error as Error)?.message ?? error);
     deps.log("sweep.plan_round.error", { pr_number: pr.prNumber, head_sha: pr.headSha, reason });
     return refuse(reason);
@@ -24944,6 +24981,15 @@ async function retroCommand(
       config,
       prompt,
     });
+    // W1-T14916: a retro whose worker never started has synthesized nothing. Stand down before the
+    // harness regenerates its own artifacts, which would otherwise publish an orientation-only PR
+    // and advance the marker past runs no Architect read.
+    if (worker.notStarted) {
+      log("retro.no_op", { reason: "admission abandoned before a worker started", subtype: worker.subtype });
+      say(`retro no-op — worker not started (${worker.notStarted}); nothing to PR`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
     // W1-T3746: the cash worker cannot commit MASTER-PLAN.md. Run the shared bridge before the
     // harness regenerates its derived artifacts, so the existing no-op guard and publication path
     // observe the worker's substantive edit. A shell-capable retro has a non-zero commit count
@@ -26284,8 +26330,25 @@ export function onCircuitBreakWithVerifier(
     const page = () => escalateCircuitBreak(task, { owner: ctx.owner, repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, issues: ctx.issues });
     if (!ctx.judge) return page();
     // Settles off the selection pass; a throw anywhere still pages (the judge route never throws on its own).
-    return judgeDispatchBreak(task, detail, stall.verdict, { repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, judge: ctx.judge, mainEvidence: ctx.mainEvidence })
-      .then((decision) => { if (decision === "escalate") page(); }, page);
+    let judgeWithheld = false;
+    const judge = async (input: Parameters<DispatchBreakJudge>[0]) => {
+      try {
+        return await ctx.judge!(input);
+      } catch (error) {
+        if (error instanceof WorkerNotStartedError) {
+          // The daemon retired before this judge could run. Keep this breaker due for its successor.
+          judgeWithheld = true;
+          return undefined;
+        }
+        throw error;
+      }
+    };
+    return judgeDispatchBreak(task, detail, stall.verdict, { repo: ctx.repo, ledgerPath: ctx.ledgerPath, runId: ctx.runId, judge, mainEvidence: ctx.mainEvidence })
+      .then((decision) => { if (!judgeWithheld && decision === "escalate") page(); }, (error: unknown) => {
+        // A retired daemon never got a ruling. Leave the breaker due for its successor, while real
+        // judge failures retain the established page-as-backstop behavior.
+        if (!judgeWithheld && !(error instanceof WorkerNotStartedError)) page();
+      });
   };
 }
 
@@ -28579,10 +28642,13 @@ export function fleetLaneSamenessJudge(
           ...buildInboxDraftSpawnArgs({ cwd: config.root, settingsFile, mount, config, prompt, disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS }),
           onSelectionAssignment: undefined,
         });
+        // W1-T14916: a judge a retired daemon withheld answered nothing; the pass stops rather than file both findings.
+        if (result.notStarted !== undefined) throw new WorkerNotStartedError(result.notStarted);
         const answer = /\{[^{}]*\}/.exec(result.text)?.[0];
         const parsed = answer === undefined ? undefined : (JSON.parse(answer) as { answer?: unknown }).answer;
         return parsed === "same" || parsed === "distinct" ? parsed : "unavailable";
       } catch (e) {
+        if (e instanceof WorkerNotStartedError) throw e;
         log("fleet_lane.sameness_judge_failed", { error: String((e as Error)?.message ?? e) });
         return "unavailable";
       }
@@ -39408,7 +39474,14 @@ export async function routeVerifyHumanBacklog(
     }
   }
   for (const shard of toJudge) {
-    const verdict = await judgeVerifyHumanShard(shard, { judge: deps.judge });
+    let verdict: VerifyHumanVerdict;
+    try {
+      verdict = await judgeVerifyHumanShard(shard, { judge: deps.judge });
+    } catch (error) {
+      // W1-T14916: a judge that never started writes no verdict row, so the shard stays due.
+      if (error instanceof WorkerNotStartedError) break;
+      throw error;
+    }
     // UNCONDITIONAL, and BEFORE either arm: a crash between the verdict and its effect leaves
     // the verdict readable rather than leaving a silent gap.
     deps.appendRow(verifyHumanVerdictRow(shard, verdict, deps.runId) as LedgerLine);
@@ -42121,6 +42194,8 @@ export async function dispatchAlertFixRun(
       subtype: worker.subtype,
       ...workerLedgerFields(worker),
     });
+    // W1-T14916: a fix that never started is not a dispatched alert: the lane writes no alert-lane.dispatched row.
+    if (worker.notStarted) throw new WorkerNotStartedError(worker.notStarted);
 
     const workerReport = parseReport(workerTranscript(worker));
     const owned = (workerReport?.prUrl ?? "") === "" && repairHarnessOwnsGit({ provider: worker.provider, tools: toolBound, harnessCommit: workerHarnessCommit(worker) });
@@ -42141,6 +42216,7 @@ export async function dispatchAlertFixRun(
       log("alert-fix.no_pr", { subtype: worker.subtype });
     }
   } catch (e) {
+    if (e instanceof WorkerNotStartedError) throw e;
     log("alert-fix.error", { error: String((e as Error)?.message ?? e) });
   } finally {
     rmSync(bodyFile, { force: true });
@@ -42341,6 +42417,8 @@ export async function dispatchMainRepairFixRun(
       promptFor: ({ harnessOwnsGit }) => mainRepairFixPrompt(request, bodyFile, harnessOwnsGit),
     });
     log("main-repair.dispatched_worker", { session_id: worker.sessionId, subtype: worker.subtype, ...workerLedgerFields(worker) });
+    // W1-T14916: a worker that never started is not a fix run that opened no PR; the lane decides what it means.
+    if (worker.notStarted) throw new WorkerNotStartedError(worker.notStarted);
     let prUrl = parseReport(workerTranscript(worker))?.prUrl;
     const owned = !prUrl && repairHarnessOwnsGit({ provider: worker.provider, tools: toolBound, harnessCommit: workerHarnessCommit(worker) });
     if (owned) {
@@ -42802,9 +42880,16 @@ export function mainRepairLaneFor(
         ...(outcomes.reason === undefined ? {} : { reason: outcomes.reason }) });
       return outcomes;
     },
-    openFixPr: (request) => {
+    openFixPr: async (request) => {
       testFilesBySha.set(request.offendingSha, request.testFiles);
-      return dispatchFix(owner, repo, config, request, ledgerPath, runId);
+      try {
+        return await dispatchFix(owner, repo, config, request, ledgerPath, runId);
+      } catch (error) {
+        // W1-T14916: a fix run a retired daemon withheld never ran, so it is neither a refusal nor a PR. This process
+        // reports nothing; its successor finds the attempt unreported and dispatches it again (W1-T13134's lost run).
+        if (error instanceof WorkerNotStartedError && workerSpawnRetiredBy() !== undefined) return new Promise<never>(() => {});
+        throw error;
+      }
     },
     openRevertPr: (request) =>
       openRevert(owner, repo, config, request, ledgerPath, runId, undefined, testFilesBySha.get(request.offendingSha) ?? []),

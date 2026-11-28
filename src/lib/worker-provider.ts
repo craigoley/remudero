@@ -4205,6 +4205,34 @@ async function withPrivateRegistryCodexProfile<T>(
 
 type CodexSpawnSelection = Pick<ProviderCapacity, "model" | "effort" | "modelDecision">;
 
+/** W1-T14916: a daemon's worker spawn scope (documented in worker.ts). */
+export interface WorkerSpawnScope { retiredBy?: string }
+
+const workerSpawnScope = new AsyncLocalStorage<WorkerSpawnScope>();
+
+export function runInWorkerSpawnScope<T>(scope: WorkerSpawnScope, run: () => T): T {
+  return workerSpawnScope.run(scope, run);
+}
+
+export function currentWorkerSpawnScope(): WorkerSpawnScope | undefined {
+  return workerSpawnScope.getStore();
+}
+export function workerSpawnRetiredBy(): string | undefined {
+  return workerSpawnScope.getStore()?.retiredBy;
+}
+
+export class WorkerSpawnRetiredError extends RmdError {
+  constructor(readonly reason: string) {
+    super("child_process", 1, `worker launch withheld: retired: ${reason}`, { reason });
+    this.name = "WorkerSpawnRetiredError";
+  }
+}
+
+function refuseRetiredLaunch(): void {
+  const reason = workerSpawnRetiredBy();
+  if (reason !== undefined) throw new WorkerSpawnRetiredError(reason);
+}
+
 export async function spawnCodexWorker(
   args: CodexSpawnArgs,
   config: Config,
@@ -4232,11 +4260,15 @@ export async function spawnCodexWorker(
     const nativeCacheRoot = process.platform !== "win32" && !codexReadOnly(args) && args.sandboxIntent !== "disposable-review" &&
       await verifiedGitWorktree(args.cwd)
       ? prepareWorkerNativeCache() : undefined;
+    // W1-T14916: after the last wait, before the trial receipt.
+    refuseRetiredLaunch();
     const spawn = (route: CodexSpawnSelection | undefined, profile?: PrivateRegistryCodexProfile) =>
       spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, route, profile, nativeCacheRoot);
     if (selected === undefined) return spawnCodexBalancedSelection(args, config, selection, route => spawn(route));
-    return withPrivateRegistryCodexProfile(args, config, selected, profile =>
-      spawnCodexBalancedSelection(args, config, selection, route => spawn(route, profile)), nativeCacheRoot);
+    return withPrivateRegistryCodexProfile(args, config, selected, profile => {
+      refuseRetiredLaunch();
+      return spawnCodexBalancedSelection(args, config, selection, route => spawn(route, profile));
+    }, nativeCacheRoot);
   });
 }
 
@@ -4868,6 +4900,8 @@ async function cashRequestJson<T>(input: {
   args: CashTransportOptions; deployment: string; source: string; endpoint: string; outputTokenCeiling?: number;
   body: string; headers: Record<string, string>; next: (checkActive: () => void) => T;
   canContinue: () => boolean; chargeFailure: (error: Error) => void;
+  /** W1-T14916: a worker's first request refuses here, after the last wait and before any reservation. */
+  refuseLaunch?: () => void;
   /** Usage belongs to this paid attempt even when fetch or body completion misses the deadline. */
   onEnvelope?: (envelope: unknown, attempt: T) => void;
   /** W1-T10856: sees every response's headers (success or failure) before its status is handled. */
@@ -4894,6 +4928,8 @@ async function cashRequestJson<T>(input: {
     for (;;) {
       checkActive();
       if (runtimeInstanceRegistryPrivateFile() !== undefined) await assertInstanceRegistryRuntimeCurrent();
+      const refuseLaunch = current === undefined ? input.refuseLaunch : undefined;
+      refuseLaunch?.();
       const attempt = input.next(checkActive);
       current = attempt;
       dispatched = false;
@@ -4901,6 +4937,7 @@ async function cashRequestJson<T>(input: {
       try {
         const response = await cashAbortable(controller.signal, () => {
           checkActive();
+          refuseLaunch?.();
           dispatched = true;
           return (args.fetchImpl ?? fetch)(input.endpoint, {
             method: "POST", headers: input.headers, body: input.body, signal: controller.signal,
@@ -6710,6 +6747,7 @@ export async function spawnFoundryClaudeWorker(
   const requestEfforts: CashRequestEffortCount[] = [];
   let pending: CashBudgetAttempt | undefined;
   const requestPrefix = `${args.runId ?? args.taskId ?? "foundry-claude"}-${startedAt}-${randomUUID()}`;
+  let launched = false;
   try {
     if (!isFoundryClaudeDeployment(selection.model) || (selection.model !== "claude-haiku-5-5" && args.cashSqueezed !== true)) {
       throw new Error(`cash ${label} requires an actual blocked-subscription squeeze`);
@@ -6746,7 +6784,7 @@ export async function spawnFoundryClaudeWorker(
         ...(maxTurns > 1 ? { cache_control: { type: "ephemeral" } } : {}),
       });
       const { envelope, attempt: { requestId, reservation } } = await cashRequestJson<CashBudgetAttempt>({
-        args, deployment: selection.model, source: `cash ${label}`, endpoint, body,
+        args, deployment: selection.model, source: `cash ${label}`, endpoint, body, refuseLaunch: launched ? undefined : () => { refuseRetiredLaunch(); launched = true; },
         headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
         onEnvelope: (envelope, attempt) => {
           // W1-T13868: a received envelope names its model even when the deadline then rejects the attempt.
@@ -6858,6 +6896,11 @@ export async function spawnFoundryClaudeWorker(
       messages.push({ role: "user", content: results });
     }
   } catch (error) {
+    if (error instanceof WorkerSpawnRetiredError) {
+      if (pending && !pending.receipt) settleOpenWeightBudget(config, { requestId: pending.requestId, identity: pending.identity,
+        actualUsd: 0, unbilled: true, atIso: pending.atIso, reason: error.message });
+      throw error;
+    }
     // An unknown transport outcome remains charged. Only a definite 404 is known to cost zero.
     if (pending) {
       const unbilled = error instanceof OpenWeightDeploymentNotFoundError;
@@ -6939,6 +6982,7 @@ export async function spawnOpenWeightWorker(
   // Identity for this run's reservations. The run id is not sufficient on its own: the tool loop
   // sends one paid request PER TURN, and each needs its own settleable row.
   const runRequestPrefix = `${args.runId ?? args.taskId ?? "openweight"}-${startedAt}-${randomUUID()}`;
+  let launched = false;
   try {
     // W1-T3880: verified FIRST, before `env`/the API key below are even read — a refused grant
     // must never reach the point where a real credential is used on its behalf. `capabilityGrant`
@@ -7005,7 +7049,7 @@ export async function spawnOpenWeightWorker(
       });
       const requestBodyBytes = Buffer.byteLength(body, "utf8");
       const { envelope, attempt: { requestId, reservation } } = await cashRequestJson<CashBudgetAttempt>({
-        args, deployment: selection.model, source: "openweight", endpoint, body,
+        args, deployment: selection.model, source: "openweight", endpoint, body, refuseLaunch: launched ? undefined : () => { refuseRetiredLaunch(); launched = true; },
         headers: { "content-type": "application/json", "api-key": key },
         onEnvelope: (envelope, attempt) => {
           // W1-T13868: a received envelope names its model even when the deadline then rejects the attempt.
@@ -7169,6 +7213,11 @@ export async function spawnOpenWeightWorker(
       }
     }
   } catch (error) {
+    if (error instanceof WorkerSpawnRetiredError) {
+      if (pendingReservation && !pendingReservation.receipt) settleOpenWeightBudget(config, { requestId: pendingReservation.requestId,
+        identity: pendingReservation.identity, actualUsd: 0, unbilled: true, atIso: pendingReservation.atIso, reason: error.message });
+      throw error;
+    }
     if (error instanceof CashCapacityShortfallFailure) recordCashCapacityShortfall(config, {
       reason: "capacity_shortfall", deployment: selection.model,
       estimatedTokens: error.estimatedTokens, limitTokens: error.limitTokens!,
