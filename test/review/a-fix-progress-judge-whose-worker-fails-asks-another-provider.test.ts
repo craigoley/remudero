@@ -34,7 +34,9 @@ function worker(text: string, extra: Partial<WorkerResult> = {}): WorkerResult {
   return { sessionId: "s", costUsd: 0.0001, numTurns: 1, text, subtype: "success", provider: "claude",
     model: "claude-haiku-5-5", ...extra } as unknown as WorkerResult;
 }
-const codexExit = () => worker("", { subtype: "error_exit_1", provider: "codex", model: "gpt-6-luna", isError: true });
+// Codex retains the configured alias in `model`; `routedModel` is the concrete model that failed.
+const codexExit = () => worker("", { subtype: "error_exit_1", provider: "codex", model: "haiku",
+  routedModel: "gpt-6-luna", isError: true });
 
 function judgeWith(root: string, answer: (args: SpawnWorkerArgs, n: number) => Promise<WorkerResult>) {
   const spawned: SpawnWorkerArgs[] = [];
@@ -65,7 +67,9 @@ test("W1-T15163 criterion 1: a judge worker that ends with error_exit_1 or throw
     }
     return worker(VERDICT);
   });
-  assert.equal((await thrown.judge(input()))?.verdict, "continue");
+  const afterThrownAttempt = await thrown.judge(input());
+  assert.equal(afterThrownAttempt?.verdict, "continue");
+  assert.deepEqual(afterThrownAttempt?.reasked_from, { provider: "codex", model: "gpt-6-luna", subtype: "threw" });
   assert.equal(thrown.spawned.length, 2);
   assert.deepEqual(thrown.spawned[1]!.excludeProviders, ["codex"]);
 });

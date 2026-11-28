@@ -2738,7 +2738,9 @@ async function askFixProgressJudgeOnce(spawn: (args: SpawnWorkerArgs) => Promise
   }
   if (first !== undefined && (first.subtype === undefined || first.subtype === "success")) return { result: first };
   const provider = first?.provider ?? assigned?.provider;
-  const reaskedFrom: FixProgressReaskedFrom = { provider: provider ?? "unknown", model: first?.model || assigned?.model || "unknown",
+  // `model` is the caller's requested label on routed workers (for example Codex
+  // reports `haiku` there); retain the concrete model that actually ran.
+  const reaskedFrom: FixProgressReaskedFrom = { provider: provider ?? "unknown", model: first?.routedModel || assigned?.model || first?.model || "unknown",
     subtype: first?.subtype ?? "threw" }; // the error text is never copied: a message may carry a secret
   const exclude = provider === undefined ? args.excludeProviders : [...new Set([...(args.excludeProviders ?? []), provider])];
   let result: WorkerResult;
