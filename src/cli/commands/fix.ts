@@ -4711,6 +4711,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     for (const unread of inheritedRed?.unread ?? []) deps.say(`fix rung: the census job log is unreadable, so its region decides: ${unread}`);
     if (inheritedRed?.inherited) {
       const reason = "base_inherited";
+      deps.log("fix.round_skipped", { site: "rung.strike", strike: strikes + 1, reason, steps: inheritedRed.steps });
       deps.log("fix.stood_down", { site: "rung.strike", strike: strikes + 1, reason, steps: inheritedRed.steps });
       deps.say(`fix rung: every red step (${inheritedRed.steps.join(", ")}) is inherited from the base — no source edit dispatched`);
       return finish({ outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason });

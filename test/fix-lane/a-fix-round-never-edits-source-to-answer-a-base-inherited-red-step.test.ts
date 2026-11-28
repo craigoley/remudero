@@ -10,11 +10,9 @@ import { test } from "node:test";
 // @ts-expect-error -- plain .mjs script, no type declarations
 import { emitCiReport, formatReport, isBlocked, proveNearCrossings, refusePopulationDrop } from "#scripts/expiring-fixture-census.mjs";
 import { runFixRung as runFixRungWithHost, type FixCommandHost } from "#src/cli/commands/fix.js";
-import {
-  BASE_INHERITED_MARKER, answeredFindingText, baseInheritedRedSteps, baseInheritedRedStepsFromJobLogs, readExpectationRewrites,
-  rewrittenTestExpectations,
-  unaskedExpectationRewrites,
-} from "#src/lib/ci-remedy-execution.js";
+// A namespace import, so this file still links at a merge-base that lacks these exports: there each test fails on
+// its own behaviour rather than the whole file failing to load.
+import * as remedy from "#src/lib/ci-remedy-execution.js";
 import type { FixSelfCheckRunResult } from "#src/lib/fix-self-check.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
 import { fetchCiFailuresAsync } from "#src/lib/tick-read-worker.js";
@@ -24,6 +22,9 @@ import type { WorkerResult } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { fixCommandHost } from "#test/helpers/run-task-test.js";
+
+const { BASE_INHERITED_MARKER, answeredFindingText, baseInheritedRedSteps, baseInheritedRedStepsFromJobLogs, readExpectationRewrites,
+  rewrittenTestExpectations, unaskedExpectationRewrites } = remedy;
 
 const mount = { model: "sonnet", effort: "medium" as const, maxTurns: 20, contextBudget: 120000 };
 const SOURCE = "src/inbox.ts";
@@ -168,6 +169,8 @@ test("W1-T15064 criterion 1: an all-inherited red step dispatches no source edit
   assert.equal(result.repo.git("rev-parse", "HEAD"), result.before);
   const why = result.rows.find((row) => row.step === "fix.stood_down" && row.reason === "base_inherited");
   assert.deepEqual(why?.steps, ["comment-load-ratchet"], "the stand-down records why, naming the step");
+  const skipped = result.rows.find((row) => row.step === "fix.round_skipped" && row.reason === "base_inherited");
+  assert.deepEqual(skipped?.steps, ["comment-load-ratchet"], "the skipped round is recorded as fix.round_skipped");
   // The marker is the one the census really prints.
   assert.equal(readFileSync(join(REPO_ROOT, "scripts/expiring-fixture-census.mjs"), "utf8").includes(BASE_INHERITED_MARKER), true);
   assert.equal(inherited.blocked, true, "the census blocks on its confirmed near crossings even though the base owns them");
@@ -444,4 +447,131 @@ test("W1-T15064 criterion 1: a cut report whose lost lines hold a crossing this 
   assert.equal(baseInheritedRedSteps([failure!]).inherited, false, "fewer crossings than the headline states is unknown");
   assert.equal((await baseInheritedRedStepsFromJobLogs([failure!], async () => log)).inherited, false);
   assert.equal((await baseInheritedRedStepsFromJobLogs([failure!], async () => { throw new Error("403"); })).inherited, false);
+});
+
+/** The census step's job log in the shape actions/runner really writes it, as captured in this repo's other job-log
+ *  fixtures (test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts): the group header names the
+ *  script's first line, the runner echoes every script line wrapped in `ESC[36;1m … ESC[0m`, then its `shell:` and
+ *  `env:` lines. The script lines are ci.yml's expiring-fixture-census step (ci.yml:1571-1574), verbatim. */
+const CENSUS_STEP_SCRIPT = [
+  "set -o pipefail",
+  'mkdir -p "$RUNNER_TEMP/gate-reports"',
+  'if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then git update-ref refs/remotes/origin/main "$GATE_BASE"; fi # W1-T5522: no base flag',
+  'node scripts/expiring-fixture-census.mjs 2>&1 | tee "$RUNNER_TEMP/gate-reports/expiring-fixture-census.log"',
+];
+const runnerGroup = (script: readonly string[], env: readonly string[] = []) => [`##[group]Run ${script[0]}`,
+  ...script.map((line) => `\u001b[36;1m${line}\u001b[0m`), "shell: /usr/bin/bash -e {0}",
+  ...(env.length > 0 ? ["env:", ...env] : []), "##[endgroup]"];
+const runnerStamped = (lines: readonly string[]) => lines.flatMap((line) => line.split("\n"))
+  .map((line, i) => `2026-11-27T00:00:01.${String(841136 + i).padStart(7, "0")}Z ${line}`).join("\n");
+const runnerJobLog = (report: string, after: readonly string[] = []) => runnerStamped([
+  ...runnerGroup(CENSUS_STEP_SCRIPT, ["  RMD_CI_REPORT: 1"]), ...report.split("\n"),
+  `##[error]${report}`, "##[error]Process completed with exit code 1.", ...after]);
+
+test("W1-T15064 criterion 1: an all-inherited census red read from a real runner job log, colour codes and all, stands down", async (t) => {
+  const census = censusLog([crossing("test/a.test.ts", 0.4, true), crossing("test/b.test.ts", 0.6, true)], {}, 82);
+  assert.equal(census.blocked, true);
+  const log = runnerJobLog(census.report);
+  // The fixture carries the runner's colour codes around the very line that names the census.
+  assert.match(log, /Z \u001b\[36;1mnode scripts\/expiring-fixture-census\.mjs 2>&1 \| tee .*\u001b\[0m$/m);
+  assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: log }]).inherited, true,
+    "the census is the job's only failed step and every crossing is inherited");
+  // The same log uncoloured reads the same: the escape codes decide nothing.
+  assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: log.replace(/\u001b\[[0-9;]*m/g, "") }]).inherited, true);
+  // The only-failed-step rule still holds in this shape: another coloured step failing after the census dispatches.
+  const lint = runnerJobLog(census.report, [...runnerGroup(["npm run --silent lint-plan"]), "##[error]Process completed with exit code 1."]);
+  assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: lint }]).inherited, false);
+  // A failed exit whose step is not the census, though the census report sits in its log, dispatches.
+  const other = runnerStamped([...runnerGroup(["npm run --silent console-parity"]), ...census.report.split("\n"),
+    `##[error]${census.report}`, "##[error]Process completed with exit code 1."]);
+  assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: other }]).inherited, false);
+  // A crossing this diff planted, in the same real shape, dispatches.
+  const planted = censusLog([crossing("test/a.test.ts", 0.4, true), crossing("test/b.test.ts", 0.6, false)], {}, 82);
+  assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: runnerJobLog(planted.report) }]).inherited, false);
+
+  // The rung.strike site, reading that complete job log by the failure's job id: no worker, no edit, a recorded why.
+  const rollup = [{ name: "light-gates", conclusion: "FAILURE", detailsUrl: "https://github.com/acme/remudero/actions/runs/1/job/779" }];
+  const [failure] = await fetchCiFailuresAsync("acme", "remudero", rollup, 60, { fetchAnnotations: async () => [], fetchJobLog: async () => log });
+  assert.equal(failure!.jobId, "779");
+  const stood = await round([failure!], loosenAndRewrite, { readCiJobLog: async () => log });
+  t.after(() => stood.repo.cleanup());
+  assert.equal(stood.spawns, 0, "no worker is dispatched to edit source");
+  assert.equal(stood.pushes, 0);
+  assert.equal(stood.repo.git("rev-parse", "HEAD"), stood.before, "no commit");
+  assert.equal(stood.repo.git("status", "--porcelain", "--", "src", "test"), "", "no source edit in the worktree");
+  assert.equal(readFileSync(join(stood.repo.dir, SOURCE), "utf8"), GUARDED);
+  assert.equal(stood.outcome.outcome, "stood_down");
+  const skipped = stood.rows.find((row) => row.step === "fix.round_skipped");
+  assert.equal(skipped?.reason, "base_inherited", "the skipped round records why");
+  assert.deepEqual(skipped?.steps, [failure!.name], "and names the red steps it did not answer");
+  assert.equal(skipped?.site, "rung.strike");
+  // The control: the same round over the planted report's real log dispatches its worker.
+  const plantedLog = runnerJobLog(planted.report);
+  const [plantedFailure] = await fetchCiFailuresAsync("acme", "remudero", rollup, 60,
+    { fetchAnnotations: async () => [], fetchJobLog: async () => plantedLog });
+  const dispatched = await round([plantedFailure!], (dir) => writeFileSync(join(dir, SOURCE), `${GUARDED}// repaired\n`),
+    { readCiJobLog: async () => plantedLog });
+  t.after(() => dispatched.repo.cleanup());
+  assert.equal(dispatched.spawns, 1);
+  assert.equal(dispatched.rows.some((row) => row.step === "fix.round_skipped"), false);
+});
+
+const PR_OWN = "assert.equal(prOwn(), false);\n";
+
+/** A harness merge round in a real repository: the PR added `assert.equal(prOwn(), false)` to a test file main also
+ *  has, main then changed that file to `mainText`, and the round merged main in one real two-parent commit whose
+ *  resolution `resolve` writes. */
+function mergeRound(mainText: string, resolve: (merged: string) => string) {
+  const { repo, git } = history();
+  repo.git("checkout", "-qb", "run-W1-T15064X-1");
+  writeFileSync(join(repo.dir, TEST), `${readFileSync(join(repo.dir, TEST), "utf8")}${PR_OWN}`);
+  repo.git("commit", "-qam", "the PR adds its own assertion");
+  const roundStart = repo.git("rev-parse", "HEAD");
+  repo.git("checkout", "-q", "main");
+  writeFileSync(join(repo.dir, TEST), mainText);
+  repo.git("commit", "-qam", "main changes the test file");
+  repo.git("checkout", "-q", "run-W1-T15064X-1");
+  repo.git("merge", "-q", "--no-ff", "--no-commit", "main");
+  writeFileSync(join(repo.dir, TEST), resolve(readFileSync(join(repo.dir, TEST), "utf8")));
+  repo.git("add", TEST);
+  repo.git("commit", "-qm", "merge main");
+  const merged = repo.git("rev-parse", "HEAD");
+  assert.equal(repo.git("rev-list", "--count", "--merges", `${roundStart}..${merged}`), "1", "one real two-parent commit");
+  return { repo, read: () => readExpectationRewrites(git, roundStart, merged), mergedText: () => readFileSync(join(repo.dir, TEST), "utf8") };
+}
+
+const MAIN_FLIPS_ITS_OWN = `${REWRITTEN}assert.equal(released(() => true), true);\n`;
+
+test("W1-T15064 criterion 2: a merge round that flips an assertion the PR added is charged, though main lacks it", async (t) => {
+  // The reviewer's probe: main never had `prOwn`, so main lacking it is no evidence main changed it.
+  const flipped = mergeRound(MAIN_FLIPS_ITS_OWN, (text) => text.replace(PR_OWN, "assert.equal(prOwn(), true);\n"));
+  t.after(() => flipped.repo.cleanup());
+  assert.match(flipped.mergedText(), /released\(undefined\), true/, "main's own change came in through the merge");
+  assert.deepEqual(await flipped.read(), [{ path: TEST, changed: ["assert.equal(prOwn(), false)"] }],
+    "charged for the PR's assertion it flipped, never for main's");
+  assert.deepEqual(unaskedExpectationRewrites(await flipped.read(), answeredFindingText({ review: { unmetCriteria: [UNMET] } })),
+    [{ path: TEST, changed: ["assert.equal(prOwn(), false)"] }], "no finding names the test, so the round is refused");
+  // The control: the merge keeps the PR's assertion, and nothing is charged.
+  const kept = mergeRound(MAIN_FLIPS_ITS_OWN, (text) => text);
+  t.after(() => kept.repo.cleanup());
+  assert.equal(kept.mergedText().includes(PR_OWN), true);
+  assert.deepEqual(await kept.read(), []);
+});
+
+test("W1-T15064 criterion 2: a merge round that rewrites what main brought in is charged for it", async (t) => {
+  // Main changed an expectation and the round's resolution changed main's version again.
+  const again = mergeRound(MAIN_FLIPS_ITS_OWN, (text) => text.replace("released(undefined), true", "released(undefined), \"x\""));
+  t.after(() => again.repo.cleanup());
+  assert.deepEqual(await again.read(), [{ path: TEST, changed: ["assert.equal(released(undefined), true)"] }]);
+  // Main added an assertion and the round's resolution dropped it.
+  const MAIN_OWN = "assert.equal(mainOwn(), 1);\n";
+  const added = `${EXPECT.replace("\n", `\n${MAIN_OWN}`)}assert.equal(released(() => true), true);\n`;
+  const dropped = mergeRound(added, (text) => text.replace(MAIN_OWN, ""));
+  t.after(() => dropped.repo.cleanup());
+  assert.deepEqual(await dropped.read(), [{ path: TEST, changed: ["assert.equal(mainOwn(), 1)"] }]);
+  // The control: the same merge, taken whole, charges nothing.
+  const whole = mergeRound(added, (text) => text);
+  t.after(() => whole.repo.cleanup());
+  assert.equal(whole.mergedText().includes(MAIN_OWN), true);
+  assert.deepEqual(await whole.read(), []);
 });
