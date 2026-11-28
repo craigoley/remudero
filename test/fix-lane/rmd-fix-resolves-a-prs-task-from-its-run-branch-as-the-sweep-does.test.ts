@@ -14,7 +14,6 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 
 const SHA = "2".repeat(40);
-const STAMP = "2026-11-14T16:41:24.000Z";
 const PR = 18449;
 const PR_URL = `https://github.com/fixture/fix-task/pull/${PR}`;
 const UNRECOVERABLE = "criteria unrecoverable (no Remudero-Task: trailer to resolve them from)";
@@ -39,13 +38,14 @@ interface Observed {
 }
 
 async function observe(t: TestContext, c: Case): Promise<Observed> {
+  const stamp = new Date().toISOString();
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t12702-`));
   mkdirSync(join(root, "state"));
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const seed = [
-    ...(c.reviewed ?? []).map((task) => ({ ts: STAMP, run_id: "REVIEW-1", task_id: task, step: "review.posted", pr_url: PR_URL,
+    ...(c.reviewed ?? []).map((task) => ({ ts: stamp, run_id: "REVIEW-1", task_id: task, step: "review.posted", pr_url: PR_URL,
       state: "failure", unmet_criteria: [`${task} claim`], reasons: [`${task} reason`] })),
-    ...(c.emitterFiling ? [{ ts: STAMP, run_id: "RETRO-1", task_id: "RETRO", step: "pr.opened", pr_url: PR_URL, plan_only: true }] : []),
+    ...(c.emitterFiling ? [{ ts: stamp, run_id: "RETRO-1", task_id: "RETRO", step: "pr.opened", pr_url: PR_URL, plan_only: true }] : []),
   ];
   writeFileSync(ledgerPath, seed.map((row) => JSON.stringify(row) + "\n").join(""));
   const shim = ghShim([
@@ -74,7 +74,7 @@ async function observe(t: TestContext, c: Case): Promise<Observed> {
       fetch: (args) => {
         if (args[1] === `repos/fixture/fix-task/pulls/${PR}`) return {
           number: PR, html_url: PR_URL, state: "open", merged: false, title: "a run branch PR", body: c.body,
-          updated_at: STAMP, head: { ref: c.head, sha: SHA }, auto_merge: null,
+          updated_at: stamp, head: { ref: c.head, sha: SHA }, auto_merge: null,
         };
         if (args[1] === `repos/fixture/fix-task/pulls/${PR}/files?per_page=100`) {
           filesRead += 1;
@@ -82,7 +82,7 @@ async function observe(t: TestContext, c: Case): Promise<Observed> {
         }
         if (args[1]?.includes("/check-runs?")) return { check_runs: [] };
         if (args[1] === `repos/fixture/fix-task/commits/${SHA}/status`) return {
-          statuses: [{ context: "remudero-review", state: "failure", created_at: STAMP }],
+          statuses: [{ context: "remudero-review", state: "failure", created_at: stamp }],
         };
         assert.fail(`unrouted REST read: ${args.join(" ")}`);
       },
