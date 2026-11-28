@@ -114,6 +114,7 @@ function task(over: Record<string, unknown> = {}): Record<string, unknown> {
     files: ["src/lib/widget.ts"],
     acceptance: [{ claim: "c", proof: "p" }],
     origin: "architect",
+    design: "NO-INVARIANTS: the fixture keeps no prior behavior",
     ...over,
   };
 }

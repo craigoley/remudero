@@ -2061,6 +2061,9 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "The harness supplies the proposal id, UTC date and fragment task ids for MASTER-PLAN.md's stamp.",
     "\"RATIFICATION CANDIDATE\" and \"§7/P25\" above name this PROCESS: never put them in a task title.",
     `Every task MUST declare ${SCOPE_HINT} — never omit it and never leave it empty.`,
+    // W1-T11746's design-invariant-proof check (invariantSlugViolations) was stated only by the example below.
+    "Every `type: implement` task's design: MUST hold one line `INVARIANT <slug>: <statement>` (slug: a-z, 0-9, -) per prior",
+    "behavior it keeps, each mapped by ONE claim `invariant:<slug>` with its own proof, or else the line `NO-INVARIANTS: <reason>`.",
     "Every files: path must exist in this checkout or origin/main: confirm with Glob before listing it.",
     "A new file is either test/<folder>/<task-title-slug>.test.ts, where <folder> is the folder placeTest computes from the src modules in files: (see `rmd test-place`; never directly under test/), or declared in design on its own CREATES: <path> line.",
     "A CREATES path is new-file scope only, never the call site of a call-site proof. Every proof must fail on main.",
@@ -2268,7 +2271,12 @@ export const INBOX_DRAFT_FRAGMENT_SCHEMA = {
         items: { type: "object", required: ["claim", "proof"], properties: { claim: { type: "string", minLength: 1 }, proof: { type: "string", minLength: 1 } } },
       },
       origin: { type: "string", minLength: 1 },
+      design: { type: "string", minLength: 1 },
     },
+    // An implement task without a design always fails invariantSlugViolations, so requiring it here refuses no draft the
+    // lint would have passed; other types keep design optional, as the linter does.
+    if: { properties: { type: { const: "implement" } } },
+    then: { required: ["design"] },
   },
 } as const;
 
@@ -2290,6 +2298,7 @@ export function validateDraftFragmentData(data: unknown): string[] {
       if (!isNonEmptyString(t[key])) errors.push(`${at}.${key} must be a non-empty string`);
     }
     if (!(TASK_TYPES as readonly unknown[]).includes(t.type)) errors.push(`${at}.type must be one of ${TASK_TYPES.join("|")}`);
+    if (t.type === "implement" && !isNonEmptyString(t.design)) errors.push(`${at}.design must be a non-empty string for an implement task`);
     if (!Number.isInteger(t.attempts) || (t.attempts as number) < 0) errors.push(`${at}.attempts must be a non-negative integer`);
     if (!Array.isArray(t.depends_on) || !t.depends_on.every((d) => typeof d === "string")) errors.push(`${at}.depends_on must be an array of strings`);
     if (!Array.isArray(t.files) || t.files.length === 0 || !t.files.every(isNonEmptyString)) errors.push(`${at}.files must be a non-empty array of non-empty strings`);
