@@ -403,7 +403,7 @@ import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOvers
 import { assertOpsCheckoutAtPin, opsPlanLandingPreflight, planGardenSpec, productionPlanGardenOps } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
 import { queueJudgeGardenSpec, queueJudgeRouteWindow, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
-import { redesignGardenSpec } from "./lib/redesign-gardener.js";
+import { REDESIGN_OPS_LANDING_STEP, redesignGardenSpec, redesignOpsLandingResult } from "./lib/redesign-gardener.js";
 import { SCOUT_WINDOW_MS, scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, randomisedRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
@@ -29490,8 +29490,26 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "redesign": {
       const d = deps("redesign", raiseDuplicate);
       const judge = issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log });
-      const ops = productionPlanGardenOps({ repoRoot, stateDir, stateRoot: config.root, log });
-      const pass = gardenPass(redesignGardenSpec(d, { judgeText: (prompt) => judge.judgeText(prompt, 0) }, ops), d);
+      let latestOpsSubmission: Record<string, unknown> | undefined;
+      const redesignDeps = {
+        ...d,
+        log: (step: string, extra: Record<string, unknown> = {}) => {
+          d.log(step, extra);
+          if (step === REDESIGN_OPS_LANDING_STEP) latestOpsSubmission = { ...extra };
+        },
+      };
+      const ops = productionPlanGardenOps({
+        repoRoot, stateDir, stateRoot: config.root,
+        log: (step, extra = {}) => {
+          log(step, extra);
+          const result = redesignOpsLandingResult(step, extra, latestOpsSubmission);
+          if (result) {
+            latestOpsSubmission = undefined;
+            log(String(result.step), result);
+          }
+        },
+      });
+      const pass = gardenPass(redesignGardenSpec(redesignDeps, { judgeText: (prompt) => judge.judgeText(prompt, 0) }, ops), d);
       return withDue(async () => { await pass(); await ops.settled(); }, pass.due!);
     }
     case "queue-judge": {

@@ -38,7 +38,9 @@ export const REDESIGN_CLASSES: readonly RedesignClass[] = ["amend", "retire"];
 export const REDESIGN_NAME = "redesign";
 export const REDESIGN_JUDGED_STEP = "redesign.judged";
 const REDESIGN_SCORECARD_STEP = `${REDESIGN_NAME}.scorecard`;
-const REDESIGN_OPS_LANDING_STEP = `${REDESIGN_NAME}.ops_landing_submitted`;
+export const REDESIGN_OPS_LANDING_STEP = `${REDESIGN_NAME}.ops_landing_submitted`;
+export const REDESIGN_OPS_LANDING_RESULT_STEP = `${REDESIGN_NAME}.ops_landing_result`;
+const PLAN_OPS_LANDING_STEPS = new Set(["plan.ops_landing", "plan.ops_landing_failed", "plan.ops_landing_skipped"]);
 /** A hold younger than this is left to the fix lane's own next pass; an hour also bounds re-asking on a flapping hold. */
 export const REDESIGN_AFTER_MS = 60 * 60_000;
 /** BACKSTOP on spend: how many tasks one pass asks about. Each answer is one Architect spawn, and each landing is one
@@ -129,6 +131,19 @@ const rowKeys = (r: Row, signatures: unknown): string[] => [
   ...(Array.isArray(signatures) ? signatures.map(String) : typeof signatures === "string" ? [signatures] : []),
   ...(Array.isArray(r.evidence_keys) ? r.evidence_keys.map(String) : []),
 ];
+
+/** Attach a sealed plan landing's terminal result to the signatures that started it. */
+export function redesignOpsLandingResult(step: string, extra: Row, submission: Row | undefined): Row | undefined {
+  if (!PLAN_OPS_LANDING_STEPS.has(step) || submission === undefined) return undefined;
+  const hasHeldOutcome = (typeof extra.pr_url === "string" && extra.pr_url.length > 0) ||
+    Number(extra.landed) > 0 || Number(extra.waiting) > 0 || Number(extra.refused) > 0;
+  return {
+    ...submission,
+    ...extra,
+    step: REDESIGN_OPS_LANDING_RESULT_STEP,
+    failure: step !== "plan.ops_landing" || !hasHeldOutcome,
+  };
+}
 
 /** The tasks a person was asked to redesign and has not: a refusal-amendment pointer, or a PR the sweep holds. */
 export function redesignCandidates(sources: RedesignSources): RedesignCandidate[] {
@@ -477,7 +492,15 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
       // Ops landings have their own PR lifecycle and are deliberately absent from the public scorecard. Once submitted,
       // keep their signatures and evidence keys out of the Architect queue while that ops landing is in flight or has
       // been declined; the public PR must never settle them on the ops catalog's behalf.
-      const ops = sources.ledger([REDESIGN_OPS_LANDING_STEP], fixedClock(0).iso()).flatMap((r) => rowKeys(r, r.signatures));
+      const opsRows = sources.ledger([REDESIGN_OPS_LANDING_STEP, REDESIGN_OPS_LANDING_RESULT_STEP], fixedClock(0).iso());
+      const submissions = opsRows.filter((r) => r.step === REDESIGN_OPS_LANDING_STEP);
+      const results = opsRows.filter((r) => r.step === REDESIGN_OPS_LANDING_RESULT_STEP);
+      const failedAttempts = new Set(results.filter((r) => r.failure === true && typeof r.attempt_id === "string")
+        .map((r) => String(r.attempt_id)));
+      // Until the sealed landing reports back, the submission is in flight. A returned PR, queued path, or explicit
+      // refusal remains settled; a completed attempt with none of those outcomes is a failure and can be retried.
+      const ops = submissions.filter((r) => typeof r.attempt_id !== "string" || !failedAttempts.has(String(r.attempt_id)))
+        .flatMap((r) => rowKeys(r, r.signatures));
       return new Set([...(state.pending?.targets ?? []), ...(state.declinedTargets ?? [])].map((t) => t.target).concat(landed, ops));
     }),
   };
@@ -500,6 +523,7 @@ export function redesignGardenSpec(
 ): GardenSpec<RedesignClass, RedesignInventory, RedesignAction, GardenCheckout> {
   const sources = buildRedesignSources(deps, overrides);
   let readOps: PlanOpsCatalog | undefined;
+  let opsLandingSequence = 0;
   const isPublic = (action: RedesignAction) => readOps === undefined || !readOps.shards.has(action.target);
   return {
     name: REDESIGN_NAME,
@@ -563,13 +587,24 @@ export function redesignGardenSpec(
       }
       if (opsSeam && readOps && opsInputs.length > 0) {
         const opsActions = plan.actions.filter((action) => readOps!.shards.has(action.target));
+        const attemptId = `${readOps.pin}:${++opsLandingSequence}`;
+        const opsSignatures = opsActions.map((action) => action.signature);
+        const opsEvidenceKeys = opsActions.flatMap((action) => action.keys);
         deps.log(REDESIGN_OPS_LANDING_STEP, {
+          attempt_id: attemptId,
           pin: readOps.pin,
           paths: opsInputs.map((input) => input.relPath),
-          signatures: opsActions.map((action) => action.signature),
-          evidence_keys: opsActions.flatMap((action) => action.keys),
+          signatures: opsSignatures,
+          evidence_keys: opsEvidenceKeys,
         });
-        opsSeam.land(opsInputs, readOps.pin);
+        try {
+          opsSeam.land(opsInputs, readOps.pin);
+        } catch (error) {
+          deps.log(REDESIGN_OPS_LANDING_RESULT_STEP, {
+            attempt_id: attemptId, signatures: opsSignatures, evidence_keys: opsEvidenceKeys, failure: true,
+            error: String((error as Error)?.message ?? error),
+          });
+        }
       }
       if (landed.length === 0) return undefined;
       const retiring = landed[0]!.class === "retire";

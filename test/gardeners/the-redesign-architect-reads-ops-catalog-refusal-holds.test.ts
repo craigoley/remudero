@@ -9,7 +9,7 @@ import { gardenStatePath, readGardenState, runGardenAsync, type GardenerDeps, ty
 import { productionPlanGardenOps, type PlanGardenOps, type PlanOpsRead } from "#src/lib/plan-gardener.js";
 import { parseTasksFromYaml } from "#src/lib/plan.js";
 import { PR_OPEN_SATISFIED_BY_MAIN_STEP } from "#src/lib/pr-open.js";
-import { buildRedesignSources, REDESIGN_JUDGED_STEP, redesignCandidates, redesignGardenSpec, redesignInventory, type RedesignSources } from "#src/lib/redesign-gardener.js";
+import { buildRedesignSources, REDESIGN_JUDGED_STEP, REDESIGN_OPS_LANDING_RESULT_STEP, REDESIGN_OPS_LANDING_STEP, redesignCandidates, redesignGardenSpec, redesignInventory, redesignOpsLandingResult, type RedesignSources } from "#src/lib/redesign-gardener.js";
 import { commentOnlyGrepProofRefusal, parseAcceptanceBlock, parseWhitelistedProof } from "#src/lib/review.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
@@ -156,6 +156,46 @@ test("W1-T14882 criterion 2: submitted ops signatures stop filling later passes 
   const publicSpec = redesignGardenSpec(w.deps, w.overrides, { read: async () => snapshot, land: () => {} });
   const card = publicSpec.scorecard(second, { actions: second.actions, acting: ["amend"] });
   assert.equal((card.signatures as string[]).length, 1, "the public scorecard only carries its own signature");
+});
+
+test("W1-T14882 criterion 2: ops signatures release after failed landing and stay held while queued or declined", (t) => {
+  const w = fixture(t);
+  const snapshot = opsRead();
+  const sources = buildRedesignSources(w.deps, w.overrides, snapshot);
+  const candidate = redesignCandidates(sources).find((item) => item.id === OPS_ID);
+  assert.equal(candidate?.id, OPS_ID);
+  const attemptId = `${PIN}:attempt-1`;
+  const submission = { step: REDESIGN_OPS_LANDING_STEP, ts: clock.iso(), attempt_id: attemptId,
+    signatures: [candidate!.signature], evidence_keys: candidate!.keys };
+  w.rows.push(submission);
+  const opsCandidates = () => redesignCandidates(sources).filter((item) => item.id === OPS_ID);
+  assert.deepEqual(opsCandidates(), [], "an unresolved submission is in flight");
+  w.rows.push({ ...redesignOpsLandingResult("plan.ops_landing", { pr_url: null, landed: 0, waiting: 1, refused: 0 }, submission)!, ts: clock.iso() });
+  assert.deepEqual(opsCandidates(), [], "queued work remains settled");
+
+  w.rows.push({ ...redesignOpsLandingResult("plan.ops_landing", { pr_url: null, landed: 0, waiting: 0, refused: 1 }, submission)!, ts: clock.iso() });
+  assert.deepEqual(opsCandidates(), [], "a declined/refused landing is not retried automatically");
+
+  const failed = redesignOpsLandingResult("plan.ops_landing", {
+    pr_url: null, landed: 0, waiting: 0, refused: 0, error: "ops-status-source-moved",
+  }, submission);
+  assert.equal(failed?.failure, true);
+  w.rows.push({ ...failed!, ts: clock.iso() });
+  assert.deepEqual(opsCandidates().map((item) => item.id), [OPS_ID],
+    "a completed failed landing releases the unchanged evidence for another attempt");
+});
+
+test("W1-T14882 criterion 2: a thrown ops landing is recorded as failed and can be retried", async (t) => {
+  const w = fixture(t);
+  const snapshot = opsRead();
+  await runGardenAsync(redesignGardenSpec(w.deps, w.overrides, {
+    read: () => snapshot,
+    land: () => { throw new Error("ops-status-source-moved"); },
+  }), w.deps);
+  assert.ok(w.rows.some((row) => row.step === REDESIGN_OPS_LANDING_RESULT_STEP && row.failure === true &&
+    row.error === "ops-status-source-moved"), "the caught landing error is durable");
+  const candidates = redesignCandidates(buildRedesignSources(w.deps, w.overrides, snapshot));
+  assert.ok(candidates.some((candidate) => candidate.id === OPS_ID), `failed ops work is eligible for retry: ${JSON.stringify({ rows: w.rows, candidates: candidates.map((candidate) => candidate.id) })}`);
 });
 
 test("W1-T14882 criterion 2: an ops-only retirement uses its pinned record even when the public path coincides", async (t) => {
