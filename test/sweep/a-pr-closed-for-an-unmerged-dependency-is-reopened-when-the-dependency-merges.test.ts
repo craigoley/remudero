@@ -78,13 +78,15 @@ interface PortDouble {
   lifecycleError?: Error;
   headError?: Error;
   truncated?: boolean;
+  open: Array<{ number: number; headRef: string }>;
+  openError?: Error;
   reads: number;
   reopened: Array<{ prUrl: string; comment: string }>;
 }
 
 function reversalPort(over: Partial<PortDouble> = {}): PortDouble & { port: ResequenceCloseReversalPort } {
   const gh: PortDouble = { state: "closed", events: [{ event: "closed", at: new Date(CLOSED_AT_MS).toISOString() }], head: true,
-    reads: 0, reopened: [], ...over };
+    open: [], reads: 0, reopened: [], ...over };
   return Object.assign(gh, {
     port: {
       readLifecycle: async () => {
@@ -95,6 +97,10 @@ function reversalPort(over: Partial<PortDouble> = {}): PortDouble & { port: Rese
       headExists: async () => {
         if (gh.headError) throw gh.headError;
         return gh.head;
+      },
+      openPullRequests: async () => {
+        if (gh.openError) throw gh.openError;
+        return gh.open;
       },
       reopen: async (kept: KeptResequenceClose, comment: string) => {
         if (gh.reopenError) throw gh.reopenError;
@@ -515,6 +521,87 @@ test("W1-T12891 criterion 4: a reversal step that throws is recorded and the pas
   } finally {
     h.cleanup();
   }
+});
+
+const DROPPED = "sweep.resequence_close_dropped";
+const NEWER_PR = 18690;
+const NEWER_HEAD = "run-W1-T12214-1794800000000";
+
+test("W1-T15185 criterion 1: a kept close whose task has a newer open PR on another head is dropped, not reopened, and one sweep.resequence_close_dropped row names that PR", async () => {
+  // Closed for an unmet dependency; the task then has a newer open pull request on another head branch.
+  const gh = reversalPort({ open: [{ number: 18700, headRef: "run-W1-T99999-1794800000000" }, { number: NEWER_PR, headRef: NEWER_HEAD }] });
+  const h = await closedForUnmetDependency(gh);
+  try {
+    h.merged(DEP_ID);
+    await runSweep([], h.deps, DEFAULT_SWEEP_POLICY);
+    assert.deepEqual(gh.reopened, [], "the closed PR is not reopened beside the newer one");
+    const dropped = h.rows(DROPPED);
+    assert.equal(dropped.length, 1, "exactly one drop row");
+    assert.equal(dropped[0]!.pr_number, PR_NUMBER);
+    assert.equal(dropped[0]!.task_id, TASK_ID);
+    assert.equal(dropped[0]!.open_pr_number, NEWER_PR);
+    assert.equal(dropped[0]!.open_head_ref, NEWER_HEAD);
+    assert.equal(h.rows(REVERSED).length + h.rows(REVERSE_FAILED).length, 0);
+    assert.equal(readKeptResequenceCloses(h.ledgerPath).kept.length, 0, "the kept close is removed");
+    // No later pass retries it, even once the newer PR is gone.
+    gh.open = [];
+    await runSweep([], h.deps, DEFAULT_SWEEP_POLICY);
+    assert.deepEqual(gh.reopened, []);
+    assert.equal(h.rows(DROPPED).length, 1, "and no second row");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("W1-T15185 criterion 2: invariant:sole-pr-still-reopens — with no other open PR for the task the close is reopened, and an unreadable open-PR list holds it", async () => {
+  // Open PRs that are not the task's, or are the closed PR's own number or head, do not stop the reopen.
+  const sole = reversalPort({ open: [{ number: 18700, headRef: "run-W1-T99999-1794800000000" },
+    { number: PR_NUMBER, headRef: HEAD_REF }, { number: 18701, headRef: HEAD_REF }, { number: 18702, headRef: "hand/W1-T12214" }] });
+  const h = await closedForUnmetDependency(sole);
+  try {
+    h.merged(DEP_ID);
+    await runSweep([], h.deps, DEFAULT_SWEEP_POLICY);
+    assert.deepEqual(sole.reopened.map((r) => r.prUrl), [PR_URL], "reopened exactly as before");
+    assert.equal(h.rows(REVERSED).length, 1);
+    assert.equal(h.rows(DROPPED).length, 0);
+  } finally {
+    h.cleanup();
+  }
+  const unreadable = reversalPort({ openError: new Error("the open pull request list is incomplete") });
+  const h2 = await closedForUnmetDependency(unreadable);
+  try {
+    h2.merged(DEP_ID);
+    await runSweep([], h2.deps, DEFAULT_SWEEP_POLICY);
+    assert.deepEqual(unreadable.reopened, [], "no reopen on an unreadable list");
+    assert.equal(h2.rows(REVERSED).length + h2.rows(REVERSE_FAILED).length + h2.rows(DROPPED).length, 0, "nothing written");
+    assert.equal(readKeptResequenceCloses(h2.ledgerPath).kept.length, 1, "held for a later pass, not dropped");
+    unreadable.openError = undefined;
+    await runSweep([], h2.deps, DEFAULT_SWEEP_POLICY);
+    assert.equal(unreadable.reopened.length, 1, "a later pass with a readable list reopens it");
+  } finally {
+    h2.cleanup();
+  }
+});
+
+test("W1-T15185 criterion 2: the production port reads every open PR fresh and refuses an unreadable list", async () => {
+  const kept: KeptResequenceClose = { prNumber: PR_NUMBER, prUrl: PR_URL, taskId: TASK_ID, dependencies: [DEP_ID],
+    headRef: HEAD_REF, closedAt: new Date(CLOSED_AT_MS).toISOString() };
+  const calls: Array<{ args: string[]; fresh: boolean }> = [];
+  let pages: unknown[] = [[{ number: NEWER_PR, html_url: PR_URL.replace(/\d+$/, String(NEWER_PR)), state: "open",
+    head: { ref: NEWER_HEAD, sha: "d".repeat(40) }, body: "", title: "t", updated_at: "2026-11-15T00:00:00Z" }]];
+  const port = createResequenceCloseReversalPort({
+    readJson: async (args, opts) => {
+      calls.push({ args, fresh: opts?.fresh === true });
+      return pages.shift() ?? [];
+    },
+    ghRun: () => {},
+  });
+  assert.deepEqual(await port.openPullRequests(kept), [{ number: NEWER_PR, headRef: NEWER_HEAD }]);
+  assert.ok(calls.length >= 1 && calls.every((c) => c.fresh && c.args[1]!.startsWith("repos/craigoley/remudero/pulls?state=open")));
+  pages = [[{ number: 5, html_url: PR_URL, state: "open", head: {}, body: "", title: "t", updated_at: "x" }]];
+  await assert.rejects(() => port.openPullRequests(kept), /unreadable head ref/);
+  pages = [{ message: "Bad credentials" }];
+  await assert.rejects(() => port.openPullRequests(kept));
 });
 
 test("W1-T12891 criterion 4: the production port refuses a pull request url that names no repository", async () => {
