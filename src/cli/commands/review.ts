@@ -1115,8 +1115,16 @@ async function prepareHostedProofs(comparison: Extract<ProofReuseComparison, { e
     reused.add(name);
     return cwd === head ? "pass" as const : "no-match" as const;
   };
-  const disagreements = (result: ReviewVerdict) => result.criteria.filter(c => audited.has(c.proof.trim()) &&
-    c.proof_exec !== "executed_pass" && !reported.has(c.proof.trim()));
+  const disagreements = (result: ReviewVerdict) => {
+    const byProof = new Map<string, CriterionVerdict>();
+    for (const criterion of result.criteria) {
+      const proof = criterion.proof.trim();
+      if (audited.has(proof) && criterion.proof_exec !== "executed_pass" && !reported.has(proof)) {
+        byProof.set(proof, criterion);
+      }
+    }
+    return [...byProof.values()];
+  };
   const record = (unmatched: CriterionVerdict[]) => {
     for (const { proof, proof_exec } of unmatched) {
       reported.add(proof.trim());
