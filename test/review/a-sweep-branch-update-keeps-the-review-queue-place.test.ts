@@ -94,6 +94,7 @@ const sweepUpdate = (ledger: ReturnType<typeof fixtureLedger>, from: string): vo
     pr_number: 21097, pr_url: "https://github.com/o/r/pull/21097", head_sha: from,
   }, at("12:41:24"));
 
+// W1-T15162 criterion 1 in test/review/a-sweep-branch-update-keeps-the-review-queue-place.test.ts
 test("W1-T15162 criterion 1: a head the sweep's branch update made keeps the unreviewed earlier head's queue place", async () => {
   const ledger = fixtureLedger();
   try {
@@ -107,8 +108,26 @@ test("W1-T15162 criterion 1: a head the sweep's branch update made keeps the unr
   } finally {
     ledger.cleanup();
   }
+
+  // A PR's first eligible head has no earlier head key to recurse to. Its inherited key is
+  // still its first eligibility, rather than the PR's older createdAt.
+  const firstHeadLedger = fixtureLedger();
+  try {
+    const firstHead = pr(21097, at("06:00:00"), "first-unreviewed-head");
+    const competitor = pr(21112, at("11:42:00"), "head-21112");
+    firstHeadLedger.observe(at("12:00:00"), [firstHead]);
+    firstHeadLedger.observe(at("11:42:00"), [competitor]);
+    sweepUpdate(firstHeadLedger, firstHead.headSha);
+    const updated = { ...firstHead, headSha: "first-head-update", lastActivityAt: at("12:41:24") };
+    firstHeadLedger.observe(at("12:54:33"), [updated]);
+    assert.equal(await lightFirst(firstHeadLedger, at("13:22:05"), [updated, competitor]), 21112,
+      "the first head's 12:00Z eligibility precedes createdAt and places the competitor first at 11:42Z");
+  } finally {
+    firstHeadLedger.cleanup();
+  }
 });
 
+// W1-T15162 criterion 2 in test/review/a-sweep-branch-update-keeps-the-review-queue-place.test.ts
 test("W1-T15162 criterion 2: invariant a-new-head-of-new-work-requeues — a pushed head, or one after a judged head, keeps its own eligibility", async () => {
   // A head pushed by a fix round or an author: no sweep update row precedes it.
   {

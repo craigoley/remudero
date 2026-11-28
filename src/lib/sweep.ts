@@ -33133,22 +33133,24 @@ function reviewInputQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>
     return otherNewHead ? undefined : update.from;
   };
   /** The key a head of a PR queues at; `null` keeps its PR's createdAt (its first head). */
-  const keyOfHead = (prKey: string, head: string, depth: number): string | null => {
+  const keyOfHead = (prKey: string, head: string, depth: number, inherited = false): string | null => {
     const mint = minted.get(`${prKey}@${head}`);
     if (mint !== undefined) return eligible.get(`${prKey}@${head}`) ?? mint;
     const from = depth < 32 ? sweepMadeFrom(prKey, head) : undefined;
-    if (from !== undefined) return keyOfHead(prKey, from, depth + 1);
+    if (from !== undefined) return keyOfHead(prKey, from, depth + 1, true);
     const own = eligible.get(`${prKey}@${head}`);
     const earlier = [...(eligibleHeads.get(prKey) ?? [])].some((h) => h !== head &&
       (own === undefined || Date.parse(eligible.get(`${prKey}@${h}`)!) < Date.parse(own)));
-    return earlier ? own ?? nowIso : null;
+    // An update-produced head inherits the replaced head's first eligibility even when that
+    // predecessor was the PR's first head. Its createdAt is not the review queue key.
+    return earlier || inherited ? own ?? nowIso : null;
   };
   return (pr) => {
     const head = `${pr.prNumber}@${pr.headSha}`;
     const mint = minted.get(head);
     if (mint !== undefined) return eligible.get(head) ?? mint;
     const from = sweepMadeFrom(String(pr.prNumber), pr.headSha);
-    if (from !== undefined) return keyOfHead(String(pr.prNumber), from, 1) ?? undefined;
+    if (from !== undefined) return keyOfHead(String(pr.prNumber), from, 1, true) ?? undefined;
     const heads = eligibleHeads.get(String(pr.prNumber));
     const reentered = heads !== undefined && [...heads].some((h) => h !== pr.headSha);
     return reentered ? byKey.get(reviewOutcomeKeyForPr(pr)) ?? nowIso : undefined;
