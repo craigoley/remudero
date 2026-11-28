@@ -140,7 +140,38 @@ const BASH_HAS_MAPFILE = spawnSync("bash", ["-c", "type mapfile"], { stdio: "ign
 const pinned = (suite: (typeof DRIFTING)[number]) => [...suite.tests, ...(BASH_HAS_MAPFILE ? suite.bash4 ?? [] : [])];
 const exactName = (name: string) => `^${name.replace(/[\\^$.*+?()[\]{}|/]/g, "\\$&")}$`;
 
-type Run = { failed: boolean; output: string; names: readonly string[] };
+/**
+ * The longest whole-suite runs, split by test title into children that run side by side. One child runs a file's
+ * tests one after another, so a group proof could take no less than its slowest file: product-plan-operation alone
+ * took ~112 s on a 4-core runner (45 s on the Mac, the same unshifted), and the reviewer's 120 s per-test bound timed
+ * out groups 1, 2 and 3 on a loaded host (#20913's review at 60d78e5). Child i runs the tests whose title matches
+ * pattern i; one more child runs every test no pattern matches (each pattern as a `--test-skip-pattern`), so the
+ * children cover the file by construction, and a test added later runs in that last child. A pattern names top-level
+ * titles only, and no two patterns match one title: node drops a subtest that matches a pattern under a parent that
+ * does not. Per-shard test seconds at +400 days on the Mac, in pattern order and then the rest: product-plan-operation
+ * 7, 10, 10, 7 and 9; the no-scope light pass 16 (each fixture's settle waits 2 s of quiet), 11 and 15; the triage
+ * landing 11, 9 and 5; product-routes 13 and 11.
+ */
+const WHOLE_SPLITS: Readonly<Record<string, readonly string[]>> = {
+  "test/dispatch/product-plan-operation.test.ts":
+    ["^W1-T10823: an? ", "^W1-T10823: (?!an? )", "^W1-T13875: a ", "^W1-T13875(?!: a )"],
+  "test/sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views.test.ts":
+    ["^W1-T13831 criterion 3: ", "^W1-T13831 criterion 5: "],
+  "test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts":
+    ["^W1-T12790 ", "^W1-T12198 criterion 2: "],
+  "test/console-api/serve/product-routes.test.ts": ["^served product planning "],
+};
+assert.deepEqual(Object.keys(WHOLE_SPLITS).filter((file) => !FIFTEEN.includes(file)), [], "every split names one of the fifteen");
+/** One child's share of a whole-suite run: the titles it runs, or every title the other children do not. */
+type Shard = { only?: string; skip?: readonly string[] };
+const shardsOf = (suite: Suite, whole: boolean): readonly Shard[] => {
+  const split = whole ? WHOLE_SPLITS[suite.file] : undefined;
+  return split === undefined ? [{}] : [...split.map((only) => ({ only })), { skip: split }];
+};
+const shardArgs = (shard: Shard) => [...(shard.only === undefined ? [] : [`--test-name-pattern=${shard.only}`]),
+  ...(shard.skip ?? []).map((pattern) => `--test-skip-pattern=${pattern}`)];
+
+type Run = { failed: boolean; output: string; names: readonly string[]; file?: string; shards?: readonly Run[] };
 
 function withoutTestContext(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const { NODE_TEST_CONTEXT: _context, ...rest } = env;
@@ -187,16 +218,17 @@ async function withHostSlot<T>(run: () => Promise<T>): Promise<T> {
     await sleep(250);
   }
 }
-function runShifted(suite: (typeof DRIFTING)[number], days: number, whole: boolean): Promise<Run> {
-  return withHostSlot(() => runShiftedNow(suite, days, whole));
+function runShifted(suite: (typeof DRIFTING)[number], days: number, whole: boolean, shard: Shard = {}): Promise<Run> {
+  return withHostSlot(() => runShiftedNow(suite, days, whole, shard));
 }
-function runShiftedNow(suite: (typeof DRIFTING)[number], days: number, whole: boolean): Promise<Run> {
+function runShiftedNow(suite: (typeof DRIFTING)[number], days: number, whole: boolean, shard: Shard): Promise<Run> {
   const isolatedTmp = mkdtempSync(join(tmpdir(), "rmd-w1-t14786-"));
-  // A whole-suite run, as the sweep's report runs it, pins no name: every test in the file must pass.
+  // A whole-suite run, as the sweep's report runs it, pins no name: every test in the file must pass, in this child
+  // or, for a split file, in one of its sibling shards.
   const names = whole ? [] : pinned(suite);
   return new Promise((resolve) => {
     execFile(process.execPath,
-      ["--test", "--test-reporter=tap", ...names.map((name) => `--test-name-pattern=${exactName(name)}`),
+      ["--test", "--test-reporter=tap", ...names.map((name) => `--test-name-pattern=${exactName(name)}`), ...shardArgs(shard),
         "--import", "tsx", "--import", join(REPO_ROOT, SUITE_PRELOAD),
         "--import", join(REPO_ROOT, "scripts", "clock-shift.mjs"), suite.file],
       { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
@@ -204,7 +236,7 @@ function runShiftedNow(suite: (typeof DRIFTING)[number], days: number, whole: bo
         env: { ...withoutTestContext(process.env), TMPDIR: isolatedTmp, FK_SHIFT_DAYS: String(days) } },
       (error, stdout, stderr) => {
         rmSync(isolatedTmp, { recursive: true, force: true });
-        resolve({ failed: error !== null, output: `${stdout}${stderr}`, names });
+        resolve({ failed: error !== null, output: `${stdout}${stderr}`, names, file: suite.file });
       });
   });
 }
@@ -243,13 +275,14 @@ const selected = (title: string) =>
 function runShift(days: number, whole: boolean, title: (suite: Suite) => string) {
   const settled = new Map(DRIFTING.map((suite) => {
     let resolve!: (run: Run) => void;
-    const entry: { promise: Promise<Run>; resolve: (run: Run) => void; queued: boolean } =
-      { promise: new Promise<Run>((r) => { resolve = r; }), resolve: (run) => resolve(run), queued: false };
+    const entry: { promise: Promise<Run>; resolve: (run: Run) => void; queued: boolean; left: number; runs: Run[] } =
+      { promise: new Promise<Run>((r) => { resolve = r; }), resolve: (run) => resolve(run), queued: false, left: 0, runs: [] };
     return [suite.file, entry] as const;
   }));
-  // Slowest first over one shared pool (longest-processing-time): the wall time is then about the slowest suite alone
-  // (~112 s) rather than the quick suites' sum split across two workers (~161 s at 4 cores, W1-T14786 at 2a5f).
-  const queue: Suite[] = [];
+  // Slowest first over one shared pool (longest-processing-time): the wall time is then about the slowest child alone
+  // rather than the quick suites' sum split across two workers (~161 s at 4 cores, W1-T14786 at 2a5f). A split
+  // suite's shards each count as an equal share of its whole time.
+  const queue: { suite: Suite; shard: Shard; index: number; seconds: number }[] = [];
   // Half a child per core. Serially a proof took ~150 s against the reviewer's 180 s proof bound and failed on a hosted
   // runner (#20913); the children mostly wait, so a pool cuts that roughly in half. The flake screen runs twice
   // availableParallelism() copies of this file at once, and a core-sized pool there held 32 children and ~14.5 GB on
@@ -261,21 +294,27 @@ function runShift(days: number, whole: boolean, title: (suite: Suite) => string)
   let busy = 0;
   const pump = () => {
     while (busy < workers && queue.length > 0) {
-      const suite = queue.shift()!;
+      const { suite, shard, index } = queue.shift()!;
       busy++;
       // A run that could not start (its slot or temp dir) reads as a failed run naming the cause, never a hang.
-      void runShifted(suite, days, whole).catch((error: unknown): Run => ({ failed: true, output: String(error), names: [] })).then((run) => {
-        busy--;
-        settled.get(suite.file)!.resolve(run);
-        pump();
-      });
+      void runShifted(suite, days, whole, shard)
+        .catch((error: unknown): Run => ({ failed: true, output: String(error), names: [], file: suite.file })).then((run) => {
+          busy--;
+          const entry = settled.get(suite.file)!;
+          entry.runs[index] = run;
+          if (--entry.left === 0) entry.resolve(entry.runs.length === 1 ? entry.runs[0]! : combined(entry.runs));
+          pump();
+        });
     }
   };
   const request = (suite: Suite) => {
     const entry = settled.get(suite.file)!;
     if (!entry.queued) {
       entry.queued = true;
-      queue.push(suite);
+      const shards = shardsOf(suite, whole);
+      entry.left = shards.length;
+      shards.forEach((shard, index) => queue.push({ suite, shard, index, seconds: WHOLE_SECONDS[suite.file]! / shards.length }));
+      queue.sort((a, b) => b.seconds - a.seconds);
       pump();
     }
     return entry.promise;
@@ -297,6 +336,7 @@ const runOf = (days: number, suite: Suite, whole = false): Promise<Run> => {
  * own `ok` line: a name that matched nothing would otherwise pass by not running.
  */
 function verdict(run: Run): string {
+  if (run.shards !== undefined) return shardedVerdict(run.shards);
   const tests = Number(/^# tests (\d+)$/m.exec(run.output)?.[1] ?? 0);
   const fails = Number(/^# fail (\d+)$/m.exec(run.output)?.[1] ?? -1);
   const passed = new Set(run.output.split("\n").map((line) => /^\s*ok \d+ - (.*)$/.exec(line)?.[1]).filter((name) => name !== undefined));
@@ -304,6 +344,33 @@ function verdict(run: Run): string {
   if (!run.failed && tests >= Math.max(1, run.names.length) && fails === 0 && unrun.length === 0) return "pass";
   const notOk = run.output.split("\n").filter((line) => /^\s*not ok /.test(line)).slice(0, 3).join(" | ");
   return `fail (tests ${tests}, fail ${fails}${notOk ? `: ${notOk}` : ""}${unrun.length ? `; no ok for ${unrun.length} pinned` : ""})`;
+}
+
+/** A split suite's run: failed when any shard failed, and judged shard by shard. */
+function combined(shards: readonly Run[]): Run {
+  return { failed: shards.some((run) => run.failed), output: shards.map((run) => run.output).join("\n"), names: [],
+    file: shards[0]!.file, shards };
+}
+/** The top-level titles a child reported ok, without the file-level line node prints when no test matched. */
+const topLevelOk = (run: Run) => run.output.split("\n").map((line) => /^ok \d+ - (.*)$/.exec(line)?.[1])
+  .filter((title): title is string => title !== undefined && title !== run.file);
+/**
+ * A split run passes only when every shard passes on its own terms, each ran at least one of the file's tests (a
+ * pattern that matched nothing would otherwise pass on node's file-level `ok` line), and no title ran in two shards.
+ */
+function shardedVerdict(shards: readonly Run[]): string {
+  const seen = new Set<string>();
+  for (const [i, shard] of shards.entries()) {
+    const label = `shard ${i + 1} of ${shards.length}`;
+    const own = verdict(shard);
+    if (own !== "pass") return `${label}: ${own}`;
+    const titles = topLevelOk(shard);
+    if (titles.length === 0) return `fail (${label} ran none of the file's tests)`;
+    const twice = titles.filter((title) => seen.has(title));
+    if (twice.length > 0) return `fail (${label} ran ${twice.length} title(s) another shard ran: ${twice[0]})`;
+    titles.forEach((title) => seen.add(title));
+  }
+  return "pass";
 }
 
 const sweepId = (file: string) => suiteName(file.slice("test/".length));
@@ -386,8 +453,9 @@ for (const suite of WHOLE_TEST_ORDER) {
  * The whole-suite tests in four groups, one proof each (W1-T14786 amended 2026-11-27, Craig: "Group into ~4 proofs").
  * Sixteen per-suite proofs, each run at the PR head and again at the merge base, took proof-discrimination past its
  * 10-minute job limit; one proof for all fifteen took the reviewer past its 180 s per-proof bound. Each group shares
- * the same pool as the per-suite tests above, so its wall time is about its slowest suite (measured sums in
- * WHOLE_SECONDS: 112, 114, 106 and 48 s, run four at a time). Every suite of the fifteen is in exactly one group.
+ * the same pool as the per-suite tests above, so its wall time is about its slowest child (WHOLE_SECONDS sums 112,
+ * 114, 106 and 48 s; with WHOLE_SPLITS no child of groups 1 to 3 runs more than ~20 s on the Mac, where the slowest
+ * unsplit file took 45 s). Every suite of the fifteen is in exactly one group.
  */
 const WHOLE_GROUPS: ReadonlyArray<{ title: string; suites: readonly string[] }> = [
   { title: "W1-T14786 the whole-suite clock sweep group 1 of 4 shows no new drift", suites: [
