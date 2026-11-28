@@ -2094,7 +2094,7 @@ export function serveScenarioOf(rows: readonly TailRow[], now: number, coverageM
  * them). A stage still waiting for admission holds nothing yet and is not charged. INVARIANT no-typecheck-no-change:
  * with no record the inputs carry nothing.
  */
-function staticWorkOf(ports: ShadowMemoryPorts, entryPaths: readonly string[]): Pick<ShadowInputs, "staticWork"> {
+function staticWorkOf(ports: ShadowMemoryPorts): Pick<ShadowInputs, "staticWork"> {
   if (ports.readStaticWork === undefined) return {};
   let read: ReturnType<NonNullable<ShadowMemoryPorts["readStaticWork"]>>;
   try { read = ports.readStaticWork(); }
@@ -2105,11 +2105,6 @@ function staticWorkOf(ports: ShadowMemoryPorts, entryPaths: readonly string[]): 
   if ("unread" in read) return { staticWork: read };
   const admitted = read.records.filter((r) => r.admitted);
   if (admitted.length === 0) return {};
-  const reserved = new Set<string>();
-  for (const path of entryPaths) {
-    const t = recordedTree(ports.readFile, path);
-    if (!("unread" in t)) for (const p of t.tree) reserved.add(identityKey(p));
-  }
   const daemonPid = ports.daemonPid();
   let procs: Map<number, { parent: number; start: string }> | undefined, unlisted: string | undefined;
   try {
@@ -2128,25 +2123,62 @@ function staticWorkOf(ports: ShadowMemoryPorts, entryPaths: readonly string[]): 
     procs = undefined;
     unlisted = reasonOf(error);
   }
+  const counted = new Set<string>();
   const records = admitted.map((r): StaticWorkCharge => {
     const peakMib = r.memoryBytes / 1024 ** 2;
-    const root = procs?.get(r.pid);
+    // A record pid is in its writer's pid namespace. Kernel start time is boot-unique, so resolve it against
+    // the daemon's initial /proc before giving up on a worker inside a sandbox namespace.
+    const resolvedPid = procs && r.processStart?.startsWith("proc:")
+      ? [...procs].find(([, p]) => p.start === r.processStart)?.[0] ?? r.pid : r.pid;
+    const root = procs?.get(resolvedPid);
     if (!procs || !root || (r.processStart?.startsWith("proc:") && root.start !== r.processStart)) {
       const basis = !procs ? `process listing unread (${unlisted ?? "unknown"}): the whole peak` : "holder not found: the whole peak";
       return { label: r.label, peakMib, treeMib: 0, chargeMib: peakMib, basis };
     }
     const tree: ProcessIdentity[] = [];
-    const queue = [r.pid];
+    const queue = [resolvedPid];
+    const descendants: number[] = [];
+    const visited = new Set<number>();
     while (queue.length > 0 && tree.length < MAX_TREE_PROCESSES) {
       const pid = queue.shift()!;
+      if (visited.has(pid)) continue;
+      visited.add(pid);
       const proc = procs.get(pid)!;
-      if (pid !== daemonPid && !reserved.has(identityKey({ pid, start: proc.start }))) tree.push({ pid, start: proc.start });
+      if (pid !== daemonPid) descendants.push(pid);
       for (const [child, c] of procs) if (c.parent === pid) queue.push(child);
+    }
+    // A daemon can own several concurrent typechecks. Attribute each record to its own tsc subtree when identifiable;
+    // only fall back to the full holder tree for non-daemon writers or when /proc/cmdline is unavailable.
+    let selected = descendants;
+    let cmdlineUnread: string | undefined;
+    if (resolvedPid === daemonPid) {
+      const tsc = descendants.filter(pid => {
+        try { return /(?:^|\/)tsc(?:\.js|\.cmd)?(?:\0|\s|$)|typescript\/lib\//i.test(ports.readFile(`/proc/${pid}/cmdline`)); }
+        catch (error) { const reason = reasonOf(error); cmdlineUnread = reason; return false; }
+      }).filter(pid => !counted.has(identityKey({ pid, start: procs!.get(pid)!.start })));
+      if (tsc.length > 0) selected = (() => {
+        // One daemon record owns one still-unassigned tsc child; its descendants follow that child.
+        const pid = tsc[0]!;
+        const result = [pid], pending = [pid];
+        const found = new Set(result);
+        while (pending.length) {
+          const parent = pending.shift()!;
+          for (const [child, c] of procs!) if (c.parent === parent && !found.has(child)) {
+            found.add(child); result.push(child); pending.push(child);
+          }
+        }
+        return result;
+      })();
+    }
+    for (const pid of selected) {
+      const proc = procs.get(pid)!;
+      const key = identityKey({ pid, start: proc.start });
+      if (!counted.has(key)) { tree.push({ pid, start: proc.start }); counted.add(key); }
     }
     const resident = treeResident(ports.readFile, tree, { left: MAX_TREE_PROCESSES }, false);
     const chargeMib = Math.max(0, peakMib - resident.mib);
     return { label: r.label, peakMib, treeMib: resident.mib, chargeMib,
-      basis: `peak ${Math.round(peakMib)} MiB less ${Math.round(resident.mib)} MiB its tree holds${resident.complete ? "" : ` (partial: ${resident.reason ?? "unread"})`}` };
+      basis: `peak ${Math.round(peakMib)} MiB less ${Math.round(resident.mib)} MiB its tree holds${resident.complete ? "" : ` (partial: ${resident.reason ?? "unread"})`}${cmdlineUnread ? `; tsc attribution unread (${cmdlineUnread}), used holder tree` : ""}` };
   });
   return { staticWork: { records } };
 }
@@ -2205,7 +2237,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     daemonGrowth: [own, ...others],
     serve: serveOf(ports, tail, now, start.root),
     reviewEstimateMib: estimateOf(ports, "review"),
-    ...staticWorkOf(ports, recorded.map((entry) => entry.path)),
+    ...staticWorkOf(ports),
   };
   const gathered = { ...inputs, ...readContainerPressure(ports, start.root, now, policy, inputs, options.admitted === true, strict) };
   if (policy.claimModel !== JOINT_MODEL) return gathered;

@@ -30,7 +30,7 @@ import {
   type ShadowMemoryPorts,
 } from "./host-memory-shadow.js";
 import { loadLaneGovernorMode, type LaneGovernorMode } from "./policy.js";
-import { publishStaticWorkProjection } from "./test-slot.js";
+import { publishStaticWorkProjection, STATIC_WORK_PROJECTION_STALE_MS } from "./test-slot.js";
 
 export const LANE_TARGET_STEP = "dispatch.lane_target";
 
@@ -487,17 +487,17 @@ let publishedSharedHostMemory: SharedHostMemory | null = null;
 /** BACKSTOP: a snapshot older than this is not read as it stands. The primary control is the lane-target reading
  *  itself, re-taken every dispatch poll interval; a pass whose pin outlives this re-pins a fresh one (re-read through
  *  the governor's reader when none is fresh), and only with no reading at all does each lane keep its own. */
-export const SHARED_HOST_MEMORY_STALE_MS = 10 * 60_000;
+export const SHARED_HOST_MEMORY_STALE_MS = STATIC_WORK_PROJECTION_STALE_MS;
 
 /** W1-T14903 — publish one lane memory reading as the shared snapshot; an unread or host-unread reading clears it. */
-export function publishSharedHostMemory(reading: LaneMemoryReading | { unread: string }, atMs: number): void {
+export function publishSharedHostMemory(reading: LaneMemoryReading | { unread: string }, atMs: number, dir?: string): void {
   if ("unread" in reading || reading.hostBaseAvailableMib === null || !Number.isFinite(reading.hostBaseAvailableMib)) {
     publishedSharedHostMemory = null;
-    publishStaticWorkProjection(null, atMs);
+    publishStaticWorkProjection(null, atMs, dir);
     return;
   }
   // W1-T15179: a static stage (a warm tsc) in this process is admitted against the same projection, not raw headroom.
-  publishStaticWorkProjection(reading.hostBaseAvailableMib, atMs);
+  publishStaticWorkProjection(reading.hostBaseAvailableMib, atMs, dir);
   publishedSharedHostMemory = {
     atMs,
     availableMib: reading.hostBaseAvailableMib,

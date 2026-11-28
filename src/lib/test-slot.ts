@@ -30,7 +30,7 @@ import { setTimeout as sleepAsync } from "node:timers/promises";
 import { systemClock, type Clock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { execFileRouted } from "./spawn-helper.js";
-import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
+import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
 import { sameHost } from "./host-identity.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { observeSlotCapacity, publishSlotCapacity, retireOwnedSlotCapacity, SlotCapacityCleanupError } from "./test-slot-capacity.js";
@@ -2531,7 +2531,7 @@ export interface LiveStaticWork { name: string; label: string; pid: number; proc
  * judges them (same host and namespace: the pid and its start; another: the boot id, or the lease). The host memory
  * projection charges each admitted one its unrealized peak. Absent directory: none. Unreadable: `unread`, said.
  */
-export function readLiveStaticWork(opts: Pick<TestSlotOptions, "dir" | "hostname" | "bootId" | "isPidAlive" | "pidNamespace" | "clock"> = {}):
+export function readLiveStaticWork(opts: Pick<TestSlotOptions, "dir" | "hostname" | "bootId" | "isPidAlive" | "pidNamespace" | "clock" | "processStartScan"> = {}):
   { records: LiveStaticWork[] } | { unread: string } {
   const host = opts.hostname ?? hostname, bootId = opts.bootId ?? (() => readBootId());
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive, pidNamespace = opts.pidNamespace ?? (() => readPidNamespace());
@@ -2544,12 +2544,14 @@ export function readLiveStaticWork(opts: Pick<TestSlotOptions, "dir" | "hostname
     return { unread: `static records unreadable: ${String((error as Error)?.message ?? error)}` };
   }
   const now = (opts.clock ?? systemClock).now(), records: LiveStaticWork[] = [];
+  const foreign: { name: string; st: Stats; text: string; held: TestSlotHolder & { admittedAt?: string } }[] = [];
   for (const name of names.sort()) {
     if (!STATIC_RECORD.test(name)) continue;
-    let held: (TestSlotHolder & { admittedAt?: string }) | null;
+    let held: (TestSlotHolder & { admittedAt?: string }) | null, st: Stats, text: string | null;
     try {
-      const path = join(dir, name), st = lstatSync(path);
-      const text = st.isFile() ? readTestSlotRecordText(path, st) : null;
+      const path = join(dir, name);
+      st = lstatSync(path);
+      text = st.isFile() ? readTestSlotRecordText(path, st) : null;
       held = text === null ? null : parseTestSlotHolder(text);
     } catch (error) {
       void error; // Gone or unreadable between the listing and the read: it names no peak, as the admission's scan treats it.
@@ -2557,29 +2559,75 @@ export function readLiveStaticWork(opts: Pick<TestSlotOptions, "dir" | "hostname
     }
     if (!held || !(typeof held.memoryBytes === "number" && held.memoryBytes > 0)) continue;
     if (testSlotHolderStale(held, now, { hostname: host, bootId, isPidAlive, pidNamespace })) continue;
+    if (process.platform === "linux" && !holderPidProbeable(held, { hostname: host, pidNamespace }) && held.bootId !== undefined &&
+      held.bootId === bootId() && /^proc:[0-9]+$/.test(held.processStart ?? "")) {
+      foreign.push({ name, st, text: text!, held });
+      continue;
+    }
     records.push({ name, label: held.label, pid: held.pid, memoryBytes: held.memoryBytes, admitted: held.admittedAt !== undefined,
       ...(held.processStart ? { processStart: held.processStart } : {}) });
+  }
+  if (foreign.length > 0) {
+    let scan: ProcessStartScan;
+    try { scan = (opts.processStartScan ?? scanProcessStarts)(); }
+    catch (error) { scan = { complete: false, reason: `process start scan threw: ${String(error)}` }; }
+    let removalUnread: string | undefined;
+    for (const { name, st: judgedStat, text: judgedText, held } of foreign) {
+      if (scan.complete && !scan.starts.has(held.processStart!)) {
+        // Match the admission scan: remove a foreign record only after a complete initial-namespace scan proves its
+        // kernel start ended. The exact inode and bytes are rechecked so a replacement record is never removed.
+        const path = join(dir, name);
+        let removed = false;
+        try {
+          const current = lstatSync(path), text = current.isFile() ? readTestSlotRecordText(path, current) : null;
+          if (current.dev === judgedStat.dev && current.ino === judgedStat.ino && current.size === judgedStat.size &&
+            current.mtimeMs === judgedStat.mtimeMs && text === judgedText) {
+            unlinkSync(path);
+            removed = true;
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") removed = true;
+          // A failed unlink keeps the record charged below and names the storage failure as unread.
+          else { const reason = String(error); removalUnread = reason; }
+        }
+        if (removed) continue;
+      }
+      records.push({ name, label: held.label, pid: held.pid, memoryBytes: held.memoryBytes, admitted: held.admittedAt !== undefined,
+        ...(held.processStart ? { processStart: held.processStart } : {}) });
+    }
+    if (removalUnread) return { unread: `foreign static record removal unread: ${removalUnread}` };
   }
   return { records };
 }
 
 /** W1-T15179 — a published projection older than this is not read (the shared host memory snapshot's own bound). */
-const STATIC_WORK_PROJECTION_STALE_MS = 10 * 60_000;
-let staticWorkProjection: { availableBytes: number; atMs: number } | undefined;
+export const STATIC_WORK_PROJECTION_STALE_MS = 10 * 60_000;
+const STATIC_WORK_PROJECTION_FILE = "host-memory-projection.json";
 
 /**
  * W1-T15179 — the daemon publishes the host projection its lanes cut from (MemAvailable after every in-flight
  * worker's remaining claim and every admitted static stage's unrealized peak); a static stage in this process is
  * admitted only while that projection holds its own peak. Null clears it: the raw headroom alone decides.
  */
-export function publishStaticWorkProjection(availableMib: number | null, atMs: number): void {
-  staticWorkProjection = availableMib === null || !Number.isFinite(availableMib) ? undefined
-    : { availableBytes: Math.max(0, availableMib) * 1024 ** 2, atMs };
+export function publishStaticWorkProjection(availableMib: number | null, atMs: number, dir?: string): void {
+  try {
+    const path = join(dir ?? resolveTestSlotDir().dir, STATIC_WORK_PROJECTION_FILE);
+    if (availableMib === null || !Number.isFinite(availableMib)) unlinkSync(path);
+    else writeAtomic(path, JSON.stringify({ availableBytes: Math.max(0, availableMib) * 1024 ** 2, atMs }), { mode: 0o644 });
+  } catch { /* A missing shared directory leaves warm admission on its raw headroom, as before. */ }
 }
 
-function freshStaticWorkProjection(nowMs: number): number | undefined {
-  const p = staticWorkProjection;
-  return p === undefined || nowMs - p.atMs > STATIC_WORK_PROJECTION_STALE_MS ? undefined : p.availableBytes;
+function freshStaticWorkProjection(nowMs: number, dir: string): number | undefined {
+  try {
+    const p = JSON.parse(readFileSync(join(dir, STATIC_WORK_PROJECTION_FILE), "utf8")) as { availableBytes?: unknown; atMs?: unknown };
+    if (typeof p.availableBytes !== "number" || !Number.isFinite(p.availableBytes) || typeof p.atMs !== "number" ||
+      !Number.isFinite(p.atMs) || nowMs - p.atMs < 0 || nowMs - p.atMs > STATIC_WORK_PROJECTION_STALE_MS) return undefined;
+    return p.availableBytes;
+  } catch (error) {
+    // An absent, malformed, stale, or unreadable shared snapshot leaves the pre-existing raw-headroom fallback in force.
+    void error;
+    return undefined;
+  }
 }
 
 /** The admission both drivers step: each yield is a poll's sleep; `slotReason` hands the judgment to a slot. */
@@ -2731,7 +2779,7 @@ function* staticAdmission(label: string, opts: Omit<TestSlotOptions, "sleep"> & 
           NODE_COMPILE_CACHE: join(dir, "node-compile-cache") } }) };
     };
     // W1-T15179: the workers' remaining claims, published by this daemon, must hold this stage's own peak too.
-    const projected = freshStaticWorkProjection(clock.now());
+    const projected = freshStaticWorkProjection(clock.now(), dir);
     const projectedShort = projected !== undefined && projected < opts.memoryBytes;
     const beside = projected === undefined ? "" : `; projection ${mib(projected)} MiB after the workers' claims`;
     if (!projectedShort && (headroom === undefined || Number.isNaN(headroom))) return admit("open", "static admission OPEN: no memory reading on this host");
