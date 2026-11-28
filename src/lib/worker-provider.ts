@@ -3979,7 +3979,8 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   const effort = selection?.effort === "default" ? undefined : selection?.effort;
   const disposableReview = args.sandboxIntent === "disposable-review";
   const readOnly = codexReadOnly(args);
-  const skipGitRepoCheck = readOnly && !isGitWorktree(args.cwd);
+  const insideGitWorktree = isGitWorktree(args.cwd);
+  const skipGitRepoCheck = readOnly && !insideGitWorktree;
   const disposableReadRoots = disposableReview
     ? [...new Set((args.sandboxReadRoots ?? []).filter(isAbsolute).map(physicalPath))]
     : [];
@@ -4026,6 +4027,10 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     // test/a-dispatched-codex-worker-loads-the-whole-file.test.ts.
     "-c", 'project_doc_fallback_filenames=["AGENTS.md","CLAUDE.md"]',
     "-c", `project_doc_max_bytes=${CODEX_PROJECT_DOC_MAX_BYTES}`,
+    // W1-T15260: outside any git worktree Codex finds no project root, so it reads AGENTS.md from the cwd alone;
+    // but its search for the default .git marker still looks in every folder above, and a sandbox that denies `:root` turns that
+    // into "Permission denied" before the thread starts. An empty marker list keeps the same doc and skips the walk.
+    ...(insideGitWorktree ? [] : ["-c", "project_root_markers=[]"]),
   ];
   // W1-T2748 narrows W1-T2754's trust bypass to the two call-site properties that make it safe:
   // read-only tools and positive evidence that the cwd is not a Git worktree. The flag remains in
