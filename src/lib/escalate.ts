@@ -2012,9 +2012,8 @@ const asyncIssueTwins = new WeakMap<IssueGateway, AsyncIssueGateway>();
 /** W1-T14998: the repository each real gateway files in, and the reason a gateway files nowhere. */
 const gatewayRepository = new WeakMap<object, string>();
 const unfiledGateways = new WeakMap<object, string>();
-/** The same two marks as own enumerable symbol properties, so a producer's `{ ...issues, listOpen }` wrapper (the
- *  sweep's stall question, run-task's assigning gateway, the reviewer-health and refusal-alarm dedups) still carries
- *  them: an unrouted engine escalation through a wrapper stays a ledger row, never a thrown create. */
+/** Also own symbol properties, so a producer's `{ ...issues }` wrapper carries them: an unrouted engine escalation
+ *  through a wrapper stays a ledger row, never a thrown create. */
 const GATEWAY_REPOSITORY_MARK: unique symbol = Symbol("rmd.escalation-gateway.repository");
 const GATEWAY_UNFILED_MARK: unique symbol = Symbol("rmd.escalation-gateway.unfiled");
 type MarkedGateway = { [GATEWAY_REPOSITORY_MARK]?: string; [GATEWAY_UNFILED_MARK]?: string };
@@ -2366,8 +2365,7 @@ export function ghIssueGateway(
     opts.exec ??
     ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   if (route.outcome === "unfiled") {
-    // Unrouted: the code repository's own issues, listed and closed exactly as before this task — never filtered by
-    // body or PR URL, so an unstamped issue it filed itself is always its own to dedupe onto and close.
+    // Unrouted: the code repository's own issues, unfiltered, exactly as before this task.
     const local = issueGatewaySteps(code, run, runStepsSync) as IssueGateway;
     if (opts.exec === undefined) asyncIssueTwins.set(local, ghIssueGatewayAsync(owner, repo, { destination: () => route }));
     return local;
@@ -2398,15 +2396,10 @@ export function ghIssueGatewayAsync(
 }
 
 /**
- * W1-T14998 — WHERE A FLEET ESCALATION ISSUE IS FILED. Never the public code repository: the host's private plan
- * destination (`<state>/plan-destination.json`, the ops repository on the fleet host), so task ids, PR links and host
- * detail stay out of public issues. OBSERVED 2026-11-26: [MANUAL], MAIN-HEALTH and READ-MODEL issues were opened on
- * public core (#21036, #21001, #21006, ...). The issue body still names the code repository's PR by its URL.
- *
- * `named` files in that repository. With no route configured, managed repositories file in themselves and the engine
- * repository records the escalation in the ledger. An unreadable destination or required engine origin stops filing.
- * An injected `exec` changes the transport, never the route; a test that files in its
- * own fixture repository names it with `destination` or {@link ESCALATION_REPOSITORY_ENV}.
+ * W1-T14998 — WHERE A FLEET ESCALATION ISSUE IS FILED: the host's private plan destination (the ops repository),
+ * never public core (OBSERVED 2026-11-26: #21036, #21001, #21006). The body names the public PR by URL. With no route,
+ * managed repositories file in themselves and the engine repository writes a ledger row only. An unreadable
+ * destination or engine origin stops filing. An injected `exec` changes the transport, never the route.
  */
 export type EscalationDestinationRead = () => { outcome: "named"; repository: string } | { outcome: "unfiled"; reason: string; unrouted?: true };
 
@@ -2417,9 +2410,8 @@ export const ESCALATION_REPOSITORY_ENV = "RMD_ESCALATION_REPOSITORY";
  *  destination its instance config names. A set value that is not `<owner>/<name>` files nowhere, never a fallback. */
 export const hostEscalationDestination: EscalationDestinationRead = () => escalationDestinationAt(instanceStateDir())();
 
-/** W1-T14998 — the route a process whose state directory is `stateDir` files in: {@link ESCALATION_REPOSITORY_ENV}
- *  when set, else the plan destination that directory names. `rmd host-alert` and serve are handed their state
- *  directory (`--state-root`, the ledger's), which need not be the one this machine's HOME config names. */
+/** W1-T14998 — the route for state directory `stateDir`: {@link ESCALATION_REPOSITORY_ENV} when set, else the plan
+ *  destination it names (`rmd host-alert` and serve get theirs from `--state-root`, not HOME's config). */
 export function escalationDestinationAt(stateDir: string | undefined): EscalationDestinationRead {
   return () => {
     const explicit = process.env[ESCALATION_REPOSITORY_ENV];
@@ -2436,8 +2428,7 @@ export function escalationDestinationAt(stateDir: string | undefined): Escalatio
 }
 
 function escalationIssueRoute(opts: { destination?: EscalationDestinationRead }, code: string): ReturnType<EscalationDestinationRead> {
-  // An injected exec is never a route: production producers inject one too (sreOperatorEscalation, the instance
-  // liveness gateway, `rmd host-alert`, escalation triage), so only an explicit destination names another repository.
+  // Production producers inject an exec too (SRE lane, liveness, host-alert), so only a destination names a route.
   const route = (opts.destination ?? hostEscalationDestination)();
   if (route.outcome === "named" || route.unrouted !== true) return route;
   try {
@@ -2450,8 +2441,7 @@ function escalationIssueRoute(opts: { destination?: EscalationDestinationRead },
 }
 
 
-/** W1-T14998 — the repository the host's escalation issues live in, for readers of them (owner replies): the host
- *  route's repository, or with none named the code repository, whose issues are legacy and only read, never filed. */
+/** W1-T14998 — the repository the host's escalation issues live in, for their readers: the route's, else the code's. */
 export function escalationIssueRepository(owner: string, repo: string,
   destination: EscalationDestinationRead = hostEscalationDestination): [string, string] {
   const route = destination();
@@ -2460,9 +2450,8 @@ export function escalationIssueRepository(owner: string, repo: string,
   return [routeOwner, routeRepo];
 }
 
-/** W1-T14998 — every repository an escalation issue of `owner/repo` may live in: the route's repository, where new
- *  ones are filed, then the code repository, whose issues are legacy (filed before the route) and still read and
- *  answered. One entry when the route names the code repository or names none. */
+/** W1-T14998 — every repository an escalation issue of `owner/repo` may live in: the route's (new issues), then the
+ *  code repository (legacy ones, still read and answered). One entry when the route is the code repository or none. */
 export function escalationIssueRepositories(owner: string, repo: string,
   destination: EscalationDestinationRead = hostEscalationDestination): string[] {
   const code = `${owner}/${repo}`;
@@ -2475,37 +2464,29 @@ export function issueUrlRepository(url: string): string | undefined {
   return /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/\d+\/?$/.exec(url.trim())?.[1];
 }
 
-/** W1-T14998 — the code repository an issue body records in its `**Code-Repository:** <owner>/<name>` machine field,
- *  or undefined. A routed gateway writes that field on each issue it files: one escalation repository is a pool every
- *  routed daemon (core, site, console, `rmd review --repo`) files in, so the field is what keeps one repository's
- *  listing, dedup and close off another's issues. */
+/** W1-T14998 — the code repository a body's `**Code-Repository:**` machine field records, or undefined. A routed
+ *  gateway stamps it on each issue so one repository's listing, dedup and close in a shared pool skip another's. */
 export function escalationCodeRepository(body: string | undefined): string | undefined {
   return /^\*\*Code-Repository:\*\*\s*(\S+)\s*$/m.exec(normalizeCandidateBody(escalationBodyInLegacyOrder(body) ?? ""))?.[1];
 }
 
-/** W1-T14998 — the `<owner>/<name>` of the PR referent {@link prReferentFromIssueText} reads (the first `/pull/<n>`),
- *  when that referent is a full GitHub URL; undefined for no referent or a bare path. A reading aid only: no listing
- *  classifies an issue's owner by the PR it names, whose first link may quote another repository's PR. */
+/** W1-T14998 — the `<owner>/<name>` of the first `/pull/<n>` URL in `text`, or undefined. A reading aid only: no
+ *  listing classifies an issue's owner by the PR it names. */
 export function prReferentRepositoryFromIssueText(text: string | undefined): string | undefined {
   return /(?:github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?\/pull\/\d+/.exec(escalationBodyInLegacyOrder(text) ?? "")?.[1];
 }
 
-/** W1-T14998 — whether `issue`, read from a ROUTED listing (a pool other code repositories file in too), is
- *  `codeRepository`'s, for the routed gateways' listings, the owner-reply reader, the reconciler and the garden. The
- *  code repository it records decides (its quoted PR links may be another's). An issue recording none is a legacy
- *  one only where it lives in the code repository itself: in the pool it was filed by another, unrouted producer
- *  (the pool repository's own daemon), never by this one, which stamps every write. PR links never decide. Where it
- *  lives is `listedFrom`, the repository the listing was read from, when the reader knows it; else its issue URL's. */
+/** W1-T14998 — whether `issue`, from a ROUTED (pooled) listing, is `codeRepository`'s. Its recorded code repository
+ *  decides; recording none, it belongs to where it lives (`listedFrom`, else its URL's repository), since a routed
+ *  producer stamps every write. PR links never decide. */
 export function pooledIssueIsCodeRepositorys(issue: Pick<OpenIssue, "url" | "body">, codeRepository: string,
   listedFrom?: string): boolean {
   const owner = escalationCodeRepository(issue.body) ?? listedFrom ?? issueUrlRepository(issue.url);
   return owner !== undefined && owner.toLowerCase() === codeRepository.toLowerCase();
 }
 
-/** W1-T14998 — whether `gateway` lists escalation issues from a routed pool: a real gateway built on a configured
- *  escalation repository, the code repository itself included (the ops catalog's daemon files where core and site
- *  do). Only then does a reader apply {@link pooledIssueIsCodeRepositorys}; an unrouted, fake or unfiled gateway
- *  lists its own repository's issues unfiltered. The code repository (`_owner`/`_repo`) does not change the answer. */
+/** W1-T14998 — whether `gateway` lists from a routed pool (a real gateway on a configured route, even one naming the
+ *  code repository), so readers apply {@link pooledIssueIsCodeRepositorys}; unrouted, fake or unfiled ones do not. */
 export function escalationListingIsRouted(_owner: string, _repo: string, gateway: object): boolean {
   return gatewayMark(gateway, GATEWAY_REPOSITORY_MARK) !== undefined;
 }
@@ -2529,15 +2510,12 @@ export function withCodeRepositoryField(body: string, codeRepository: string): s
   return stamped.length <= GITHUB_ISSUE_BODY_LIMIT ? stamped : body;
 }
 
-/** W1-T14998 — a gateway filing in a configured route for `codeRepository`. A configured route may also be the
- *  producer's own repository while other fleet producers file there, so each issue records its code repository and
- *  its open listing — which dedup, the main-health rung and the reconcilers close from — holds only that repository's
- *  issues, by {@link pooledIssueIsCodeRepositorys}. */
+/** W1-T14998 — a gateway filing in route `route` for `codeRepository`: writes are stamped and its open listing (dedup,
+ *  the main-health rung, reconcilers) holds only that repository's issues, by {@link pooledIssueIsCodeRepositorys}. */
 export function scopedToCodeRepository(gateway: AsyncIssueGateway, route: string, codeRepository: string,
   filterSameRepository = false): AsyncIssueGateway {
-  // A consumer may wrap a repo gateway and scope it to a different logical code repository (owner replies do this).
-  // `filterSameRepository` says `route` is a configured pool even when it is the code repository; without it a
-  // repository listed for itself is unrouted, and stays unfiltered and unstamped.
+  // `filterSameRepository`: `route` is a configured pool even when it is the code repository; else such a gateway is
+  // unrouted and stays unfiltered and unstamped.
   if (!filterSameRepository && route.toLowerCase() === codeRepository.toLowerCase()) return gateway;
   const own = (open: OpenIssue[]) => open.filter((issue) => pooledIssueIsCodeRepositorys(issue, codeRepository, route));
   const { create, listOpen, editBody } = gateway;
