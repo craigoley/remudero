@@ -166,6 +166,8 @@ export interface ConfigInventory {
   judgeShadowScores?: TypedAnswerScoreGroup[];
   /** W1-T12417: the least top-option probability each decision model clears the bar at, per role ({@link judgeShadowThresholds}). */
   judgeShadowThresholds?: JudgeShadowThreshold[];
+  /** W1-T15164: per role and shadow model, the compared rows whose own judge gave no answer ({@link judgeShadowPrimaryUnanswered}). */
+  judgeShadowPrimaryUnanswered?: JudgeShadowPrimaryUnanswered[];
   /** W1-T12232: the two freshness restart rows, when they last changed, and the `daemon.restart_cycle` rows. */
   restart?: RestartTuneInput;
   active: ConfigCanary[];
@@ -629,6 +631,7 @@ async function buildConfigInventory(input: InventoryMeasurement): Promise<Config
     judgeShadows: judgeShadowSummary(rows, input.nowMs - JUDGE_CASH_BAR.windowMs),
     judgeShadowScores: scoreTypedAnswers(judgeShadowTypedAnswers(rows, input.nowMs - JUDGE_CASH_BAR.windowMs)).groups,
     judgeShadowThresholds: judgeShadowThresholds(rows, input.nowMs - JUDGE_CASH_BAR.windowMs),
+    judgeShadowPrimaryUnanswered: judgeShadowPrimaryUnanswered(rows, input.nowMs - JUDGE_CASH_BAR.windowMs),
     restart: await restartTuneInput(input.repoRoot, rows),
     active: canaries.filter((c) => isPromotionActive(c.promotion.state)),
     cooling: canaries.filter((c) => c.promotion.state === "rolled_back" && input.nowMs - Date.parse(c.promotion.createdAt) < CANARY_TTL_MS).map((c) => c.promotion.scope.policyScope),
@@ -1197,7 +1200,8 @@ export function judgeCashCandidate(inv: ConfigInventory, repoRoot: string): Conf
       class: "move-judge-to-cash",
       target: s.role,
       scope: `judge:${s.role}`,
-      reason: `the cash shadow of the ${s.role} agreed on ${(s.agreeShare! * 100).toFixed(1)}% of ${s.paired} paired calls in 14 days, and ${(s.noAnswerShare! * 100).toFixed(1)}% of its calls gave no usable answer; median cost $${s.shadowMedianCostUsd ?? "?"} against $${s.primaryMedianCostUsd ?? "?"}.`,
+      reason: `the cash shadow of the ${s.role} agreed on ${(s.agreeShare! * 100).toFixed(1)}% of ${s.paired} paired calls in 14 days, and ${(s.noAnswerShare! * 100).toFixed(1)}% of its calls gave no usable answer` +
+        `${(s.primaryUnanswered ?? 0) > 0 ? `; ${s.primaryUnanswered} calls whose primary gave no answer are counted apart` : ""}; median cost $${s.shadowMedianCostUsd ?? "?"} against $${s.primaryMedianCostUsd ?? "?"}.`,
       edits: [{ path, from, to }],
       cohort,
       candidate: `${key} on ${row.model}/${row.effort} with provider cash`,
@@ -1230,6 +1234,8 @@ export function judgeShadowTypedAnswers(rows: ReadonlyArray<Record<string, unkno
     if (typeof row.step !== "string" || !JUDGE_SHADOW_STEPS.includes(row.step) || typeof role !== "string" || typeof model !== "string") continue;
     if (sinceMs !== undefined && !(Date.parse(String(row.ts)) >= sinceMs)) continue;
     if (row.step === "judge_shadow.refused" || row.refusal !== undefined) continue;
+    // W1-T15164: with no answer of the judge's own there is nothing to agree with, so the row is counted apart.
+    if (isPrimaryUnanswered(row)) continue;
     const modelSurface: ModelSurface = row.model_surface === "decisions" ? "decisions" : "text";
     const distribution = Array.isArray(row.distribution) ? (row.distribution as Array<{ option: string; probability: number }>) : undefined;
     const base = { role, question: null, model, source: modelSurface === "decisions" ? "decisions" as const : "generative" as const, modelSurface,
@@ -1252,6 +1258,43 @@ export function judgeShadowTypedAnswers(rows: ReadonlyArray<Record<string, unkno
   return out;
 }
 
+/**
+ * W1-T15164: a compared shadow row whose own judge gave no answer: it says so, or (rows written before W1-T15164) it is
+ * a compared/paired row with a null primary answer, which recorded agreement false.
+ */
+function isPrimaryUnanswered(row: Record<string, unknown>): boolean {
+  if (row.primary_unanswered === true) return true;
+  return (row.step === "judge_shadow.compared" && row.primary_answer === null &&
+      (typeof row.shadow_answer === "string" || (row.model_surface === "decisions" && Array.isArray(row.distribution)))) ||
+    (row.step === "judge_shadow.paired" && row.primary_verdict === null && row.shadow_verdict !== undefined);
+}
+
+/** W1-T15164: how many compared rows of one role and shadow model had no answer of the judge's own to compare. */
+export interface JudgeShadowPrimaryUnanswered {
+  role: string;
+  model: string;
+  surface: ModelSurface;
+  count: number;
+}
+
+/** W1-T15164: per role, shadow model and surface since `sinceMs`, the compared rows left out of the agreement share
+ *  because the judge's own answer was missing. A pair with none is not listed. */
+export function judgeShadowPrimaryUnanswered(rows: ReadonlyArray<Record<string, unknown>>, sinceMs?: number): JudgeShadowPrimaryUnanswered[] {
+  const counts = new Map<string, JudgeShadowPrimaryUnanswered>();
+  for (const row of rows) {
+    const role = row.role ?? row.surface;
+    const model = row.shadow_model ?? row.shadow_deployment;
+    if (typeof role !== "string" || typeof model !== "string" || !isPrimaryUnanswered(row)) continue;
+    if (sinceMs !== undefined && !(Date.parse(String(row.ts)) >= sinceMs)) continue;
+    const surface: ModelSurface = row.model_surface === "decisions" ? "decisions" : "text";
+    const key = `${role}\u0000${model}\u0000${surface}`;
+    const entry = counts.get(key) ?? { role, model, surface, count: 0 };
+    entry.count += 1;
+    counts.set(key, entry);
+  }
+  return [...counts.values()];
+}
+
 /** W1-T12417: does one shadow model of one role clear {@link JUDGE_SWITCH_BAR}? */
 export function judgeShadowModelClears(g: TypedAnswerScoreGroup): boolean {
   return g.agreement.compared >= JUDGE_SWITCH_BAR.minCompared && g.agreement.rate !== null && g.agreement.rate >= JUDGE_SWITCH_BAR.minAgreeShare &&
@@ -1265,6 +1308,8 @@ export interface JudgeShadowThreshold {
   model: string;
   surface: ModelSurface;
   value: number;
+  /** W1-T15164: compared rows left out because the judge's own answer was missing; absent when there were none. */
+  primaryUnanswered?: number;
 }
 
 /** W1-T12417: per role and decision model whose compared answers number {@link JUDGE_SWITCH_BAR}'s floor and agree with the
@@ -1273,12 +1318,18 @@ export interface JudgeShadowThreshold {
  *  figure. A single generated answer has no probability, so a `text` surface gets none. */
 export function judgeShadowThresholds(rows: ReadonlyArray<Record<string, unknown>>, sinceMs?: number): JudgeShadowThreshold[] {
   const groups = new Map<string, { role: string; model: string; answers: Array<{ top: number; agree: boolean }> }>();
+  const unanswered = new Map<string, number>();
   for (const row of rows) {
     const role = row.role;
     const model = row.shadow_model;
     if (row.step !== "judge_shadow.compared" || row.model_surface !== "decisions" || typeof role !== "string" || typeof model !== "string" ||
-      typeof row.agreement !== "boolean" || !Array.isArray(row.distribution) || row.refusal !== undefined) continue;
+      !Array.isArray(row.distribution) || row.refusal !== undefined) continue;
     if (sinceMs !== undefined && !(Date.parse(String(row.ts)) >= sinceMs)) continue;
+    if (isPrimaryUnanswered(row)) {
+      unanswered.set(`${role}\u0000${model}`, (unanswered.get(`${role}\u0000${model}`) ?? 0) + 1);
+      continue;
+    }
+    if (typeof row.agreement !== "boolean") continue;
     const top = Math.max(...(row.distribution as Array<{ probability: number }>).map((entry) => entry.probability));
     if (!Number.isFinite(top)) continue;
     const key = `${role}\u0000${model}`;
@@ -1291,7 +1342,9 @@ export function judgeShadowThresholds(rows: ReadonlyArray<Record<string, unknown
     const agreeing = answers.filter((a) => a.agree).length;
     // The bar was cleared over every one of these answers, so the least top probability among them is the least cut that clears it.
     if (answers.length < JUDGE_SWITCH_BAR.minCompared || agreeing / answers.length < JUDGE_SWITCH_BAR.minAgreeShare) continue;
-    out.push({ role, model, surface: "decisions", value: Math.floor(Math.min(...answers.map((a) => a.top)) * 1000 + 1e-9) / 1000 });
+    const left = unanswered.get(`${role}\u0000${model}`) ?? 0;
+    out.push({ role, model, surface: "decisions", value: Math.floor(Math.min(...answers.map((a) => a.top)) * 1000 + 1e-9) / 1000,
+      ...(left > 0 ? { primaryUnanswered: left } : {}) });
   }
   return out;
 }
@@ -1319,10 +1372,12 @@ export function judgeShadowSwitchCandidate(inv: ConfigInventory, repoRoot: strin
     const cohort: ConfigCohort = { kind: "all" };
     const noAnswer = (g.rejected + g.abstained) / g.answers;
     const observed = { denominator: g.agreement.compared, freshness: "verified" as const, comparisonPopulation: population(cohort), observedAt: inv.nowIso };
+    const left = (inv.judgeShadowPrimaryUnanswered ?? []).find((u) => u.role === g.role && u.model === g.model && u.surface === g.modelSurface)?.count ?? 0;
     return {
       class: "move-judge-to-cash", target: g.role, scope: `judge:${g.role}`,
       reason: `the ${g.model} shadow of the ${g.role} agreed on ${(g.agreement.rate! * 100).toFixed(1)}% of ${g.agreement.compared} compared calls in 14 days, ` +
-        `${(noAnswer * 100).toFixed(1)}% of its calls gave no usable answer${g.brier === null ? "" : `, and its Brier score is ${g.brier.toFixed(3)}`}; ${edit.why}`,
+        `${(noAnswer * 100).toFixed(1)}% of its calls gave no usable answer${g.brier === null ? "" : `, and its Brier score is ${g.brier.toFixed(3)}`}` +
+        `${left > 0 ? `, and ${left} calls whose own judge gave no answer are counted apart` : ""}; ${edit.why}`,
       edits: [{ path, from: edit.from, to: edit.to }], cohort,
       candidate: `${g.role} on ${g.model} (${g.modelSurface} surface)`,
       baseline: `${g.role} on its own judge`,
