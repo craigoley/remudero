@@ -181,7 +181,11 @@ function host(container = CONSOLE): { root: string; env: NodeJS.ProcessEnv; cg: 
   writeFileSync(join(cg, "memory.high"), `${2048 * MIB}\n`);
   writeFileSync(join(cg, "memory.max"), `${CONSOLE_MAX_MIB * MIB}\n`);
   writeFileSync(join(cg, "memory.events"), "low 0\nhigh 1124\nmax 0\noom 0\n");
-  writeFileSync(join(cg, "memory.stat"), `anon ${MIB}\nfile ${4096 * MIB}\nworkingset_refault_anon 9\nworkingset_refault_file 25000\n`);
+  writeFileSync(join(cg, "memory.stat"), `anon ${MIB}\nfile ${4096 * MIB}\ninactive_file ${4096 * MIB}\nworkingset_refault_anon 9\nworkingset_refault_file 25000\n`);
+  // The reclaim counters a shrink reads (W1-T15182): usage at memory.high, and swap with room left.
+  writeFileSync(join(cg, "memory.current"), `${2048 * MIB}\n`);
+  writeFileSync(join(cg, "memory.swap.current"), "0\n");
+  writeFileSync(join(cg, "memory.swap.max"), `${4096 * MIB}\n`);
   writeFileSync(join(root, "meminfo"), `MemTotal:       ${HOST_KB} kB\nMemAvailable:    9216000 kB\n`);
   writeFileSync(join(root, "vmstat"), "pswpin 5000\npswpout 9000\nallocstall_normal 10\nallocstall_movable 20\n");
   writeFileSync(join(root, "psi"), "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n");
@@ -387,6 +391,8 @@ test("the tuner discovers full-ID peers with Docker's exact argv before tier-2 o
       mkdirSync(peerCg, { recursive: true });
       for (const [cg, name, high] of [[h.cg, row.current, row.live], [peerCg, peer, row.peerLive]] as const) {
         writeFileSync(join(cg, "memory.high"), `${high * MIB}\n`);
+        writeFileSync(join(cg, "memory.current"), `${high * MIB}\n`);
+        writeFileSync(join(cg, "memory.swap.current"), "0\n");
         writeFileSync(join(cg, "memory.max"), `${(name === serve ? 7680 : CONSOLE_MAX_MIB) * MIB}\n`);
         writeFileSync(join(cg, "memory.swap.max"), `${(name === serve ? 1024 : 4096) * MIB}\n`);
       }
@@ -532,12 +538,13 @@ test("W1-T15172 criterion 4: a tick reads anon, file and its own anon refaults f
       const id = "c0ffee".padEnd(64, "0");
       const then = h.now - 300;
       writeFileSync(join(h.cg, "memory.high"), `${3072 * MIB}\n`);
+      writeFileSync(join(h.cg, "memory.current"), `${3072 * MIB}\n`);
       // MemAvailable under one reserve with a PSI full stall: tier 3, so at origin/main every variant shrinks.
       writeFileSync(join(h.root, "meminfo"), `MemTotal: ${HOST_KB} kB\nMemAvailable: ${1000 * 1024} kB\n`);
       writeFileSync(join(h.root, "psi"), "some avg10=90.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=50.00 avg60=0.00 avg300=0.00 total=1\n");
       const stat = {
         "no-cache": `anon ${2900 * MIB}\nfile ${8 * MIB}\nshmem ${4 * MIB}\nworkingset_refault_anon 9\nworkingset_refault_file 25000\n`,
-        "own-swap": `anon ${MIB}\nfile ${4096 * MIB}\nworkingset_refault_anon 60009\nworkingset_refault_file 25000\n`,
+        "own-swap": `anon ${MIB}\nfile ${4096 * MIB}\ninactive_file ${4096 * MIB}\nworkingset_refault_anon 60009\nworkingset_refault_file 25000\n`,
         unreadable: `file ${4096 * MIB}\nworkingset_refault_anon 9\nworkingset_refault_file 25000\n`,
       }[variant];
       writeFileSync(join(h.cg, "memory.stat"), stat);
