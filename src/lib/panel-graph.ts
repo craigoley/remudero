@@ -2244,14 +2244,13 @@ function missingAskTasks(plan: Plan, proposals: readonly Proposal[]): Set<string
   return named;
 }
 
-/** W1-T15105: compose the catalog for classification when an ask names any ops-only task. */
+/** W1-T15105: the public plan plus exactly the ops tasks the registry's asks name; an unnamed ops task never joins.
+ *  `proposals` is the whole registry, so the Inbox and every approve compose the same set. */
 export function askTaskPlan(plan: Plan, proposals: readonly Proposal[], readCombined: () => Plan | undefined): Plan {
   const named = missingAskTasks(plan, proposals);
   if (named.size === 0) return plan;
   const combined = readCombined();
-  // Keep the whole catalog available: a named task may depend on another ops task which is not
-  // itself named by this proposal. Its classification must see the same dependency graph as Inbox.
-  const tasks = combined && combined !== plan ? combined.tasks.filter(task => !plan.byId.has(task.id)) : [];
+  const tasks = combined && combined !== plan ? [...named].sort().flatMap(id => combined.byId.get(id) ?? []) : [];
   if (tasks.length === 0) return plan;
   const ids = [...new Set(tasks.map(task => task.id))].sort().join("\0");
   let byCombined = askTaskPlanMemo.get(plan);
@@ -2268,10 +2267,12 @@ export function askTaskPlan(plan: Plan, proposals: readonly Proposal[], readComb
 // FragmentMemo keys parsed drafts by Plan identity. Keep the composed identity while every source input is stable.
 const askTaskPlanMemo = new WeakMap<Plan, WeakMap<Plan, Map<string, Plan>>>();
 
-/** W1-T15105: the terminal's {@link askTaskPlan}, read as serve's approve reads it. */
+/** W1-T15105: the terminal's {@link askTaskPlan}, read as serve's approve reads it: the catalog is read only when
+ *  `judged` (the asks this verb classifies) names a task the public plan lacks. */
 export async function readAskTaskPlan(plan: Plan, proposals: readonly Proposal[], stateDir: string,
-  read: NonNullable<PanelGraphDeps["readInboxCatalog"]> = (pub) => readBoardCatalogs(pub, stateDir)): Promise<Plan> {
-  if (missingAskTasks(plan, proposals).size === 0) return plan;
+  read: NonNullable<PanelGraphDeps["readInboxCatalog"]> = (pub) => readBoardCatalogs(pub, stateDir),
+  judged: readonly Proposal[] = proposals): Promise<Plan> {
+  if (missingAskTasks(plan, judged).size === 0) return plan;
   const context = await read(() => plan);
   return askTaskPlan(plan, proposals, () => context?.outcome === "ok" ? context.plan : undefined);
 }

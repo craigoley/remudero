@@ -7,7 +7,8 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { updateProposalRegistry, type Proposal } from "#src/lib/inbox.js";
-import { askTaskPlan, buildInboxVerbActions, classifyAllProposalsMemo, classifyAllProposalsSliced, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { askTaskPlan, buildInboxVerbActions, classifyAllProposalsMemo, classifyAllProposalsSliced, projectInboxPlan, readAskTaskPlan,
+  type PanelGraphDeps } from "#src/lib/panel-graph.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import type { BoardCatalogContext } from "#src/lib/serve-plan-reload.js";
 import { makeTempDir } from "#src/lib/tmp.js";
@@ -26,6 +27,10 @@ const PARKED_ASK = `verify-human:${OPS_PARKED}`;
 const RELEASED_ASK = `machine-judge:${OPS_RELEASED}`;
 const PUBLIC_ASK = `verify-human:${PUBLIC}`;
 
+const context = (combined?: Plan): BoardCatalogContext => (combined
+  ? Object.assign({ outcome: "ok" as const, observedAt: "2026-11-27T08:00:00.000Z", taskCount: 2 }, { plan: combined, opsIds: new Set<string>() })
+  : Object.assign({ outcome: "unreadable" as const, observedAt: "2026-11-27T08:00:00.000Z", reason: "fixture" }, { opsIds: new Set<string>() }));
+
 function fixture(t: TestContext, proposals: Proposal[], catalog: Plan | undefined, wired = true) {
   const root = makeTempDir("rmd-ops-catalog-ask");
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -35,9 +40,6 @@ function fixture(t: TestContext, proposals: Proposal[], catalog: Plan | undefine
   writeFileSync(ledgerPath, `${JSON.stringify({ step: "ratify.approved", task_id: OPS_RELEASED, released: "verify-human", run_id: "RELEASE-8" })}\n`);
   const reads = { referent: 0, catalog: 0, plan: 0 };
   const approved: string[] = [];
-  const context = (combined?: Plan): BoardCatalogContext => (combined
-    ? Object.assign({ outcome: "ok" as const, observedAt: "2026-11-27T08:00:00.000Z", taskCount: 2 }, { plan: combined, opsIds: new Set<string>() })
-    : Object.assign({ outcome: "unreadable" as const, observedAt: "2026-11-27T08:00:00.000Z", reason: "fixture" }, { opsIds: new Set<string>() }));
   const deps: PanelGraphDeps = { root, inboxRoot: root, ledgerPath, planPath: join(root, "plan", "tasks.yaml"),
     statusGithub: fakeGitHub(), github: { prView: () => null },
     ratify: { approve: (id) => { approved.push(id); }, reframe: () => undefined },
@@ -122,4 +124,60 @@ test("W1-T15105 criterion 3: invariant:public-plan-otherwise — no ok catalog, 
   const publicApprove = fixture(t, [ask(PUBLIC_ASK)], combinedPlan, false);
   assert.ok((await approve(publicApprove.deps, PUBLIC_ASK)) < 300);
   assert.equal(publicApprove.reads.catalog, 0, "an approve naming a public task never reads the catalog");
+});
+
+// The review's probe: a catalog holding ops tasks no ask names. Only the named ones may join the plan asks are judged on.
+const OPS_UNNAMED = ["W1-T7", "W1-T6"];
+const wideCatalog = plan(...corePlan.tasks, task("W1-T7", "auto"), task(OPS_PARKED, "human"), task("W1-T6", "human"));
+const ids = (p: Plan) => p.tasks.map(x => x.id);
+
+test("W1-T15105 criterion 3: invariant:public-plan-otherwise — verify-human:W1-T9 adds only W1-T9, not W1-T7 or W1-T6", async (t) => {
+  const { deps, reads } = fixture(t, [ask(PARKED_ASK)], wideCatalog);
+  const inbox = projectInboxPlan(deps, corePlan, undefined, () => [ask(PARKED_ASK)]);
+  assert.deepEqual(ids(inbox.askPlan), [PUBLIC, OPS_PARKED], "the Inbox judges asks on the public plan plus W1-T9 alone");
+  assert.deepEqual([...inbox.askProjection.keys()].sort(), [PUBLIC, OPS_PARKED].sort(), "only the named ops task is projected");
+  assert.deepEqual([...inbox.projection.keys()], [PUBLIC], "the public projection is unchanged");
+  assert.equal(reads.referent, 1, "one catalog read per pass");
+  assert.equal(states(deps).get(PARKED_ASK)?.state, "ready", "the named task is still judged: its ask is its release");
+
+  let terminalReads = 0;
+  const read = async () => { terminalReads++; return context(wideCatalog); };
+  assert.equal(await readAskTaskPlan(corePlan, [ask(PARKED_ASK)], deps.root, read), inbox.askPlan,
+    "the terminal composes the very same plan as the Inbox");
+  // The terminal approve passes the whole registry, so it composes what the Inbox composes from that registry.
+  const registry = [ask(PARKED_ASK), ask("machine-judge:W1-T7")];
+  const approving = await readAskTaskPlan(corePlan, registry, deps.root, read, [ask(PARKED_ASK)]);
+  assert.deepEqual(ids(approving), [PUBLIC, "W1-T7", OPS_PARKED], "a task another ask names joins; W1-T6, named by none, does not");
+  assert.equal(approving, projectInboxPlan(deps, corePlan, undefined, () => registry).askPlan, "terminal and Inbox: one set");
+  assert.equal(terminalReads, 2);
+  for (const id of OPS_UNNAMED) assert.ok(!inbox.askPlan.byId.has(id), `${id} is named by no ask`);
+});
+
+test("W1-T15105 criterion 3: invariant:public-plan-otherwise — an ask naming a task in neither catalog is judged exactly as before", async (t) => {
+  const NOWHERE = ask("verify-human:W1-T404");
+  const wired = fixture(t, [NOWHERE], wideCatalog);
+  const inbox = projectInboxPlan(wired.deps, corePlan, undefined, () => [NOWHERE]);
+  assert.equal(inbox.askPlan, corePlan, "no named task is found in the catalog: the public plan object itself");
+  assert.equal(inbox.askProjection, inbox.projection, "and the public projection itself");
+  assert.equal(askTaskPlan(corePlan, [NOWHERE], () => wideCatalog), corePlan, "no catalog task is projected for it");
+  assert.equal(await readAskTaskPlan(corePlan, [NOWHERE], wired.deps.root, async () => context(wideCatalog)), corePlan);
+  const judged = (deps: PanelGraphDeps) => classifyAllProposalsMemo(deps, () => corePlan).classifications
+    .map(c => ({ id: c.proposalId, state: c.state, reasons: c.reasons, releaseTaskId: c.releaseTaskId }));
+  const before = fixture(t, [NOWHERE], undefined, false);
+  assert.deepEqual(judged(wired.deps), judged(before.deps), "judged exactly as with no catalog wired");
+});
+
+test("W1-T15105 criterion 3: invariant:public-plan-otherwise — an ask naming a public task reads no catalog", async (t) => {
+  const registry = [ask(PUBLIC_ASK), ask(PARKED_ASK)];
+  let reads = 0;
+  const read = async () => { reads++; return context(wideCatalog); };
+  assert.equal(await readAskTaskPlan(corePlan, registry, "unused", read, [ask(PUBLIC_ASK)]), corePlan,
+    "the terminal approve of a public task keeps the public plan");
+  assert.equal(reads, 0, "even beside an ops task's ask in the registry, the terminal read no catalog");
+  const serve = fixture(t, registry, wideCatalog, false);
+  assert.ok((await approve(serve.deps, PUBLIC_ASK)) < 300);
+  assert.equal(serve.reads.catalog, 0, "serve's approve of a public task read no catalog");
+  const publicOnly = fixture(t, [ask(PUBLIC_ASK)], wideCatalog);
+  assert.equal(projectInboxPlan(publicOnly.deps, corePlan, undefined, () => [ask(PUBLIC_ASK)]).askPlan, corePlan);
+  assert.equal(publicOnly.reads.referent, 0, "the Inbox pass read no catalog");
 });

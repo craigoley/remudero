@@ -40490,11 +40490,13 @@ export async function approveCommand(
   const ledgerPath = deps.inboxLedgerPath ?? ledgerPathFor(config);
   const registryPath = join(inboxRoot, "state", "inbox-proposals.json");
   // W1-T15105: serve's Approve spawns this path, so it judges an ops-catalog task's ask as serve did.
-  const named = parseProposalRegistry(readFileIfExists(registryPath)).filter(p => p.id === proposalId);
+  // The whole registry composes the plan, as the Inbox's does; only this ask decides whether the catalog is read.
+  const registry = parseProposalRegistry(readFileIfExists(registryPath));
   const catalogState = dirname(ledgerPathFor(config));
   const publicPlan = loadPlan(planPath);
-  const plan = await readAskTaskPlan(publicPlan, named, catalogState,
-    deps.readInboxCatalog ?? ((pub) => readBoardCatalogs(pub, catalogState, deps.taskLookup?.api)));
+  const plan = await readAskTaskPlan(publicPlan, registry, catalogState,
+    deps.readInboxCatalog ?? ((pub) => readBoardCatalogs(pub, catalogState, deps.taskLookup?.api)),
+    registry.filter(p => p.id === proposalId));
   const { owner, repo } = proposalPlan.target ?? resolveOwnerRepo();
   const registryIntent = selectedRegistryIntentForConfig(config);
 
