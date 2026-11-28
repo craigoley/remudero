@@ -1454,7 +1454,9 @@ export function testSlotExecutionAllowed(lease: TestSlotLease): boolean {
   return lease.executionAllowed !== false;
 }
 
-function sleepSync(ms: number): void {
+/** The blocking poll sleep a synchronous admission waits with; also the per-worktree typecheck lock's (W1-T15169), whose
+ *  only caller is `npm run typecheck`'s own process (scripts/typecheck.mjs), never the daemon loop or a serve route. */
+export function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
