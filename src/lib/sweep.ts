@@ -4063,8 +4063,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const hosted = mode.kind === "full-review"
           ? await installedWorkHost?.spawnReview({ pr, reviewKey, reviewAttemptId }) : undefined;
         if (hosted !== undefined) {
+          // The production run-child host returns its pid at runtime; older host interfaces may omit it.
+          const hostedPid = (hosted as typeof hosted & { pid?: number }).pid;
           void adoptChildWork({
-            runId: hosted.runId, taskId: pr.taskId ?? `PR-${pr.prNumber}`,
+            runId: hosted.runId, taskId: pr.taskId ?? `PR-${pr.prNumber}`, pid: hostedPid,
             work: { kind: "review", prNumber: pr.prNumber, headSha: pr.headSha, reviewKey, planLane: reviewsInPlanLane(pr) },
             settled: hosted.settled, readPhase: hosted.readPhase,
             ...(hosted.acknowledge === undefined ? {} : { acknowledge: hosted.acknowledge }),
@@ -21909,6 +21911,27 @@ export function inFlightFullReviewCount(): number {
   return running.size + anonymous;
 }
 
+/** W1-T15116: the same deduplicated full-review population, with a process pid only for hosted children. */
+function inFlightFullReviewPids(): Array<number | undefined> {
+  const running = new Map<string, number | undefined>();
+  let anonymous = 0;
+  const add = (prNumber: number | undefined, headSha: string | undefined, pid?: number): void => {
+    if (prNumber === undefined || headSha === undefined) {
+      running.set(`anonymous-${anonymous++}`, pid);
+      return;
+    }
+    const key = `${prNumber}@${headSha}`;
+    if (!running.has(key) || (running.get(key) === undefined && pid !== undefined)) running.set(key, pid);
+  };
+  for (const review of inFlightReviewRuns.values()) {
+    if (review.kind === "full-review") add(review.prNumber, review.headSha);
+  }
+  for (const work of childWork.values()) {
+    if (work.kind === "review") add(work.prNumber, work.headSha, work.pid);
+  }
+  return [...running.values()];
+}
+
 /** W1-T11340: abort this process's in-process review of `prNumber` once it has run `ceilingMs` or longer, returning its
  *  settlement and age. `undefined` when none is registered (a child review, or none) or it is under the ceiling. */
 export function abortInProcessReviewPastCeiling(prNumber: number, ceilingMs: number, now: number):
@@ -21975,7 +21998,7 @@ export async function drainInFlightReviews(opts: {
  *  {@link inFlightReviewRuns} or {@link detachedSweepActions}: those are what a restart WAITS for, and it waits for nothing it
  *  does not own. A posted review frees admission but retains its mutex key until settlement (W1-T11151). */
 export interface ChildWorkRegistration {
-  runId: string; kind: string; taskId: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string;
+  runId: string; kind: string; taskId: string; prNumber?: number; headSha?: string; pid?: number; reviewKey?: string; fixKey?: string;
   readPhase?: () => string | undefined;
   planLane?: boolean;
 }
@@ -22415,7 +22438,8 @@ export function installedDetachedWorkHost(): DetachedWorkHost | undefined {
 /** The child a boot adopted, as the registry takes it: structural, so this module imports nothing from run-child. */
 export interface AdoptedWorkChild {
   runId: string; taskId: string;
-  work: { kind: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string; planLane?: boolean; inputs?: Record<string, unknown> };
+  pid?: number;
+  work: { kind: string; prNumber?: number; headSha?: string; pid?: number; reviewKey?: string; fixKey?: string; planLane?: boolean; inputs?: Record<string, unknown> };
   settled: Promise<unknown>;
   readPhase?: () => string | undefined;
   acknowledge?: (outcome: PromiseSettledResult<never>) => void;
@@ -22432,7 +22456,8 @@ export function adoptChildWork(child: AdoptedWorkChild, log: (step: string, extr
   const { inputs, ...registered } = child.work;
   const planLane = registered.planLane ?? (child.work.kind === "review" && inputs?.planOnlyFiling === true);
   registerChildWork({
-    runId: child.runId, taskId: child.taskId, ...registered, ...(planLane ? { planLane } : {}), readPhase: child.readPhase,
+    runId: child.runId, taskId: child.taskId, ...registered, pid: child.pid ?? registered.pid,
+    ...(planLane ? { planLane } : {}), readPhase: child.readPhase,
   });
   return child.settled.then(
     (value) => ({ status: "fulfilled" as const, value }),
@@ -22787,8 +22812,8 @@ export function productionFixAdmissionReaders(deps: Pick<SweepDeps, "readFixPres
 export interface ReviewMemoryHighReaders {
   read: () => DaemonCgroupMemoryReading;
   estimateMib: () => number;
-  /** Aggregate live review RSS has no admission identity and must not offset a specific review's charge. */
-  residents: () => readonly number[] | undefined;
+  /** Live review RSS keyed by its reservation root pid; unrelated review-class trees cannot offset a review. */
+  residents: () => readonly { pid: number; mib: number }[] | undefined;
 }
 
 /** W1-T15116: the production readers, in a live process only (the fix admission readers' rule). A test or CLI caller
@@ -22800,7 +22825,19 @@ export function productionReviewMemoryHighReaders(deps: Pick<SweepDeps, "fixProg
   return {
     read: () => readDaemonCgroupMemory(),
     estimateMib: () => classEstimate("review").estimateMib,
-    residents: () => productionFixAdmissionResidents(dirname(dirname(deps.ledgerPath)))?.review,
+    residents: () => {
+      const reading = readMemoryLedger({ root: dirname(dirname(deps.ledgerPath)) });
+      if (reading === undefined || reading.state !== "present") return undefined;
+      const entries = reading.entries.filter((entry) => entry.status === "owned" && !entry.occupancyReleased &&
+        entry.workerClass === "review" && (entry.rootPids?.length ?? 0) > 0);
+      const trees = residentsOf((path) => readFileSync(path, "utf8"), entries.map((entry) => entry.path));
+      if (trees === undefined) return undefined;
+      return entries.flatMap((entry, index) => {
+        const tree = trees[index];
+        if (tree === undefined || "unread" in tree) return [];
+        return (entry.rootPids ?? []).map((pid) => ({ pid, mib: tree.mib }));
+      });
+    },
   };
 }
 
@@ -30406,8 +30443,9 @@ async function runSweepPinned(
   const reviewMemoryHighHold = (): string | undefined => {
     if (memoryHigh === undefined) return undefined;
     const estimateMib = memoryHigh.estimateMib();
-    const admitted = inFlightFullReviewCount();
-    const admittedChargeMib = reviewAdmissionChargeMib(admitted, estimateMib, memoryHigh.residents());
+    const admittedPids = inFlightFullReviewPids();
+    const admitted = admittedPids.length;
+    const admittedChargeMib = reviewAdmissionChargeMib(admittedPids, estimateMib, memoryHigh.residents());
     const verdict = reviewMemoryHighVerdict(memoryHigh.read(), {
       admitted,
       admittedChargeMib,

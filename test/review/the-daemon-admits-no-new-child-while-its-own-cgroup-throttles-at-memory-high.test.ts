@@ -68,7 +68,7 @@ interface Harness {
 
 /** Every review is held running until released, so each admission is judged with the earlier ones still in flight. */
 function harness(reading: () => DaemonCgroupMemoryReading, estimateMib = 1_500,
-  residentTrees: readonly number[] | undefined = []): Harness {
+  residentTrees: readonly { pid: number; mib: number }[] | undefined = []): Harness {
   const started: number[] = [];
   const gates: Array<() => void> = [];
   const h: Harness = { deps: undefined as unknown as SweepDeps, started, reads: 0, releaseAll: () => gates.splice(0).forEach((g) => g()) };
@@ -90,7 +90,10 @@ function harness(reading: () => DaemonCgroupMemoryReading, estimateMib = 1_500,
     escalate: () => {},
     postReview: async (p) => {
       started.push(p.prNumber);
-      await new Promise<void>((resolve) => gates.push(resolve));
+      const runId = `t15116-hosted-${p.prNumber}`;
+      registerChildWork({ runId, kind: "review", taskId: p.taskId ?? `PR-${p.prNumber}`, prNumber: p.prNumber,
+        headSha: p.headSha, pid: p.prNumber });
+      gates.push(() => { settleChildWork(runId); });
     },
     ledgerPath: join(tempDir, "ledger.ndjson"),
     runId: "SWEEP-T15116-1",
@@ -178,18 +181,23 @@ test("W1-T15116: child-hosted reviews stay charged after postReview returns", as
 });
 
 test("W1-T15116 criterion 1: visible review RSS replaces its learned peak charge", async () => {
-  assert.equal(reviewAdmissionChargeMib(1, 3_000, undefined), 3_000, "unseen review retains its learned estimate");
-  assert.equal(reviewAdmissionChargeMib(1, 3_000, [1_500]), 1_500, "visible RSS is already in memory.current");
-  assert.equal(reviewAdmissionChargeMib(2, 3_000, [1_500]), 4_500, "an unread second tree retains its estimate");
+  assert.equal(reviewAdmissionChargeMib([undefined], 3_000, undefined), 3_000, "unseen review retains its learned estimate");
+  assert.equal(reviewAdmissionChargeMib([71], 3_000, [{ pid: 71, mib: 1_500 }]), 1_500, "visible RSS is already in memory.current");
+  assert.equal(reviewAdmissionChargeMib([71, 72], 3_000, [{ pid: 71, mib: 1_500 }]), 4_500, "an unread second tree retains its estimate");
+  assert.equal(reviewAdmissionChargeMib([71], 3_000, [{ pid: 99, mib: 2_900 }]), 3_000,
+    "an unrelated review-class tree cannot offset this review's estimate");
 
   // Current includes the first review's 1,500 MiB RSS. Its remaining estimated growth is 1,500 MiB, so the next
   // 3,000 MiB candidate fits exactly at memory.high; charging the first review at its full estimate would hold it.
-  const h = harness(() => bounded(9_500, 14_000), 3_000, [1_500]);
-  const pass = runSweep(four(21970), h.deps, width(4));
+  registerChildWork({ runId: "t15116-visible-rss", kind: "review", taskId: "W1-T15116", prNumber: 21970,
+    headSha: "head21970", pid: 21970 });
+  const h = harness(() => bounded(9_500, 14_000), 3_000, [{ pid: 21970, mib: 1_500 }]);
+  const pass = runSweep([eligiblePr(21971, 30)], h.deps, width(4));
   await settle();
-  assert.deepEqual(h.started, [21970, 21971], "measured resident replaces the estimate before the next admission");
-  assert.ok(h.reads >= 3, "the second candidate is checked against the re-read cgroup and resident trees");
+  assert.deepEqual(h.started, [21971], `measured resident replaces the estimate before admission: ${standDown(h.deps, 21971)}`);
+  assert.ok(h.reads >= 1, "the candidate is checked against the cgroup and resident trees");
   h.releaseAll();
+  settleChildWork("t15116-visible-rss");
   await pass;
   await settle();
 });
@@ -197,7 +205,7 @@ test("W1-T15116 criterion 1: visible review RSS replaces its learned peak charge
 test("W1-T15116: unrelated review RSS already in memory.current does not offset an admitted review", async () => {
   // This 1,500 MiB is already part of the working set but is not returned as a resident of either admitted review.
   // Without attribution, the two learned 1,500 MiB charges remain: only one candidate fits below memory.high.
-  const h = harness(() => bounded(11_500, 14_000), 1_500, []);
+  const h = harness(() => bounded(11_500, 14_000), 1_500, [{ pid: 98765, mib: 1_500 }]);
   const pass = runSweep(four(22970), h.deps, width(4));
   await settle();
   assert.deepEqual(h.started, [22970], "unattributed RSS cannot erase an admitted review's learned charge");

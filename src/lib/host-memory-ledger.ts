@@ -185,6 +185,8 @@ export interface ReadingEntry {
   sinceVerifiedMs: number;
   walkComplete: boolean | null;
   path: string;
+  /** Root processes that own this reservation; admission uses these for per-worker RSS attribution. */
+  rootPids?: number[];
   /** The work it reserved for has ended; only processes it left behind still hold memory, and they cannot grow into the
    *  estimate. Absent on a reading built before this field existed. */
   occupancyReleased?: boolean;
@@ -796,6 +798,7 @@ function readingOf(
       sinceVerifiedMs,
       walkComplete: entry.walk ? entry.walk.complete : null,
       path,
+      rootPids: entry.roots.map((root) => root.pid),
       occupancyReleased: entry.occupancyReleasedAt !== undefined,
     };
   });
