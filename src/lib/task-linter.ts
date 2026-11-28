@@ -89,6 +89,7 @@ export type LintCheck =
   | "pinning-tests"
   | "duplicate-learning"
   | "dispatch-priority"
+  | "dispatch-expedite"
   | "declared-scope"
   | "advisory-routing"
   | "deferred-follow-up"
@@ -3010,6 +3011,15 @@ export function dispatchPriorityViolations(task: Task): LintViolation[] {
   return violations;
 }
 
+function dispatchExpediteViolations(task: Task): LintViolation[] {
+  if (task.expedite_invalid === undefined) return [];
+  return [{
+    check: "dispatch-expedite",
+    severity: "block",
+    message: `task ${task.id}: expedite must be a string or boolean, got ${task.expedite_invalid}`,
+  }];
+}
+
 /** W1-T9328: warn below the other open tasks' minimum; filing at the head avoids priority inflation.
  *  Absent/equal priorities, closed tasks, and queues without another priority stay silent (W1-T9323). */
 function priorityBelowQueueHeadViolations(task: Task, plan: Plan): LintViolation[] {
@@ -4072,6 +4082,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const declaredScope = declaredScopeViolation(task);
   if (declaredScope) violations.push(declaredScope);
   violations.push(...dispatchPriorityViolations(task));
+  violations.push(...dispatchExpediteViolations(task));
   violations.push(...advisoryRoutingViolations(task));
   violations.push(...deferredFollowUpViolations(task));
   violations.push(...shardShapeViolations(task, opts));
