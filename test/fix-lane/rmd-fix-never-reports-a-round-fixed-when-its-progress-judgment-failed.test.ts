@@ -19,10 +19,10 @@ import { originWithClone } from "#test/helpers/git-repo.js";
 
 const TASK = "W1-T12701";
 const PR = 18422;
-// Stamps are an hour before the real clock, never fixed dates: the sweep refuses a PR idle 14 days as abandoned, so the
-// old fixed 2026-11-14 stamps turned these cases red on 2026-11-28. The offsets between them are the originals.
-const BASE_MS = Date.now() - 60 * 60 * 1000;
+// Keep the fixture PR an hour old, below the sweep's 14-day abandonment threshold.
+const BASE_MS = Date.now() - 60 * 60_000;
 const STAMP = new Date(BASE_MS).toISOString();
+const PRIOR_STRIKE_AT = new Date(BASE_MS - 3 * 60 * 60_000 - 11_000).toISOString();
 const PR_URL = `https://github.com/acme/fixrepo/pull/${PR}`;
 const WORKER = { sessionId: "T12701", costUsd: 0, text: "REPORT\nno change\n", blocks: [], stderr: "", subtype: "success",
   isError: false, apiError: false, verdict: "success", tokens: {}, compactionEvents: [], childEnvKeys: [] } as unknown as WorkerResult;
@@ -60,7 +60,7 @@ function world(t: TestContext, opts: { priorStrike: boolean }): World {
   clone.git("checkout", "--quiet", "main");
   const ledgerPath = join(root, "state", "ledger.ndjson");
   // One earlier round at this head, so the rung asks the progress judge before it spawns a worker.
-  writeFileSync(ledgerPath, opts.priorStrike ? JSON.stringify({ ts: new Date(BASE_MS - 10_811_000).toISOString(), run_id: "FIX-1794600000000",
+  writeFileSync(ledgerPath, opts.priorStrike ? JSON.stringify({ ts: PRIOR_STRIKE_AT, run_id: "FIX-1794600000000",
     task_id: TASK, step: "fix.dispatch", lane: "fix", strike: 1, pr_number: PR, head_sha: head, mode: "ci-log",
     round_id: "r1" }) + "\n" : "");
   const config = { root, claudeBin: "/bin/true",
