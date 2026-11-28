@@ -4,9 +4,9 @@ name: Security merge policy
 # Staged producer only. Requiring its context is a separate, verified activation boundary.
 # No pull_request_target trigger: GitHub blocks it by default in public repositories from
 # 2026-12-02 (github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2).
-# Every PR to main still reaches this producer through workflow_run, because
-# semgrep-runtime-compatibility.yml runs on every pull_request to main with no path filter;
-# sweep's dispatchSecurityMergeProducer backfills through workflow_dispatch.
+# Every PR head that starts ci.yml also starts semgrep-runtime-compatibility.yml (same events,
+# main, no path filter), so every head that can earn the required ci-gate reaches this producer
+# through workflow_run. A conflicted or [skip ci] head starts neither until a later push.
 on:
   workflow_run:
     workflows: [CodeQL, Semgrep runtime compatibility]

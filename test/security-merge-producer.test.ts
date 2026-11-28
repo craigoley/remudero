@@ -97,15 +97,22 @@ test('security producer workflow always checks out trusted main with no credenti
  assert.equal(text.includes('npm ci'),false);assert.equal(text.includes('pull_request.head.sha'),false);
  assert.equal(text.includes('schedule:'),false);
 });
-test('security producer workflow has no pull_request_target trigger and still hears every pull request through workflow_run',()=>{
- const flow=parse(readFileSync(new URL('../.github/workflows/security-merge-policy.yml',import.meta.url),'utf8'));
+test('security producer workflow has no pull_request_target trigger and hears every pull request head that starts ci through workflow_run',()=>{
+ const read=(name:string)=>parse(readFileSync(new URL(`../.github/workflows/${name}`,import.meta.url),'utf8'));
+ const flow=read('security-merge-policy.yml');
  assert.equal('pull_request_target' in flow.on,false);
  assert.ok(flow.on.workflow_run.workflows.includes('Semgrep runtime compatibility'));
  assert.ok(flow.on.workflow_run.types.includes('requested'));
- const runtime=parse(readFileSync(new URL('../.github/workflows/semgrep-runtime-compatibility.yml',import.meta.url),'utf8'));
- assert.deepEqual(runtime.on.pull_request.branches,['main']);
- assert.equal(runtime.on.pull_request.paths,undefined);assert.equal(runtime.on.pull_request['paths-ignore'],undefined);
- assert.ok(flow.on.workflow_dispatch.inputs.pr_number);
+ const runtime=read('semgrep-runtime-compatibility.yml').on.pull_request;
+ assert.deepEqual(runtime.branches,['main']);
+ assert.equal(runtime.paths,undefined);assert.equal(runtime['paths-ignore'],undefined);
+ // ci.yml carries the required ci-gate job. Every pull_request event that starts it must start the runtime check too.
+ const ci=read('ci.yml').on.pull_request??{};
+ assert.equal(ci.paths,undefined);assert.equal(ci['paths-ignore'],undefined);
+ assert.ok(ci.branches===undefined||ci.branches.every((b:string)=>b==='main'),'ci.yml PR branches stay within main');
+ for(const type of ci.types??['opened','synchronize','reopened']) assert.ok(runtime.types.includes(type),`ci.yml PR type ${type} also starts the runtime check`);
+ // ci-gate.yml's only PR event aggregates ci.yml runs that already exist at the head, so it adds no uncovered head.
+ assert.deepEqual(read('ci-gate.yml').on.pull_request.types,['edited']);
 });
 test('security producer real CLI transport shells out, publishes exact-head metadata and preserves API failure as UNKNOWN',t=>{
  const dir=mkdtempSync(join(tmpdir(),'rmd-security-transport-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));

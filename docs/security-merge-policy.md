@@ -37,8 +37,11 @@ events retry without a recurring PR monitor or a runner polling loop.
 
 A pull request reaches the producer through `workflow_run` when CodeQL or Semgrep runtime
 compatibility is requested, runs or finishes, never through pull_request_target, which GitHub
-blocks by default in public repositories from 2026-12-02. Semgrep runtime compatibility has no
-path filter, so every pull request to main is covered; sweep backfills through `workflow_dispatch`.
+blocks by default in public repositories from 2026-12-02. Semgrep runtime compatibility fires on
+every `pull_request` event to main that starts `ci`, with no path filter, so every head that can earn
+the required `ci-gate` is covered. A conflicted head or a `[skip ci]` head starts no `pull_request`
+run, so the producer does not hear it until a later push, which also starts `ci`. Sweep dispatches
+the producer only after a CodeQL configuration warning clears; it is not a general backfill.
 
 Merge groups currently publish explicit UNKNOWN: native code-scanning rulesets do
 not cover them. Do not require this context on a queue branch until group evidence
