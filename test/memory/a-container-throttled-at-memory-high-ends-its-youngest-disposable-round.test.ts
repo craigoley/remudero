@@ -20,7 +20,7 @@ import {
 import { containerShedInventory, createContainerShedRung, endRunChildForShed, shedTeardownMs } from "#src/lib/daemon.js";
 import { SWAP_STALL_HISTORY_MS, SWAP_STALL_MIN_SAMPLES, SWAP_STALL_WINDOW_MS } from "#src/lib/host-memory-shadow.js";
 import {
-  adoptChildWork, childWorkCount, childWorkHoldsReviewKey, fixRoundTally, resetChildWork, restartDrainInventory,
+  adoptChildWork, childWorkCount, childWorkHoldsReviewKey, fixDispatchHoldAtHead, fixRoundTally, resetChildWork, restartDrainInventory,
 } from "#src/lib/sweep.js";
 import { withTempDir } from "#src/lib/tmp.js";
 
@@ -131,6 +131,33 @@ test("W1-T15181 criterion 1: the 2026-11-28 00:19Z boot names the youngest of te
   assert.equal(row?.fields.memory_high_mib, 19_712);
 });
 
+test("W1-T15181 criterion 1: boot adoption ranks children by their original spawn time, not directory order", async () => {
+  resetChildWork();
+  const old = T1016 - 53 * MIN;
+  const recent = T1016 - 3 * MIN;
+  const pending: Array<() => void> = [];
+  const log = () => {};
+  try {
+    // Deliberately adopt in run-id order opposite to admission order, as the boot directory walk does.
+    for (const [runId, admittedAtMs] of [["run-T100", recent], ["run-T200", old]] as const) {
+      const settled = new Promise<unknown>((_, reject) => pending.push(() => reject(new Error("aborted"))));
+      void adoptChildWork({ runId, taskId: runId, admittedAtMs,
+        work: { kind: "fix-dispatch", prNumber: 100, headSha: "h100" }, settled }, log);
+    }
+    const entries = restartDrainInventory({ children: true }).filter((entry) => entry.run_id !== undefined);
+    const [lag219, lag408] = episode1016();
+    const decision = decideContainerShed(lag408, { readings: [...calmReadings(T1016, 120, 2.9), lag219], episode: {} },
+      entries.map((entry) => ({ ...entry, end: async () => ({ signalled: true, ended: "terminal" as const }) })));
+    assert.equal(decision.action, "shed");
+    assert.equal(decision.entry?.run_id, "run-T100", "the actually recent child wins despite adoption order");
+    assert.equal(decision.entry?.admitted_at_ms, recent);
+  } finally {
+    for (const reject of pending) reject();
+    await flush();
+    resetChildWork();
+  }
+});
+
 test("W1-T15181 criterion 2: the calm band is the instance's own, so one PSI reading sheds on one instance and holds on another", () => {
   const ready = [child("run-1", "fix-dispatch", T1016 - MIN).entry];
   const [lag219, lag408] = episode1016();
@@ -172,9 +199,32 @@ test("W1-T15181 criterion 2: the band uses W1-T10085's closed windows, history s
   const oneHarmed = [calm(missAt - 60_000, 0.5), calm(missAt, 0.4, 2), ...base];
   assert.equal(containerCalmBandOf(oneHarmed, now).band, 4, "one harmed reading among forty is within twice the noise");
   const tenHarmed = [...Array.from({ length: 10 }, (_, i) => calm(missAt - (10 - i) * 20_000, 0.5)), calm(missAt, 0.4, 2), ...base];
-  const refused = containerCalmBandOf(tenHarmed, now);
-  assert.equal(refused.source, "unlearned");
-  assert.match(refused.basis, /noise/);
+  const lifted = containerCalmBandOf(tenHarmed, now);
+  assert.equal(lifted.source, "learned", "harm concentrated at low PSI does not erase the calm higher band");
+  assert.equal(lifted.band, 4);
+  assert.match(lifted.basis, /baseline/);
+});
+
+test("W1-T15181 criterion 2: one stall among hundreds of calm samples does not erase the learned PSI band", () => {
+  const now = T1016;
+  const samples = calmReadings(now, 284, 3.0, 20 * MIN);
+  const missedAt = now - 3 * MIN;
+  const harmedWindow = Array.from({ length: 5 }, (_, i) => ({
+    at_ms: missedAt - (5 - i) * 30_000, events_high: 5000, memory_current_mib: 15_000,
+    memory_high_mib: 16_404, psi_full_avg60: 0.1, missed_ticks: 0,
+  }));
+  const missed = { at_ms: missedAt, events_high: 5400, memory_current_mib: 16_910, memory_high_mib: 16_404,
+    psi_full_avg60: 0.1, missed_ticks: 1 };
+  const history = [...samples, ...harmedWindow, missed];
+  const band = containerCalmBandOf(history, now);
+  assert.equal(band.source, "learned", band.basis);
+  assert.equal(band.band, 3, "the highest non-lifting calm PSI level is retained");
+  const [lag219, lag408] = episode1016();
+  const current = { ...lag408, psi_full_avg60: 0.2 };
+  const decision = decideContainerShed(current, { readings: [...history, lag219], episode: {} },
+    [child("run-calm", "fix-dispatch", T1016 - MIN).entry]);
+  assert.equal(decision.band.band, 3);
+  assert.equal(decision.action, "hold", "0.2 is inside the measured calm band");
 });
 
 test("W1-T15181 criterion 3: only a review or a detached fix-dispatch run child is ever a candidate", () => {
@@ -326,11 +376,11 @@ test("W1-T15181 criterion 5: a shed writes one memory.shed row with exactly its 
   }
 });
 
-test("W1-T15181 criterion 5: the daemon ends a child through abortRunChild on its run directory, and an unsignalled end says so", async () => {
+test("W1-T15181 criterion 5: the daemon ends a child through abortRunChild on its run directory without a ledger read", async () => {
   await withTempDir("w1-t15181-abort-", async (stateDir) => {
     mkdirSync(join(stateDir, "runs", "run-gone"), { recursive: true });
     const rows: Row[] = [];
-    const outcome = await endRunChildForShed(stateDir, "run-gone", (step, fields) => rows.push({ step, fields: fields ?? {} }));
+    const outcome = await endRunChildForShed(stateDir, "run-gone", (step, fields) => rows.push({ step, fields: fields ?? {} }), 90_000);
     assert.equal(outcome.signalled, false);
     assert.match((outcome as { reason: string }).reason, /run directory/);
   });
@@ -369,6 +419,7 @@ test("W1-T15181 criterion 6: a shed fix round counts no strike and frees its PR;
     // The child ends `aborted` on SIGTERM: its settlement rejects with an AbortError, as run-child-main writes it.
     const inventory = () => restartDrainInventory({ children: true }).filter((e) => e.run_id !== undefined).map((e) => ({
       ...e, end: async (): Promise<ContainerShedEndOutcome> => {
+        log("run_child.abort", { run_id: e.run_id, memory_shed: true, signal: "SIGTERM" });
         abort.get(e.run_id!)?.(Object.assign(new Error("aborted before the run finished"), { name: "AbortError" }));
         return { signalled: true, ended: "terminal", killed: false };
       },
@@ -400,6 +451,12 @@ test("W1-T15181 criterion 6: a shed fix round counts no strike and frees its PR;
       ...rows.map((r) => ({ step: r.step, ...r.fields })),
     ];
     assert.equal(fixRoundTally(ledger, "W1-T900", "h501").strikes, 0, "the shed round is no strike");
+    const shedFailure = { step: "sweep.fix.dispatch_failed", pr_number: 501, head_sha: "h501", child_run_id: "run-fix-501",
+      ts: new Date(T1016 + 4 * MIN).toISOString(), error: "aborted before the run finished" };
+    const shedAbort = { step: "run_child.abort", run_id: "run-fix-501", memory_shed: true };
+    const hold = fixDispatchHoldAtHead({ prNumber: 501, headSha: "h501", taskId: "W1-T900" } as never,
+      [shedAbort, shedFailure]);
+    assert.equal(hold, undefined, "the next sweep can admit the PR as soon as capacity is available");
   } finally {
     for (const reject of abort.values()) reject(new Error("test cleanup"));
     await flush();

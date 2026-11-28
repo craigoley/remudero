@@ -33,7 +33,7 @@ import { configPath } from "./config.js";
 import { FOOTPRINT_MAX_SAMPLES, FOOTPRINT_RETAIN_MS } from "./daemon-footprint.js";
 import { sampleCgroupMemory } from "./daemon-memory-telemetry.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { CROSSING_WINDOW_MS, readPsi, SWAP_STALL_HISTORY_MS, SWAP_STALL_MIN_SAMPLES, SWAP_STALL_WINDOW_MS } from "./host-memory-shadow.js";
+import { CROSSING_WINDOW_MS, psiLiftNoise, readPsi, SWAP_STALL_HISTORY_MS, SWAP_STALL_MIN_SAMPLES, SWAP_STALL_WINDOW_MS } from "./host-memory-shadow.js";
 import { loadRunChildMode, type RunChildMode } from "./policy.js";
 import {
   bootRunChildModeTracker, readRunChildModeUnion, runChildModeEvidence, runChildModeFor, runChildModeWindow, type RunChildModeTracker,
@@ -1398,12 +1398,7 @@ const MISSING_CANDIDATE = "no disposable candidate";
 /** INVARIANT only-disposable-rounds-are-shed: a review or a detached fix-dispatch, hosted in a run child it can end. */
 export function isDisposableShedEntry(entry: ContainerShedEntry): boolean {
   const kindOk = entry.what === "review" || (entry.what === "detached" && entry.kind === "fix-dispatch");
-  return kindOk && entry.run_id !== undefined && entry.end !== undefined;
-}
-
-/** W1-T10085's noise: twice the standard error of a share `p` over `n` verdicts. */
-function shareNoise(p: number, n: number): number {
-  return 2 * Math.sqrt(p * (1 - p) / n);
+  return kindOk && entry.run_id !== undefined && Number.isFinite(entry.admitted_at_ms) && entry.end !== undefined;
 }
 
 /**
@@ -1437,9 +1432,11 @@ export function containerCalmBandOf(readings: readonly ContainerShedReading[], n
     if (!calmLevel) continue;
     calmLevel = false;
     const share = hurt / n;
-    const noise = shareNoise(share, n);
-    basis = `${hurt} of ${n} readings at full avg60 <= ${r.level} were followed by a missed tick (noise ${Math.round(noise * 100)}%)`;
-    if (share <= noise) band = r.level;
+    const baseline = closed.filter((sample) => sample.harmed).length / closed.length;
+    const noise = psiLiftNoise(baseline, n);
+    basis = `${hurt} of ${n} readings at full avg60 <= ${r.level} were followed by a missed tick ` +
+      `(baseline ${Math.round(baseline * 100)}%, lift noise ${Math.round(noise * 100)}%)`;
+    if (share - baseline <= noise) band = r.level;
   }
   if (band === null) return { band: null, source: "unlearned", samples: calm, basis: `no calm level within noise: ${basis}` };
   return { band, source: "learned", samples: calm, basis: `learned ${band}: ${basis}` };

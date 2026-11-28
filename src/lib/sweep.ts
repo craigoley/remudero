@@ -17923,7 +17923,10 @@ function* fixDispatchHoldAtHeadSteps(
   options: FixDispatchHoldOptions,
 ): Steps<FixDispatchHold | undefined> {
   const atHead = (l: Record<string, unknown>) => l.pr_number === pr.prNumber && l.head_sha === pr.headSha;
-  const failed = (l: Record<string, unknown>) => isOwnerClaimDecline(l) || isDetachedFixDispatchFailure(l);
+  const shedRunIds = new Set(lines.filter((row) => row.step === "run_child.abort" && row.memory_shed === true &&
+    typeof row.run_id === "string").map((row) => String(row.run_id)));
+  const failed = (l: Record<string, unknown>) => (isOwnerClaimDecline(l) || isDetachedFixDispatchFailure(l)) &&
+    !(typeof l.child_run_id === "string" && shedRunIds.has(l.child_run_id));
   const history: Record<string, unknown>[] = [];
   for (const row of lines) {
     if (fixDispatchSuccess(row, pr) && row.head_sha === pr.headSha) history.length = 0;
@@ -21860,7 +21863,7 @@ function childRestartItem(work: RegisteredChildWork, settled: Promise<void>): Re
   return { what: work.kind === "review" ? "review" : "detached", kind: work.kind, task_id: work.taskId,
     ...(work.prNumber === undefined ? {} : { pr: work.prNumber }),
     ...(work.headSha === undefined ? {} : { head_sha: work.headSha }),
-    phase: work.phase ?? "child", admitted_at_ms: work.registeredAtMs, settled, run_id: work.runId };
+    phase: work.phase ?? "child", admitted_at_ms: work.admittedAtMs ?? work.registeredAtMs, settled, run_id: work.runId };
 }
 export function restartDrainInventory(opts: { children?: boolean } = {}): RestartDrainInventoryEntry[] {
   const owned = [...inFlightReviewRuns].map(([work, review]) => reviewRestartItem(work, review)).concat(
@@ -21960,6 +21963,8 @@ export async function drainInFlightReviews(opts: {
  *  does not own. A posted review frees admission but retains its mutex key until settlement (W1-T11151). */
 export interface ChildWorkRegistration {
   runId: string; kind: string; taskId: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string;
+  /** Original run admission recovered from run_child.spawned on boot. */
+  admittedAtMs?: number;
   readPhase?: () => string | undefined;
   planLane?: boolean;
 }
@@ -22401,6 +22406,7 @@ export function installedDetachedWorkHost(): DetachedWorkHost | undefined {
 /** The child a boot adopted, as the registry takes it: structural, so this module imports nothing from run-child. */
 export interface AdoptedWorkChild {
   runId: string; taskId: string;
+  admittedAtMs?: number;
   work: { kind: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string; planLane?: boolean; inputs?: Record<string, unknown> };
   settled: Promise<unknown>;
   readPhase?: () => string | undefined;
@@ -22419,6 +22425,7 @@ export function adoptChildWork(child: AdoptedWorkChild, log: (step: string, extr
   const planLane = registered.planLane ?? (child.work.kind === "review" && inputs?.planOnlyFiling === true);
   registerChildWork({
     runId: child.runId, taskId: child.taskId, ...registered, ...(planLane ? { planLane } : {}), readPhase: child.readPhase,
+    ...(child.admittedAtMs === undefined ? {} : { admittedAtMs: child.admittedAtMs }),
   });
   const done = child.settled.then(
     (value) => ({ status: "fulfilled" as const, value }),

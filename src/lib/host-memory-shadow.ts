@@ -932,7 +932,13 @@ export function containerLiftOf(history: ContainerPressureSample[], now: number)
   }
   const afterAny = closed.filter((s) => followed(s.at)).length / closed.length;
   const afterProjection = flagged.filter((s) => followed(s.at)).length / flagged.length;
-  return { samples: flagged.length, afterProjection, afterAny, noise: 2 * Math.sqrt(afterAny * (1 - afterAny) / flagged.length) };
+  return { samples: flagged.length, afterProjection, afterAny,
+    noise: psiLiftNoise(afterAny, flagged.length) };
+}
+
+/** W1-T10085's lift rule, shared by the host and container PSI learners. */
+export function psiLiftNoise(baselineShare: number, selectedSamples: number): number {
+  return 2 * Math.sqrt(baselineShare * (1 - baselineShare) / selectedSamples);
 }
 
 function containerPredictsPressure(relation: ContainerLift | undefined): { counts: boolean; basis: string } {

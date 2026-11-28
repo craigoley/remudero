@@ -2991,31 +2991,35 @@ export function shedTeardownMs(stateDir: string, clock: Pick<Clock, "now">): num
 /** W1-T15181: end a run child the rung shed through abortRunChild on its run directory, with {@link shedTeardownMs}. */
 export function endRunChildForShed(
   stateDir: string, runId: string, log: (step: string, extra?: Record<string, unknown>) => void,
+  teardownBudgetMs?: number,
 ): Promise<ContainerShedEndOutcome> {
-  return abortRunChild(join(stateDir, "runs", runId), { log, teardownMs: () => shedTeardownMs(stateDir, systemClock) });
+  return abortRunChild(join(stateDir, "runs", runId), { log: (step, extra) => log(step,
+    step === "run_child.abort" ? { ...extra, memory_shed: true } : extra), teardownMs: () => teardownBudgetMs });
 }
 
 /** W1-T15181: the sweep's inventory with its run children, each given an end under `stateDir`; with no state directory
  *  no entry can be ended, so none is a candidate. */
 export function containerShedInventory(
-  stateDir: string | undefined, log: (step: string, extra?: Record<string, unknown>) => void,
+  stateDir: string | undefined, log: (step: string, extra?: Record<string, unknown>) => void, teardownBudgetMs?: number,
 ): () => ContainerShedEntry[] {
   return () => restartDrainInventory({ children: true }).map((entry) => {
     const runId = entry.run_id;
     if (runId === undefined || stateDir === undefined) return entry;
-    return { ...entry, end: () => endRunChildForShed(stateDir, runId, log) };
+    return { ...entry, end: () => endRunChildForShed(stateDir, runId, log, teardownBudgetMs) };
   });
 }
 
 const containerShedRungs = new WeakMap<object, ContainerShedRung>();
 
 /** The boot's one rung: the injected one, else a default created on the first in-flight tick. */
-function containerShedRungFor(deps: DaemonDeps, log: (step: string, extra?: Record<string, unknown>) => void): ContainerShedRung {
+function containerShedRungFor(deps: DaemonDeps, log: (step: string, extra?: Record<string, unknown>) => void,
+  teardownBudgetMs?: number): ContainerShedRung {
   if (deps.containerShed) return deps.containerShed;
   let rung = containerShedRungs.get(deps);
   if (!rung) {
     rung = createContainerShedRung({
-      read: (atMs, missed) => readContainerShedReading(atMs, missed), inventory: containerShedInventory(deps.fleetLane?.stateDir, log),
+      read: (atMs, missed) => readContainerShedReading(atMs, missed),
+      inventory: containerShedInventory(deps.fleetLane?.stateDir, log, teardownBudgetMs),
       clock: systemClock, log,
     });
     containerShedRungs.set(deps, rung);
@@ -3730,7 +3734,7 @@ function startInFlightTicker(
           startMemoryReadAfterRow(deps, log);
           // W1-T15181: the container-shed rung reads the cgroup this heartbeat sampled; it never blocks the tick.
           try {
-            containerShedRungFor(deps, log).tick(tickObservedAtMs, tickMissed);
+            containerShedRungFor(deps, log, shedTeardownBudgetMs).tick(tickObservedAtMs, tickMissed);
           } catch (e) {
             log("daemon.in_flight_ticker.failed", { phase: owner.phase, surface: "container_shed", error: String((e as Error)?.message ?? e).slice(0, 160) });
           }
@@ -5493,6 +5497,9 @@ export async function runDaemon(
     sweepSeedSource = "live_ledger";
     log("daemon.restart_history_unreadable", { error: String((error as Error)?.message ?? error) });
   }
+  // W1-T15181: derive abort's SIGKILL allowance from the restart-history read already made at boot. A shed must signal
+  // immediately; it cannot synchronously reread the seven-day ledger union on the throttled tick.
+  const shedTeardownBudgetMs = restartWorkHistory(restartHistoryLines, daemonClock.now()).yieldCost.ms;
   deps.bootPhases?.mark("restart_history");
   // W1-T9632: the union holds the live file too, so ONE source seeds the learner and no live row counts twice.
   for (const ms of settledSweepDurations(sweepSeedSource === "ledger_union" ? restartHistoryLines : bootLedgerLines)) recordSettledSweep(sweepBound, ms);
@@ -5817,6 +5824,15 @@ export async function runDaemon(
   // pass returns or the BACKSTOP passes (10-05: first `sweep.pass` 6.7-15.8 min after `daemon.boot`). It holds
   // only what is wired: with nothing to defer, tick 1's admission keeps W1-T4998's no-wait contract.
   const adoptedAll = deps.adoptRunChildren ? deps.adoptRunChildren() : [];
+  const childAdmissionAt = new Map<string, number>();
+  for (const raw of bootLedgerLines) {
+    try {
+      const row = JSON.parse(raw) as { step?: unknown; run_id?: unknown; ts?: unknown };
+      const at = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+      if (row.step === "run_child.spawned" && typeof row.run_id === "string" && Number.isFinite(at))
+        childAdmissionAt.set(row.run_id, at);
+    } catch (error) { void error; /* A torn ledger line supplies no adoption time. */ }
+  }
   const adoptedChildren = adoptedAll.filter((child) => child.work === undefined);
   const children = new Map<string, AdoptedRunChild>(adoptedChildren.map((child) => [child.runId, child]));
   // W1-T11129: the review-lane hook reads `children` and the build lanes, so it is installed only now that both exist,
@@ -5825,7 +5841,8 @@ export async function runDaemon(
   // W1-T9114: a child hosting a review or a fix dispatch holds a review slot, never a lane: it is registered with the sweep.
   // W1-T11790: a retro child adopted here is watched from adoption (its age a lower bound); the watch only observes.
   const retroWatch = retroDurationWatch(daemonClock, log);
-  for (const child of adoptedAll) if (child.work) void adoptChildWork({ ...child, work: child.work,
+  for (const child of adoptedAll) if (child.work) void adoptChildWork({ ...child,
+    admittedAtMs: childAdmissionAt.get(child.runId) ?? Number.NaN, work: child.work,
     ...(child.work.kind === "retro" ? { settled: retroWatch.watch(child.settled, { pid: child.pid, runId: child.runId, basis: "adopted" }) } : {}) }, log);
   let childMode = deps.adoptRunChildren !== undefined;
   const childTaskIds = (): string[] => [...children.values()].map((child) => child.taskId);
