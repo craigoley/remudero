@@ -26061,8 +26061,9 @@ async function runSweepPinned(
       if (reviewRun !== undefined) {
         const fields = { pr_number: pr.prNumber, head: pr.headSha, head_sha: pr.headSha, review_run: reviewRun,
           ...(dedupeKey === undefined ? {} : { dedupe_key: dedupeKey }) };
-        log(FIX_DEFERRED_REVIEW_IN_FLIGHT_STEP, fields);
-        if (dedupeKey !== undefined) appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+        // The CLI's log() sink also appends to this ledger. Write the durable row once through
+        // appendLine; calling both sinks here duplicates the CodeQL dedupe-key deferral.
+        appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
           step: FIX_DEFERRED_REVIEW_IN_FLIGHT_STEP, ...fields });
         claim.release();
         releaseFixCapacity(pr);

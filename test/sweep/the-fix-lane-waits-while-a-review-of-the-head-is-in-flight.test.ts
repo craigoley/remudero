@@ -381,6 +381,42 @@ test("W1-T15005 criterion 1: a round the sweep starts as a run child waits in th
   assert.equal(deferrals([...freed.sweepRows, ...free.rows]).length, 0);
 });
 
+test("W1-T15005 criterion 1: a CodeQL deduped wait writes one durable row with its review owner", async (t) => {
+  const d = dispatcher(t, [claim("review-PR15005-codeql")], {
+    checksState: "green", reviewState: "success", mergeable: true, mergeableState: "blocked", autoMergeArmed: true,
+  });
+  Object.assign(d.pr, { scannerBlocker: { kind: "codeql-singleton", headSha: HEAD, mergeCommitSha: "b".repeat(40),
+    alert: { alertNumber: 915005, ruleId: "js/test-rule", path: "src/example.ts", line: 15, message: "finding" } } });
+  const settle = liveReview(d.pr);
+  t.after(settle);
+
+  const rows: Row[] = [];
+  const spawned: FixDispatchEnvelope[] = [];
+  sweep.installDetachedWorkHost({
+    hosts: new Set(["review", "fix-dispatch"]), mode: () => "on", spawnReview: async () => undefined,
+    spawnFix: async ({ envelope }) => { spawned.push(envelope); return { runId: "unexpected-fix-child", settled: Promise.resolve() }; },
+  });
+  t.after(() => { sweep.installDetachedWorkHost(undefined); sweep.resetChildWork(); });
+  const deps = {
+    ledgerPath: d.ledgerPath, runId: "SWEEP-T15005-codeql", detachFixWait: true,
+    readLedger: () => [claim("review-PR15005-codeql")],
+    appendLine: (_p: string, row: Row) => { rows.push(row); },
+    // Production's CLI log sink appends to this same ledger, so both sinks share the row census.
+    log: (step: string, extra?: Record<string, unknown>) => { rows.push({ step, ...extra }); },
+    arm: () => assert.fail("a scanner-blocked PR cannot be armed"), close: () => assert.fail("a red PR is not closed"),
+    escalate: () => {}, dispatchFix: d.effects.dispatchFix!, claimFixAdmission: () => ({ admitted: true }),
+    readActiveWorkerCount: () => 0, readFixPressure: () => ({ availableMib: 8192, floorMib: 1024 }),
+  } as unknown as sweep.SweepDeps;
+  await withLiveWritesAllowed(async () => { await sweep.runSweep([d.pr], deps); await sweep.drainDetachedSweepActions(); });
+
+  const waiting = deferrals(rows);
+  assert.equal(waiting.length, 1, `THE CLAIM: the log and durable sinks do not duplicate the deferral; rows=${JSON.stringify(rows)}`);
+  assert.deepEqual({ pr: waiting[0]!.pr_number, head: waiting[0]!.head, reviewRun: waiting[0]!.review_run,
+    dedupeKey: waiting[0]!.dedupe_key },
+  { pr: 15005, head: HEAD, reviewRun: "review-PR15005-codeql", dedupeKey: `15005@${HEAD}#915005` });
+  assert.deepEqual(spawned, [], "no fix child starts while the review owns this head");
+});
+
 /** A review owned by ANOTHER process on this host, as an operator `rmd review` writes its claim: a real live process whose
  *  pid, host and start the claim row records (review.ts postReviewPending). Returns the claim's owner fields and its kill. */
 async function otherProcessOwner(t: TestContext) {
