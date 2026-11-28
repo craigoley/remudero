@@ -72,7 +72,10 @@ describe("the real git ports over a fixture operator checkout", () => {
     cut("missing", "gone", "run-W1-T9005-1794000000005", true, true);
     writeFileSync(join(wt.dirty!, "scratch.txt"), "uncommitted\n");
     git(checkout, ["push", "--quiet", "origin", "main:refs/rmd-dispatch/W1-T9004"]);
-    git(checkout, ["commit", "--quiet", "--allow-empty", "-m", "feat: land t9002\n\nRemudero-Task: W1-T9002\n\nCo-authored-by: x <x@x.invalid>"]);
+    // The crediting merge is dated on this process's clock, as the pass's credit window is: git's own clock
+    // does not follow a shifted test clock, and an undated commit fell outside the window (W1-T14786).
+    git(checkout, ["commit", "--quiet", "--allow-empty", "-m", "feat: land t9002\n\nRemudero-Task: W1-T9002\n\nCo-authored-by: x <x@x.invalid>"],
+      { GIT_COMMITTER_DATE: new Date().toISOString() });
     git(checkout, ["push", "--quiet", "origin", "main"]);
     rmSync(wt.missing!, { recursive: true, force: true });
   });

@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { buildSweepEffects, fixCommand, routeFix } from "#test/helpers/run-task-test.js";
+import { systemClock } from "#src/lib/clock.js";
 import type { Config } from "#src/lib/config.js";
 import { DEFAULT_SWEEP_POLICY, dispatchFixSpent, runSweep, type OpenPrView } from "#src/lib/sweep.js";
 import { loadPlan } from "#src/lib/plan.js";
@@ -19,10 +20,11 @@ import { originWithClone } from "#test/helpers/git-repo.js";
 
 const TASK = "W1-T12701";
 const PR = 18422;
-// Relative to the clock the verb reads, so the fixture PR never ages past the 14-day abandonment threshold.
-const STAMP_MS = Date.now() - 60 * 60_000;
-const STAMP = new Date(STAMP_MS).toISOString();
-const PRIOR_STRIKE_AT = new Date(STAMP_MS - 3 * 60 * 60_000).toISOString();
+/** Relative to the clock the verb reads, so the fixture PR never ages past the 14-day abandonment threshold. */
+const ACTIVITY_MS = systemClock.now() - 3_600_000;
+const STAMP = new Date(ACTIVITY_MS).toISOString();
+/** The earlier round at this head, three hours before that activity. */
+const PRIOR_ROUND_MS = ACTIVITY_MS - 3 * 3_600_000;
 const PR_URL = `https://github.com/acme/fixrepo/pull/${PR}`;
 const WORKER = { sessionId: "T12701", costUsd: 0, text: "REPORT\nno change\n", blocks: [], stderr: "", subtype: "success",
   isError: false, apiError: false, verdict: "success", tokens: {}, compactionEvents: [], childEnvKeys: [] } as unknown as WorkerResult;
@@ -60,7 +62,7 @@ function world(t: TestContext, opts: { priorStrike: boolean }): World {
   clone.git("checkout", "--quiet", "main");
   const ledgerPath = join(root, "state", "ledger.ndjson");
   // One earlier round at this head, so the rung asks the progress judge before it spawns a worker.
-  writeFileSync(ledgerPath, opts.priorStrike ? JSON.stringify({ ts: PRIOR_STRIKE_AT, run_id: "FIX-1794600000000",
+  writeFileSync(ledgerPath, opts.priorStrike ? JSON.stringify({ ts: new Date(PRIOR_ROUND_MS).toISOString(), run_id: `FIX-${PRIOR_ROUND_MS}`,
     task_id: TASK, step: "fix.dispatch", lane: "fix", strike: 1, pr_number: PR, head_sha: head, mode: "ci-log",
     round_id: "r1" }) + "\n" : "");
   const config = { root, claudeBin: "/bin/true",
@@ -133,7 +135,7 @@ async function runVerb(w: World, args: string[], route?: NonNullable<Parameters<
     [console.log, console.error] = [log, error];
   }
   const rows = readFileSync(w.ledgerPath, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Row);
-  return { code, printed, rows: rows.filter((r) => String(r.run_id).startsWith("FIX-") && r.run_id !== "FIX-1794600000000") };
+  return { code, printed, rows: rows.filter((r) => String(r.run_id).startsWith("FIX-") && r.run_id !== `FIX-${PRIOR_ROUND_MS}`) };
 }
 
 test("W1-T12701 criterion 1: dispatchFix returns a no-round result for a handoff before any round, and spent after one", async (t) => {

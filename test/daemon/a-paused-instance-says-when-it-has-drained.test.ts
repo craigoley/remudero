@@ -218,10 +218,29 @@ test("W1-T12939 criterion 2: a daemon with no garden and judge census never writ
 
 // ── criterion 3 ──────────────────────────────────────────────────────────────────────────────────
 
-const iso = (agoS: number) => new Date(Date.now() - agoS * 1000).toISOString().replace(/\.\d+Z$/, "Z");
+/** One clock for the fixture and the beat (W1-T14786): the rows are aged from this process's clock, which the shift
+ *  preload moves, and the beat's own `date -u` reads answer from the same clock through a stub, so a shifted run
+ *  shifts both sides together. Every other `date` call reaches the real one. */
+const clockMs = () => Date.now();
+const isoAt = (ms: number) => new Date(ms).toISOString().replace(/\.\d+Z$/, "Z");
+const iso = (agoS: number) => isoAt(clockMs() - agoS * 1000);
 const row = (agoS: number, step: string, rest: Record<string, unknown> = {}) => JSON.stringify({ ts: iso(agoS), step, ...rest });
+const dateStubAt = (ms: number) => `#!/bin/sh
+case "$*" in
+  '-u +%s') echo ${Math.floor(ms / 1000)} ;;
+  '-u +%Y-%m-%dT%H:%M:%SZ') echo ${isoAt(ms)} ;;
+  *) exec /bin/date "$@" ;;
+esac
+`;
+// The beat's temp-leftover walk reads $TMPDIR and the host's /tmp unless the fixture points both at an empty
+// directory; on a busy review host that walk cost each beat about 14 to 25 s (W1-T14786).
+const QUIET_TMP = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14786-quiet-`));
 const drainVerdict = (ledger: string[] | undefined): string => {
-  const b = runBeat(ledger ? { ledger } : {});
+  const b = runBeat({
+    ...(ledger ? { ledger } : {}),
+    dateStub: dateStubAt(clockMs()),
+    env: { TMPDIR: QUIET_TMP, RMD_HEARTBEAT_SYSTEM_TMP: QUIET_TMP },
+  });
   const line = b.published.split("\n").find((l) => l.startsWith("drain_verdict="));
   assert.ok(line, `the beat must publish drain_verdict: ${b.published}`);
   return line.slice("drain_verdict=".length);

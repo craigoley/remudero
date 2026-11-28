@@ -380,10 +380,12 @@ test("W1-T12198 criterion 6: the test goes through the rmd triage command, and t
   }
 });
 
-/** W1-T12790: when a 50 ms timer started before `call` fired, in epoch ms. A synchronous spawn holds it back. */
+/** W1-T12790: when a 50 ms timer started before `call` fired, in epoch ms. A synchronous spawn holds it back.
+ *  The firings are read on the host clock, as the slow check's child stamps its window: a child's clock does not
+ *  follow a shifted test clock, and the two windows then never overlap (W1-T14786). */
 async function timerFirings<T>(call: () => Promise<T>): Promise<{ result: T; firings: number[] }> {
   const firings: number[] = [];
-  const timer = setInterval(() => firings.push(Date.now()), 50);
+  const timer = setInterval(() => firings.push(Math.floor(performance.timeOrigin + performance.now())), 50);
   try {
     return { result: await call(), firings };
   } finally {

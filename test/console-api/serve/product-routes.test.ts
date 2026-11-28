@@ -234,12 +234,14 @@ writeFileSync(process.argv[3], JSON.stringify({ summary: 'A source-backed skirmi
       const queryFn = ((params: { options: { env: Record<string, string>; spawnClaudeCodeProcess?: (opts: unknown) => unknown } }) => {
         queries++;
         // Exercise spawnWorker's real contained child hook; only the SDK stream is a fixture.
-        params.options.spawnClaudeCodeProcess?.({ command: process.execPath,
+        const child = params.options.spawnClaudeCodeProcess?.({ command: process.execPath,
           args: [worker, JSON.stringify({ prompt: args.prompt, tools: args.tools }), output],
-          env: params.options.env, signal: new AbortController().signal });
+          env: params.options.env, signal: new AbortController().signal }) as
+          { exitCode: number | null; once(event: "exit", listener: () => void): unknown } | undefined;
         return (async function* () {
-          const deadline = Date.now() + 5_000;
-          while (!existsSync(output) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+          // Wait for the child itself, never a fixed deadline (W1-T14786): under host load, as when the clock sweep runs
+          // every suite at once, a node child took longer than the 5 s this once allowed, and the test failed healthy.
+          if (child && child.exitCode === null && !existsSync(output)) await new Promise<void>((resolve) => child.once("exit", resolve));
           assert.ok(existsSync(output), "the contained worker child produced its fixture output");
           yield { type: "result", subtype: "success", is_error: false, result: readFileSync(output, "utf8"),
             session_id: "research-process-fixture", total_cost_usd: 0.02, num_turns: 1 };
@@ -958,9 +960,12 @@ async function servedPlanProposal(t: TestContext, timing: PlanChildTiming): Prom
   const countFile = join(root, "child-count.txt");
   const releaseFile = join(root, "child-release");
   // The child waits for releaseFile, then writes its rows. It exits silently once teardown has removed the fixture
-  // root, and loudly (code 3) if it is never released.
+  // root, and loudly (code 3) if it is never released. It stamps its rows on this process's clock, as a real
+  // planner shares the gateway's wall clock: a child's clock does not follow a shifted test clock (W1-T14786).
+  const clockOffsetMs = Date.now() - Math.floor(performance.timeOrigin + performance.now());
   writeFileSync(join(tree, "bin", "rmd"), String.raw`#!/usr/bin/env node
 const fs = require("node:fs");
+const stamp = () => new Date(Date.now() + ${clockOffsetMs}).toISOString();
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(countFile)}, "invoked\n");
 fs.writeFileSync(${JSON.stringify(argsFile)}, args.join("\n") + "\n");
@@ -974,8 +979,8 @@ const poll = () => {
   }
   const mode = args[1].slice("--mode=".length), run_id = "PLAN-" + mode + "-fixture", task_id = "PLAN-" + mode;
   const rows = [
-    { ts: new Date().toISOString(), run_id, task_id, step: "plan.start", lane: "plan", actor_pid: process.pid, mode, brief: args[2] },
-    { ts: new Date().toISOString(), run_id, task_id, step: "pr.opened", lane: "plan", pr_url: "https://github.com/craigoley/wreckterra/pull/42" }
+    { ts: stamp(), run_id, task_id, step: "plan.start", lane: "plan", actor_pid: process.pid, mode, brief: args[2] },
+    { ts: stamp(), run_id, task_id, step: "pr.opened", lane: "plan", pr_url: "https://github.com/craigoley/wreckterra/pull/42" }
   ];
   fs.appendFileSync(${JSON.stringify(ledgerPath)}, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
 };
@@ -1386,9 +1391,12 @@ setTimeout(() => process.exit(2), 30000).unref();
   const token = `${payload}.${sign("RSA-SHA256", Buffer.from(payload), privateKey).toString("base64url")}`;
   const rows = () => existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean)
     .map(line => JSON.parse(line) as Record<string, unknown>) : [];
+  // The served children still running. A wait ends when its state is observed or no served child is left to reach
+  // it, never at a fixed deadline (W1-T14786): under the flake screen's load a healthy boot took past the 20 s this
+  // once allowed. SERVED_PLAN_BACKSTOP stays the backstop for a child that hangs.
+  const serving = new Set<ReturnType<typeof spawn>>();
   const wait = async (ready: () => boolean) => {
-    const deadline = Date.now() + 20_000;
-    while (!ready() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+    while (!ready() && serving.size > 0) await new Promise(resolve => setTimeout(resolve, 25));
     assert.ok(ready(), "owned served fixture reached the requested observable state");
   };
   async function boot() {
@@ -1416,7 +1424,8 @@ setTimeout(() => process.exit(2), 30000).unref();
       RMD_INSTANCE_REGISTRY: join(source, ".remudero", "daemon-instances.yaml"), RMD_SERVE_ROLE: "",
       GH_APP_ID: "", GH_APP_INSTALLATION_ID: "", GH_APP_PRIVATE_KEY_PATH: "",
       GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" }, stdio: ["ignore", "pipe", "pipe"] });
-    const exited = once(child, "exit");
+    serving.add(child);
+    const exited = once(child, "exit").finally(() => serving.delete(child));
     let output = "";
     child.stdout.on("data", data => { output += String(data); });
     child.stderr.on("data", data => { output += String(data); });
@@ -1464,7 +1473,11 @@ setTimeout(() => process.exit(2), 30000).unref();
     boot, send, prepare, rows, wait, generation, tree: join(root, "worktrees", `approve-${sourceHead.slice(0, 12)}`) };
 }
 
-test("served product planning receives the owned gateway from production assembly", { timeout: 60_000 }, async t => {
+// The served-planning tests' backstop (W1-T14786): under the flake screen's load a healthy boot ran past the 60 s these
+// once allowed, so their wait ends on the served state or the child's exit instead. This generous per-test timeout still
+// ends a run whose state is never reached, as under the clock sweep's runSuite, which passes no --test-timeout.
+const SERVED_PLAN_BACKSTOP = { timeout: 600_000 };
+test("served product planning receives the owned gateway from production assembly", SERVED_PLAN_BACKSTOP, async t => {
   const f = await ownedServedPlan(t), app = await f.boot();
   const proposal = await f.prepare(app.base);
   const pending = await f.send(app.base, proposal);
@@ -1531,7 +1544,7 @@ test("served product planning refuses when no owned runner is available", async 
   assert.equal(readFileSync(join(root, "state/ledger.ndjson"), "utf8"), "");
 });
 
-test("served product planning retains fresh source refusal evidence", { timeout: 120_000 }, async t => {
+test("served product planning retains fresh source refusal evidence", SERVED_PLAN_BACKSTOP, async t => {
   await t.test("unavailable", async t => {
     const f = await ownedServedPlan(t), app = await f.boot();
     const command = await f.prepare(app.base);
@@ -1552,7 +1565,7 @@ test("served product planning retains fresh source refusal evidence", { timeout:
   });
 });
 
-test("a registered branch tree at the old sha-keyed path neither blocks served planning nor is touched", { timeout: 90_000 }, async t => {
+test("a registered branch tree at the old sha-keyed path neither blocks served planning nor is touched", SERVED_PLAN_BACKSTOP, async t => {
   // 2026-11-18: a tree another clone left at `approve-<sha12>` blocked every Approve at that sha. Each attempt now
   // cuts its own tree, so a contaminated tree at the old path is never run in, re-added over or removed.
   const f = await ownedServedPlan(t), app = await f.boot();
@@ -1570,7 +1583,7 @@ test("a registered branch tree at the old sha-keyed path neither blocks served p
   assert.equal(f.generation.git("-C", f.tree, "rev-parse", "--abbrev-ref", "HEAD"), "contaminated-owned-tree");
 });
 
-test("served product planning retains owned fresh-source child evidence on recovery", { timeout: 90_000 }, async t => {
+test("served product planning retains owned fresh-source child evidence on recovery", SERVED_PLAN_BACKSTOP, async t => {
   const f = await ownedServedPlan(t), app = await f.boot();
   const command = await f.prepare(app.base);
   const first = await f.send(app.base, command);

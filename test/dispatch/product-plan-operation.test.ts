@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { createHash } from "node:crypto";
-import { repoRoot } from "#test/helpers/repo-root.js";
+import { REPO_ROOT, repoRoot } from "#test/helpers/repo-root.js";
 import { test, type TestContext } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import { compactRotations } from "#src/lib/ledger.js";
@@ -33,6 +33,13 @@ const envelope = { budgetUsd: 30, maxConcurrentBuilds: 1, existingSetupOnly: tru
 const brief = { idea: "private original mobile combat idea", name: "Wreckterra", constraints: ["mobile first"], resourceEnvelope: envelope };
 const REQUESTED = "2026-10-26T01:00:00.000Z";
 const PR_URL = "https://github.com/craigoley/wreckterra/pull/42";
+// The planner and ledger-reader children this suite spawns stamp and stat on the same wall clock as the gateway in
+// production. Under a shifted test clock they take the same shift, so neither side of a comparison sits a shift
+// away from the other (W1-T14786). Unshifted, this adds nothing.
+if (process.env.FK_SHIFT_DAYS) {
+  process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, `--import=${pathToFileURL(join(REPO_ROOT, "scripts", "clock-shift.mjs")).href}`]
+    .filter(Boolean).join(" ");
+}
 
 /** The fake checkout carries no git tree: these suites assume a present table (W1-T11195 tests the reader itself). */
 const runnerConfig = async (_checkout: string, head: string) => ({ state: "present" as const, head, path: ".remudero/mounts.yaml", digest: "0".repeat(64) });

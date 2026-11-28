@@ -110,8 +110,11 @@ function observeBuild(root: string, ledgerPath: string, expectedReason = standDo
 }
 
 function buildInNewProcess(root: string, ledgerPath: string, expectedReason = standDownReason, eioArchive?: string): BuildObservation {
+  // The restarted process reads the same wall and file clock as this one, so a shifted run shifts it too: an
+  // unshifted child would read every file time a shift away from the times this process pinned (W1-T14786).
   const child = spawnSync(process.execPath, [
     "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts",
+    ...(process.env.FK_SHIFT_DAYS ? ["--import", "./scripts/clock-shift.mjs"] : []),
     fileURLToPath(import.meta.url), childFlag, root, ledgerPath, expectedReason,
     ...(eioArchive === undefined ? [] : [eioArchive]),
   ], {
