@@ -10,6 +10,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendLedger } from "./ledger.js";
+import { redactProofOutput } from "./proofExecutor.js";
 import { parseTasksFromYaml } from "./plan.js";
 import { isTaskShardName } from "./task-shard-name.js";
 import { ledgerPathFor } from "./ledger-path.js";
@@ -773,6 +774,29 @@ export const SPAWN_FAILURE_MESSAGE_MAX_CHARS = 240;
 /** W1-T4616: the cause of a spawn that threw before returning — its class, code and a bounded message
  *  with paths, credentials and long tokens redacted — and whether it failed before any model was
  *  selected, so the attempt is a counted coverage gap rather than a model's failure. */
+/** PRIMARY CONTROL (W1-T15168): the most bytes of a failed attempt's stderr its `worker.attempt` row keeps. */
+export const FAILED_ATTEMPT_STDERR_TAIL_BYTES = 600;
+
+/** W1-T15168: the redacted stderr tail a FAILED attempt's receipt keeps, so an early provider exit (for example
+ *  Codex `error_exit_1` in a few seconds, with no session file) can be read from the ledger. INVARIANT
+ *  no-secret-reaches-the-ledger: the whole stderr passes the shared secret redactor BEFORE it is cut, so a secret
+ *  is never sliced into a fragment no pattern matches. A successful attempt, or one with no stderr, gets no field. */
+export function failedAttemptStderrTail(result: Pick<WorkerResult, "subtype" | "stderr"> | undefined): { stderr_tail?: string } {
+  // Reading the result never costs the row: a throwing getter yields no tail, never a lost worker.attempt receipt.
+  try {
+    if (result === undefined || typeof result.subtype !== "string" || result.subtype === "success") return {};
+    if (typeof result.stderr !== "string" || result.stderr.trim().length === 0) return {};
+    const bytes = Buffer.from(redactProofOutput(result.stderr), "utf8");
+    const tail = bytes.length > FAILED_ATTEMPT_STDERR_TAIL_BYTES
+      ? bytes.subarray(bytes.length - FAILED_ATTEMPT_STDERR_TAIL_BYTES).toString("utf8").replace(/^\uFFFD+/, "")
+      : bytes.toString("utf8");
+    return { stderr_tail: tail };
+  } catch {
+    // A throwing getter on the result means no tail is readable; the worker.attempt row still lands without one.
+    return {};
+  }
+}
+
 /** W1-T12151: why a row for a spawn that threw before its result carries no count. */
 export const SPAWN_THREW_BEFORE_RESULT = "spawn-threw-before-result";
 
@@ -905,7 +929,8 @@ export function benchmarkNonDispatchSpawn(
         const row = { step: "worker.attempt", ...fields,
           assignment_observed: id !== undefined && observedAssignmentIds.has(id) };
         write("worker.attempt", { ...fields, ...(guardrailAttempt ? { guardrail_attempt: guardrailAttempt } : {}),
-          benchmark_run: benchmarkRunAttemptReceipt(row) });
+          // W1-T15168: a failed attempt keeps its redacted stderr tail; a successful one keeps none.
+          ...failedAttemptStderrTail(result), benchmark_run: benchmarkRunAttemptReceipt(row) });
         if (id) terminalAssignmentIds.add(id);
         if (result !== undefined) terminalResults.add(result);
       } catch {
