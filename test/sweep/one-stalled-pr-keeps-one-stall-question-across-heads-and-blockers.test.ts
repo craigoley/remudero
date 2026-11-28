@@ -164,5 +164,6 @@ test(`${TITLE}: the real issue gateway rewrites a body with one gh issue edit on
   const gateway = ghIssueGatewayAsync("craigoley", "remudero", { exec: async args => { calls.push(args); return ""; } });
   const url = "https://github.com/craigoley/remudero/issues/17000";
   await gateway.editBody!(url, `**Head:** ${HEAD_B}`);
-  assert.deepEqual(calls, [["issue", "edit", url, "--repo", "craigoley/remudero", "--body", `**Head:** ${HEAD_B}`]]);
+  assert.deepEqual(calls, [["issue", "edit", url, "--repo", "craigoley/remudero", "--body",
+    `**Code-Repository:** craigoley/remudero\n**Head:** ${HEAD_B}`]]);
 });
