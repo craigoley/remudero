@@ -19,7 +19,10 @@ import { originWithClone } from "#test/helpers/git-repo.js";
 
 const TASK = "W1-T12701";
 const PR = 18422;
-const STAMP = "2026-11-14T16:53:54.000Z";
+// Stamps are an hour before the real clock, never fixed dates: the sweep refuses a PR idle 14 days as abandoned, so the
+// old fixed 2026-11-14 stamps turned these cases red on 2026-11-28. The offsets between them are the originals.
+const BASE_MS = Date.now() - 60 * 60 * 1000;
+const STAMP = new Date(BASE_MS).toISOString();
 const PR_URL = `https://github.com/acme/fixrepo/pull/${PR}`;
 const WORKER = { sessionId: "T12701", costUsd: 0, text: "REPORT\nno change\n", blocks: [], stderr: "", subtype: "success",
   isError: false, apiError: false, verdict: "success", tokens: {}, compactionEvents: [], childEnvKeys: [] } as unknown as WorkerResult;
@@ -57,7 +60,7 @@ function world(t: TestContext, opts: { priorStrike: boolean }): World {
   clone.git("checkout", "--quiet", "main");
   const ledgerPath = join(root, "state", "ledger.ndjson");
   // One earlier round at this head, so the rung asks the progress judge before it spawns a worker.
-  writeFileSync(ledgerPath, opts.priorStrike ? JSON.stringify({ ts: "2026-11-14T13:53:43.000Z", run_id: "FIX-1794600000000",
+  writeFileSync(ledgerPath, opts.priorStrike ? JSON.stringify({ ts: new Date(BASE_MS - 10_811_000).toISOString(), run_id: "FIX-1794600000000",
     task_id: TASK, step: "fix.dispatch", lane: "fix", strike: 1, pr_number: PR, head_sha: head, mode: "ci-log",
     round_id: "r1" }) + "\n" : "");
   const config = { root, claudeBin: "/bin/true",
@@ -216,7 +219,7 @@ test("W1-T12701 criterion 5: in runSweep a no-round result stands down, and is n
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t12701-sweep-`));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const ledgerPath = join(dir, "ledger.ndjson");
-  const at = "2026-11-14T16:54:00.000Z";
+  const at = new Date(BASE_MS + 6_000).toISOString();
   const view = { prNumber: PR, prUrl: PR_URL, taskId: TASK, headSha: "f".repeat(40), headRefName: `run-${TASK}-1794675190690`,
     reviewState: "failure", checksState: "green", priorStrikes: 0, lastActivityAt: at, autoMergeArmed: false,
     unmetCriteria: [{ claim: "a criterion", proof: "unit test: fixture", met: false, reason: "not done", proof_exec: "not_executable" }],

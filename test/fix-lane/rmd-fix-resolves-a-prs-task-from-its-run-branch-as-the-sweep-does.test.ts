@@ -14,7 +14,9 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 
 const SHA = "2".repeat(40);
-const STAMP = "2026-11-14T16:41:24.000Z";
+// The PR's last activity is an hour before the real clock, never a fixed date: the sweep's staleness policy refuses a
+// PR idle 14 days as abandoned, so the old fixed 2026-11-14 stamp turned every case red on 2026-11-28 at 16:41Z.
+const STAMP = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 const PR = 18449;
 const PR_URL = `https://github.com/fixture/fix-task/pull/${PR}`;
 const UNRECOVERABLE = "criteria unrecoverable (no Remudero-Task: trailer to resolve them from)";
