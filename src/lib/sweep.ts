@@ -2554,6 +2554,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "fixDispatchFleetHold", // W1-T11168
   "fixDispatchCauseProbe", // W1-T13750
   "readLiveState",
+  "readCommitParents", // W1-T15162
   "terminalFixStandDown",
   "readRedBaseRefreshFacts",
   "depReview",
@@ -2926,6 +2927,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "fixDispatchCauseProbe"
   | "strikeLadder"
   | "readLiveState"
+  | "readCommitParents"
   | "terminalFixStandDown"
   | "readRedBaseRefreshFacts"
   | "depReview"
@@ -6078,6 +6080,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         await maintainPrimaryShadowAlert(() => primaryShadowAlerts.resolved(pr)).catch(primaryShadowAlertFailed);
       }
       return observed;
+    },
+
+    // W1-T15162 — GitHub's own parent list of one commit; a read without one is unreadable, never "no parents".
+    readCommitParents: async (_pr, sha) => {
+      const body = await paceGhEntry(pacer, isGhRateLimitError, () => readJsonImpl(["api", `repos/${owner}/${repo}/git/commits/${sha}`])) as
+        { parents?: Array<{ sha?: unknown }> } | undefined;
+      if (!Array.isArray(body?.parents)) return undefined;
+      return body.parents.flatMap((p) => (typeof p?.sha === "string" ? [p.sha] : []));
     },
 
     // W1-T2752 — the outer, synchronous admission seam `runSweep` consults before EITHER
@@ -18451,6 +18461,11 @@ export interface SweepDeps {
    *  merged mid-sweep, dispatched anyway). Omitted, or a failed read, behaves exactly as before —
    *  standing down fires ONLY on a positive, freshly observed terminal reading. */
   readLiveState?: (pr: OpenPrView) => LiveStateResult | Promise<LiveStateResult>;
+  /** W1-T15162 — a commit's parent shas in order, from GitHub's own commit record (`git/commits/{sha}`), never
+   *  guessed from the head sha. `undefined` is unreadable. Omitted, no update-branch head is ever confirmed. */
+  readCommitParents?: (pr: OpenPrView, sha: string) => readonly string[] | undefined | Promise<readonly string[] | undefined>;
+  /** W1-T15162 — the wait between post-update head reads; omitted, a real timer. */
+  waitForUpdatedHead?: (ms: number) => Promise<void>;
   /** Full act-time guard read, shared with fix arms; stale-red release still reads again. */
   readLiveStateAtAct?: SweepDeps["readLiveState"];
   /** W1-T11153: the open-PR reader the light pass started from, re-read when a freed lane refills so a PR that
@@ -30079,7 +30094,7 @@ async function runSweepPinned(
                   recordForcedRefresh(deps, pr, "stale-base"); // W1-T7735: W1-T2789
                   try {
                     const outcome = await deps.updateBranch!(pr);
-                    const updatedHead = outcome === "updated" ? await confirmedUpdateHead(deps.readLiveState, pr, pr.headSha) : undefined;
+                    const updatedHead = outcome === "updated" ? await confirmedUpdateHead(deps, pr, pr.headSha) : {};
                     appendLine(deps.ledgerPath, {
                       run_id: deps.runId,
                       task_id: pr.taskId ?? "SWEEP",
@@ -30088,7 +30103,7 @@ async function runSweepPinned(
                       pr_number: pr.prNumber,
                       pr_url: pr.prUrl,
                       head_sha: pr.headSha,
-                      ...(updatedHead !== undefined ? { new_head_sha: updatedHead } : {}),
+                      ...updatedHead,
                       main_tip_sha: staleBaseReleaseTarget.mainTipSha,
                       behind_by: decision.behindBy,
                       matching_base_files: decision.matchingBaseFiles,
@@ -30915,8 +30930,7 @@ async function runSweepPinned(
       });
       try {
         const outcome = await deps.updateBranch(target);
-        const updatedHead = outcome === "updated"
-          ? await confirmedUpdateHead(deps.readLiveState, viewOf(target), target.headSha) : undefined;
+        const updatedHead = outcome === "updated" ? await confirmedUpdateHead(deps, viewOf(target), target.headSha) : {};
         appendLine(deps.ledgerPath, {
           run_id: deps.runId,
           task_id: target.taskId ?? "SWEEP",
@@ -30924,7 +30938,7 @@ async function runSweepPinned(
           pr_number: target.prNumber,
           pr_url: target.prUrl,
           head_sha: target.headSha,
-          ...(updatedHead !== undefined ? { new_head_sha: updatedHead } : {}),
+          ...updatedHead,
           ...staleWorkflowFields,
           ...behindFields,
           ...updateReasonFields,
@@ -31393,7 +31407,8 @@ export function armedRatchetRejudgeTargets(openPrs: readonly OpenPrView[], ledge
 export async function runArmedRatchetRejudge(
   openPrs: readonly OpenPrView[],
   deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "readLedger" | "appendLine" | "dryRun" | "now" |
-    "readMainTip" | "readMergedRatchets" | "readActionsStatusSummary" | "readMainChangedPaths" | "readLiveState">,
+    "readMainTip" | "readMergedRatchets" | "readActionsStatusSummary" | "readMainChangedPaths" | "readLiveState" |
+    "readCommitParents" | "waitForUpdatedHead">,
 ): Promise<number[]> {
   const read = deps.readMergedRatchets;
   if (deps.dryRun || !read || !deps.readMainTip) return [];
@@ -31446,9 +31461,8 @@ export async function runArmedRatchetRejudge(
     appendLine(deps.ledgerPath, { ...update, step: "sweep.update_branch.attempted" });
     try {
       const outcome = await deps.updateBranch(target);
-      const updatedHead = outcome === "updated" ? await confirmedUpdateHead(deps.readLiveState, pr, pr.headSha) : undefined;
-      appendLine(deps.ledgerPath, { ...update, step: `sweep.update_branch.${outcome}`,
-        ...(updatedHead !== undefined ? { new_head_sha: updatedHead } : {}) });
+      const updatedHead = outcome === "updated" ? await confirmedUpdateHead(deps, pr, pr.headSha) : {};
+      appendLine(deps.ledgerPath, { ...update, step: `sweep.update_branch.${outcome}`, ...updatedHead });
     } catch (e) {
       appendLine(deps.ledgerPath, { ...update, step: "sweep.update_branch.error", error: String((e as Error)?.message ?? e) });
     }
@@ -33074,24 +33088,45 @@ export function lightPassEarlyReviewBatch(
   return earlyCandidates.filter((pr) => inQueueOrder([pr, oldestDelayed])[0] === pr);
 }
 
-/** W1-T15162 — the head a successful update-branch produced, under the W1-T9949 post-update lag guard: GitHub applies
- *  the update asynchronously, so a live read still naming `oldHead` is re-read once, and a read that stays lagging, is
- *  not ok, or throws confirms nothing (`new_head_sha` stays unset rather than recording the old head). */
+/** W1-T15162 — the bounded backoff between post-update head reads while GitHub applies the update (7.75s in all). */
+export const UPDATE_HEAD_POLL_WAITS_MS: readonly number[] = [250, 500, 1000, 2000, 4000];
+
+/** W1-T15162 — the head a successful update-branch produced. GitHub applies the update asynchronously, so the live
+ *  head is polled under {@link UPDATE_HEAD_POLL_WAITS_MS} until it leaves `oldHead`, and the first other head read is
+ *  credited to the update only when GitHub's parent list for it names a two-parent merge whose first parent is
+ *  `oldHead`. A head that never moves, a failed or thrown read, an unreadable parent list, or any other commit (an
+ *  author or fix-round push, on `oldHead` or on the update's merge) confirms nothing: the row then names why in
+ *  `update_head_unconfirmed` and carries no `new_head_sha`. Without both readers no head is read or recorded. */
 async function confirmedUpdateHead(
-  read: SweepDeps["readLiveState"], pr: OpenPrView, oldHead: string,
-): Promise<string | undefined> {
-  if (read === undefined) return undefined;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    let live: LiveStateResult;
+  deps: Pick<SweepDeps, "readLiveState" | "readCommitParents" | "waitForUpdatedHead">, pr: OpenPrView, oldHead: string,
+): Promise<{ new_head_sha?: string; update_head_unconfirmed?: string }> {
+  const { readLiveState: read, readCommitParents: parentsOf } = deps;
+  if (read === undefined || parentsOf === undefined) return {};
+  const wait = deps.waitForUpdatedHead ?? (async (ms: number) => { await delay(ms); });
+  for (let reads = 1; ; reads++) {
+    let head: string | undefined;
     try {
-      live = await read(pr);
-    } catch {
-      return undefined; // unreadable: the update stands, its head is unconfirmed
+      const live = await read(pr);
+      head = live.ok === true && typeof live.headSha === "string" && live.headSha !== "" ? live.headSha : undefined;
+    } catch (error) {
+      return { update_head_unconfirmed: `live head read failed: ${String((error as Error)?.message ?? error)}` };
     }
-    if (live.ok !== true || typeof live.headSha !== "string" || live.headSha === "") return undefined;
-    if (live.headSha !== oldHead) return live.headSha;
+    if (head === undefined) return { update_head_unconfirmed: "live head unreadable" };
+    if (head !== oldHead) {
+      let parents: readonly string[] | undefined;
+      try {
+        parents = await parentsOf(pr, head);
+      } catch (error) {
+        return { update_head_unconfirmed: `parents of ${head} unreadable: ${String((error as Error)?.message ?? error)}` };
+      }
+      if (parents === undefined) return { update_head_unconfirmed: `parents of ${head} unreadable` };
+      if (parents.length === 2 && parents[0] === oldHead) return { new_head_sha: head };
+      return { update_head_unconfirmed: `head ${head} is not a merge onto ${oldHead} (parents ${parents.join(",") || "none"})` };
+    }
+    const waitMs = UPDATE_HEAD_POLL_WAITS_MS[reads - 1];
+    if (waitMs === undefined) return { update_head_unconfirmed: `head still ${oldHead} after ${reads} reads` };
+    await wait(waitMs);
   }
-  return undefined;
 }
 
 /** W1-T14073 — A RE-ENTERED REVIEW INPUT QUEUES FROM WHEN IT BECAME ELIGIBLE, NOT FROM ITS PR'S AGE. Generalizes
@@ -33145,8 +33180,8 @@ function reviewInputQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>
     const heads = eligibleHeads.get(prKey) ?? new Set<string>();
     eligibleHeads.set(prKey, heads.add(head));
   }
-  // The update's head is the next eligible head after its row, credited only when the row's lag-guarded
-  // `new_head_sha` confirms it: a row without one, or a later push, fix head or stale read, credits nothing.
+  // The update's head is the next eligible head after its row, credited only when the row's merge-confirmed
+  // `new_head_sha` names it: a row without one, or a later push, fix head or stale read, credits nothing.
   for (const [prKey, updates] of sweepUpdates) {
     const events = eligibleEvents.get(prKey) ?? [];
     for (const update of updates) {

@@ -1,22 +1,26 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { appendFileSync, readFileSync, rmSync } from "node:fs";
+import { fakeGitHubPullRequest, type FakePullHeadRead, type FakePullRequest } from "#test/helpers/fake-github.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import {
   DEFAULT_SWEEP_POLICY, drainInFlightReviews, lightPassReviewQueuedAt, observeLightPassReviewEligibility, runSweep,
-  runSweepLightPass, type LiveStateResult, type OpenPrView, type SweepDeps,
+  runSweepLightPass, UPDATE_HEAD_POLL_WAITS_MS, type OpenPrView, type SweepDeps,
 } from "#test/helpers/sweep-test.js";
 
 // W1-T15162: a head made by the sweep's own branch update keeps the review queue place of the unreviewed head it
 // replaced. The fixture is #21097's rows of 2026-11-27: eligible at ba824f8 from 11:18:01Z, a sweep branch update to
 // bb74b21 at 12:41:24Z, bb74b21 first eligible at 12:54:33Z, and a PR first eligible at 11:42Z competing for one slot.
-// Every `sweep.update_branch.updated` row below is written by runSweep's own update-branch lane, never by hand: the
-// live head read after the update is a stub that can lag (still naming the old head), fail (ok:false) or throw.
+// Every `sweep.update_branch.updated` row below is written by runSweep's own update-branch lane, never by hand, against
+// fakeGitHubPullRequest (test/helpers/fake-github.ts): update-branch is accepted at once and GitHub writes its merge
+// commit (parents: the old head, then main) some simulated time later; a replica read can lag behind the true head; and
+// an author or fix round can push its own commit at any simulated moment. The poll's waits are the fake's only clock.
 
 const at = (hms: string): string => `2026-11-27T${hms}.000Z`;
 const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 const ONE_LANE = { ...DEFAULT_SWEEP_POLICY, reviewLanes: 1, reviewLaneMin: 1, reviewLaneMax: 1 };
 const UPDATE_POLICY = { ...ONE_LANE, reviewWaitingBranchRefreshEnabled: true, reviewWaitingBranchRefreshThreshold: 10 };
+const UPDATED_AT = at("12:41:24");
 
 const appendAt = (path: string, row: object, ts: string): void => appendFileSync(path, JSON.stringify({ ts, ...row }) + "\n");
 
@@ -62,42 +66,42 @@ function fixtureLedger() {
 }
 type Ledger = ReturnType<typeof fixtureLedger>;
 
-/** One live head read after the update settles: a result, or an error the read throws. */
-type PostUpdateRead = LiveStateResult | Error;
+/** #21097 on fakeGitHubPullRequest: head ba824f8 (parent 2be9c05); an accepted update lands merge bb74b21 onto main. */
+const AT_BA824F8 = { head: "ba824f8", headParents: ["2be9c05"] };
+const MERGE_BB74B21 = { merge: "bb74b21", mainTip: "main-tip" };
 
-/** Drives the real full-sweep update-branch lane on `view` (17 commits behind main, a distance refresh) at `ts`.
- *  `reads` answers each live head read made after GitHub accepted the update; an exhausted list answers ok:false. */
-async function sweepUpdate(ledger: Ledger, ts: string, view: OpenPrView, reads: PostUpdateRead[]) {
-  ledger.setClock(ts);
-  let updated = 0;
-  let postUpdateReads = 0;
-  const queue = [...reads];
+/** Drives the real full-sweep update-branch lane on `view` (17 commits behind main, a distance refresh) against `gh`.
+ *  `onAccepted` runs the moment GitHub accepts the update, before the sweep's first head read. */
+async function sweepUpdate(ledger: Ledger, view: OpenPrView, gh: FakePullRequest, onAccepted?: () => void) {
+  ledger.setClock(UPDATED_AT);
   const deps: SweepDeps = {
     ...ledger.baseDeps(),
     behindMainByPr: new Map([[view.prNumber, 17]]),
     updateBranch: (target) => {
-      assert.equal(target.headSha, view.headSha);
-      updated++;
-      return "updated";
+      const outcome = gh.updateBranch(target.headSha);
+      onAccepted?.();
+      return outcome;
     },
-    readLiveState: (p) => {
-      if (updated === 0) return { ok: true, state: "OPEN", headSha: p.headSha };
-      postUpdateReads++;
-      const next = queue.shift() ?? { ok: false };
-      if (next instanceof Error) throw next;
-      return next;
-    },
+    readLiveState: () => gh.readLiveState(),
+    readCommitParents: (_pr, sha) => gh.readCommitParents(sha),
+    waitForUpdatedHead: (ms) => gh.wait(ms),
   };
   await runSweep([view], deps, UPDATE_POLICY);
-  assert.equal(updated, 1, "the sweep's own update-branch lane pressed the update");
+  const accepted = gh.calls.findIndex((c) => c.method === "updateBranch");
+  assert.ok(accepted >= 0, "the sweep's own update-branch lane pressed the update");
+  assert.equal(gh.calls.filter((c) => c.method === "updateBranch").length, 1);
   const row = ledger.rows().findLast((r) => r.step === "sweep.update_branch.updated" && r.pr_number === view.prNumber);
-  assert.ok(row, "the update lane wrote its sweep.update_branch.updated row");
+  assert.ok(row, "GitHub accepted the update and the lane wrote its sweep.update_branch.updated row");
   assert.equal(row.head_sha, view.headSha);
   assert.notEqual(row.new_head_sha, view.headSha, "a lagging read never records the old head as the update's head");
-  return { row, postUpdateReads };
+  const after = gh.calls.slice(accepted + 1);
+  return {
+    row,
+    reads: after.filter((c) => c.method === "readLiveState").length,
+    waits: after.filter((c) => c.method === "wait").map((c) => c.args[0]),
+    parentReads: after.filter((c) => c.method === "readCommitParents").map((c) => c.args[0]),
+  };
 }
-
-const open = (headSha: string): LiveStateResult => ({ ok: true, state: "OPEN", headSha });
 
 async function lightFirst(ledger: Ledger, ts: string, prs: OpenPrView[]): Promise<number | undefined> {
   ledger.setClock(ts);
@@ -130,10 +134,10 @@ function seed(ledger: Ledger) {
   const unreviewed = { ...refreshed, headSha: "ba824f8", lastActivityAt: at("11:18:00") };
   ledger.observe(at("11:18:01"), [unreviewed]);
   ledger.observe(at("11:42:00"), [competitor]);
-  return { unreviewed, competitor, updated: { ...unreviewed, headSha: "bb74b21", lastActivityAt: at("12:41:24") } };
+  return { unreviewed, competitor, updated: { ...unreviewed, headSha: "bb74b21", lastActivityAt: UPDATED_AT } };
 }
 
-/** A head someone other than the sweep's update produced, after the update. */
+/** The PR at a head someone other than the sweep's update produced. */
 const pushedHead = (view: OpenPrView, sha: string, ts: string): OpenPrView => ({ ...view, headSha: sha, lastActivityAt: ts });
 
 async function withFixture(body: (ledger: Ledger) => Promise<void>): Promise<void> {
@@ -147,13 +151,17 @@ async function withFixture(body: (ledger: Ledger) => Promise<void>): Promise<voi
 
 // W1-T15162 criterion 1 in test/review/a-sweep-branch-update-keeps-the-review-queue-place.test.ts
 test("W1-T15162 criterion 1: a head the sweep's branch update made keeps the unreviewed earlier head's queue place", async () => {
-  // GitHub's update-branch is asynchronous: the first live read still names ba824f8. The lag guard re-reads and
-  // confirms bb74b21, so bb74b21 queues on ba824f8's 11:18:01Z key, ahead of the input first eligible at 11:42Z.
+  // The reviewer's probe: GitHub applies the update 600ms after accepting it, so two reads still name ba824f8. The
+  // poll backs off and the third read sees bb74b21, whose own parents [ba824f8, main] prove it is the update's merge.
   await withFixture(async (ledger) => {
     const { unreviewed, competitor, updated } = seed(ledger);
-    const { row, postUpdateReads } = await sweepUpdate(ledger, at("12:41:24"), unreviewed, [open("ba824f8"), open("bb74b21")]);
-    assert.equal(postUpdateReads, 2, "the lagging read was re-read once");
+    const gh = fakeGitHubPullRequest({ ...AT_BA824F8, update: { ...MERGE_BB74B21, lagMs: 600 } });
+    const { row, reads, waits, parentReads } = await sweepUpdate(ledger, unreviewed, gh);
+    assert.equal(reads, 3, "read A, A, then B");
+    assert.deepEqual(waits, UPDATE_HEAD_POLL_WAITS_MS.slice(0, 2), "the poll backed off between the lagging reads");
+    assert.deepEqual(parentReads, ["bb74b21"], "B was confirmed by its commit's parent list");
     assert.equal(row.new_head_sha, "bb74b21");
+    assert.equal(row.update_head_unconfirmed, undefined);
     assert.equal(ledger.keyOf(at("12:50:00"), updated), at("11:18:01"), "before its own eligibility it already holds A's key");
     ledger.observe(at("12:54:33"), [updated]);
     assert.equal(ledger.keyOf(at("13:22:05"), updated), at("11:18:01"), "B's admission key is A's first eligibility");
@@ -164,11 +172,41 @@ test("W1-T15162 criterion 1: a head the sweep's branch update made keeps the unr
       "the full pass ranks the updated head on the same inherited key");
   });
 
-  // A read that is current on the first try confirms the head with no re-read.
+  // A longer lag: the merge lands 1.5s after acceptance, so three reads name ba824f8 before bb74b21.
   await withFixture(async (ledger) => {
     const { unreviewed, updated } = seed(ledger);
-    const { row, postUpdateReads } = await sweepUpdate(ledger, at("12:41:24"), unreviewed, [open("bb74b21")]);
-    assert.equal(postUpdateReads, 1);
+    const gh = fakeGitHubPullRequest({ ...AT_BA824F8, update: { ...MERGE_BB74B21, lagMs: 1500 } });
+    const { row, reads, waits } = await sweepUpdate(ledger, unreviewed, gh);
+    assert.equal(reads, 4);
+    assert.deepEqual(waits, UPDATE_HEAD_POLL_WAITS_MS.slice(0, 3));
+    assert.equal(row.new_head_sha, "bb74b21");
+    ledger.observe(at("12:54:33"), [updated]);
+    assert.equal(ledger.keyOf(at("13:22:05"), updated), at("11:18:01"));
+  });
+
+  // A stale replica: the merge has already landed, but the next three reads still return ba824f8.
+  await withFixture(async (ledger) => {
+    const { unreviewed, competitor, updated } = seed(ledger);
+    const stale = { stale: "ba824f8" };
+    const gh = fakeGitHubPullRequest({
+      ...AT_BA824F8, update: { ...MERGE_BB74B21, lagMs: 0 }, readsAfterUpdate: [stale, stale, stale],
+    });
+    const { row, reads, parentReads } = await sweepUpdate(ledger, unreviewed, gh);
+    assert.equal(reads, 4, "three stale reads of A, then B");
+    assert.deepEqual(parentReads, ["bb74b21"]);
+    assert.equal(row.new_head_sha, "bb74b21");
+    ledger.observe(at("12:54:33"), [updated]);
+    assert.equal(ledger.keyOf(at("13:22:05"), updated), at("11:18:01"));
+    assert.equal(await lightFirst(ledger, at("13:22:05"), [updated, competitor]), 21097);
+  });
+
+  // A current first read confirms the merge with no wait.
+  await withFixture(async (ledger) => {
+    const { unreviewed, updated } = seed(ledger);
+    const gh = fakeGitHubPullRequest({ ...AT_BA824F8, update: { ...MERGE_BB74B21, lagMs: 0 } });
+    const { row, reads, waits } = await sweepUpdate(ledger, unreviewed, gh);
+    assert.equal(reads, 1);
+    assert.deepEqual(waits, []);
     assert.equal(row.new_head_sha, "bb74b21");
     ledger.observe(at("12:54:33"), [updated]);
     assert.equal(ledger.keyOf(at("13:22:05"), updated), at("11:18:01"));
@@ -181,8 +219,12 @@ test("W1-T15162 criterion 1: a head the sweep's branch update made keeps the unr
     const competitor = pr(21112, at("11:42:00"), "head-21112");
     ledger.observe(at("12:00:00"), [firstHead]);
     ledger.observe(at("11:42:00"), [competitor]);
-    const updated = pushedHead(firstHead, "first-head-update", at("12:41:24"));
-    await sweepUpdate(ledger, at("12:41:24"), firstHead, [open(firstHead.headSha), open(updated.headSha)]);
+    const updated = pushedHead(firstHead, "first-head-update", UPDATED_AT);
+    const gh = fakeGitHubPullRequest({
+      ...AT_BA824F8, head: firstHead.headSha, update: { ...MERGE_BB74B21, merge: updated.headSha, lagMs: 400 },
+    });
+    const { row } = await sweepUpdate(ledger, firstHead, gh);
+    assert.equal(row.new_head_sha, "first-head-update");
     ledger.observe(at("12:54:33"), [updated]);
     assert.equal(ledger.keyOf(at("13:22:05"), updated), at("12:00:00"), "the first head's eligibility, not createdAt 06:00Z");
     assert.equal(await lightFirst(ledger, at("13:22:05"), [updated, competitor]), 21112,
@@ -192,13 +234,20 @@ test("W1-T15162 criterion 1: a head the sweep's branch update made keeps the unr
 
 // W1-T15162 criterion 2 in test/review/a-sweep-branch-update-keeps-the-review-queue-place.test.ts
 test("W1-T15162 criterion 2: invariant a-new-head-of-new-work-requeues — a pushed head, or one after a judged head, keeps its own eligibility", async () => {
-  // The live read fails (ok:false) after the update: the row confirms no head, and a human push C that lands before
-  // the update's head is ever eligible keeps its own key instead of being taken for the update's head.
+  // The reviewer's probe: an author commits C on ba824f8 and pushes 200ms after GitHub accepted the update, before
+  // the update's merge lands (GitHub then drops it). The reads go A, then C: C's first parent IS ba824f8, but it is an
+  // ordinary one-parent commit, not the update's merge, so it is not credited and keeps its own 12:54:33Z key.
   await withFixture(async (ledger) => {
     const { unreviewed, competitor, updated } = seed(ledger);
-    const { row } = await sweepUpdate(ledger, at("12:41:24"), unreviewed, [{ ok: false }]);
-    assert.equal(row.new_head_sha, undefined, "an unread live head confirms nothing");
-    const pushed = pushedHead(updated, "human-push-c", at("12:50:00"));
+    const gh = fakeGitHubPullRequest({ ...AT_BA824F8, update: { ...MERGE_BB74B21, lagMs: 300 } });
+    const { row, reads, parentReads } = await sweepUpdate(ledger, unreviewed, gh,
+      () => gh.push("human-push-c", ["ba824f8"], 200));
+    assert.equal(gh.head(), "human-push-c", "the push landed and GitHub dropped the update's merge");
+    assert.equal(reads, 2, "read A, then C");
+    assert.deepEqual(parentReads, ["human-push-c"]);
+    assert.equal(row.new_head_sha, undefined, "C is not recorded as the update's head");
+    assert.match(String(row.update_head_unconfirmed), /human-push-c is not a merge onto ba824f8/);
+    const pushed = pushedHead(updated, "human-push-c", at("12:41:24"));
     ledger.observe(at("12:54:33"), [pushed]);
     assert.equal(ledger.keyOf(at("13:22:05"), pushed), at("12:54:33"), "C keeps its own W1-T14073 first eligibility");
     assert.equal(await lightFirst(ledger, at("13:22:05"), [pushed, competitor]), 21112,
@@ -206,43 +255,73 @@ test("W1-T15162 criterion 2: invariant a-new-head-of-new-work-requeues — a pus
     assert.equal(await fullFirst(ledger, at("13:22:05"), [pushed, competitor]), 21112);
   });
 
-  // The live read lags on every try: the row never records the old head, and the next head confirms nothing.
-  await withFixture(async (ledger) => {
-    const { unreviewed, updated } = seed(ledger);
-    const { row, postUpdateReads } = await sweepUpdate(ledger, at("12:41:24"), unreviewed,
-      [open("ba824f8"), open("ba824f8"), open("ba824f8")]);
-    assert.equal(postUpdateReads, 2, "one re-read, then the head stays unconfirmed");
-    assert.equal(row.new_head_sha, undefined);
-    const pushed = pushedHead(updated, "human-push-c", at("12:50:00"));
-    ledger.observe(at("12:54:33"), [pushed]);
-    assert.equal(ledger.keyOf(at("13:22:05"), pushed), at("12:54:33"));
-  });
-
-  // The live read throws after the update: the update stands, its head is unconfirmed.
-  await withFixture(async (ledger) => {
-    const { unreviewed, updated } = seed(ledger);
-    const { row } = await sweepUpdate(ledger, at("12:41:24"), unreviewed, [new Error("HTTP 502")]);
-    assert.equal(row.new_head_sha, undefined);
-    const pushed = pushedHead(updated, "human-push-c", at("12:50:00"));
-    ledger.observe(at("12:54:33"), [pushed]);
-    assert.equal(ledger.keyOf(at("13:22:05"), pushed), at("12:54:33"));
-  });
-
-  // The row confirms bb74b21, but a human push C lands before bb74b21 is ever eligible: C is the next eligible
-  // head, it is not the confirmed one, and it keeps its own key.
+  // The update's merge B lands at 300ms and a human pushes C on top of B at 400ms, between the update and the read
+  // that would have confirmed B. C's first parent is B, not ba824f8: C keeps its own key.
   await withFixture(async (ledger) => {
     const { unreviewed, competitor, updated } = seed(ledger);
-    await sweepUpdate(ledger, at("12:41:24"), unreviewed, [open("bb74b21")]);
-    const pushed = pushedHead(updated, "human-push-c", at("12:50:00"));
+    const gh = fakeGitHubPullRequest({ ...AT_BA824F8, update: { ...MERGE_BB74B21, lagMs: 300 } });
+    const { row, reads, waits } = await sweepUpdate(ledger, unreviewed, gh, () => gh.push("human-push-c", ["bb74b21"], 400));
+    assert.equal(reads, 3, "read A, A, then C");
+    assert.deepEqual(waits, UPDATE_HEAD_POLL_WAITS_MS.slice(0, 2));
+    assert.equal(row.new_head_sha, undefined);
+    const pushed = pushedHead(updated, "human-push-c", at("12:41:30"));
     ledger.observe(at("12:54:33"), [pushed]);
     assert.equal(ledger.keyOf(at("13:22:05"), pushed), at("12:54:33"));
     assert.equal(await lightFirst(ledger, at("13:22:05"), [pushed, competitor]), 21112);
   });
 
+  // A fix round pushes on the update's merge in the same instant GitHub accepted it, before even the first read.
+  await withFixture(async (ledger) => {
+    const { unreviewed, competitor, updated } = seed(ledger);
+    const gh = fakeGitHubPullRequest({ ...AT_BA824F8, update: { ...MERGE_BB74B21, lagMs: 0 } });
+    const { row, reads } = await sweepUpdate(ledger, unreviewed, gh, () => gh.push("fix-1", ["bb74b21"]));
+    assert.equal(reads, 1);
+    assert.equal(row.new_head_sha, undefined);
+    const fixed = pushedHead(updated, "fix-1", UPDATED_AT);
+    ledger.observe(at("12:54:33"), [fixed]);
+    assert.equal(ledger.keyOf(at("13:22:05"), fixed), at("12:54:33"));
+    assert.equal(await lightFirst(ledger, at("13:22:05"), [fixed, competitor]), 21112);
+  });
+
+  // A read that fails (ok:false), throws, or names a commit GitHub has no parent list for confirms nothing, and the
+  // head that is eligible next keeps its own key.
+  for (const read of ["unreadable", new Error("HTTP 502"), { stale: "unknown-commit" }] satisfies FakePullHeadRead[]) {
+    await withFixture(async (ledger) => {
+      const { unreviewed, updated } = seed(ledger);
+      const gh = fakeGitHubPullRequest({
+        ...AT_BA824F8, update: { ...MERGE_BB74B21, lagMs: 0 }, readsAfterUpdate: [read],
+      });
+      const { row, reads } = await sweepUpdate(ledger, unreviewed, gh);
+      assert.equal(reads, 1, `one read: ${String(read instanceof Error ? read.message : JSON.stringify(read))}`);
+      assert.equal(row.new_head_sha, undefined);
+      assert.equal(typeof row.update_head_unconfirmed, "string");
+      const pushed = pushedHead(updated, "human-push-c", at("12:50:00"));
+      ledger.observe(at("12:54:33"), [pushed]);
+      assert.equal(ledger.keyOf(at("13:22:05"), pushed), at("12:54:33"));
+    });
+  }
+
+  // The bound: GitHub has not applied the update within the poll's whole backoff. Nothing is confirmed, and the merge
+  // that lands later is read as any other new head, with its own key.
+  await withFixture(async (ledger) => {
+    const { unreviewed, updated } = seed(ledger);
+    const gh = fakeGitHubPullRequest({ ...AT_BA824F8, update: { ...MERGE_BB74B21, lagMs: 60_000 } });
+    const { row, reads, waits } = await sweepUpdate(ledger, unreviewed, gh);
+    assert.equal(reads, UPDATE_HEAD_POLL_WAITS_MS.length + 1);
+    assert.deepEqual(waits, [...UPDATE_HEAD_POLL_WAITS_MS]);
+    assert.equal(row.new_head_sha, undefined);
+    assert.match(String(row.update_head_unconfirmed), /still ba824f8/);
+    await gh.wait(60_000);
+    assert.equal(gh.head(), "bb74b21");
+    ledger.observe(at("12:54:33"), [updated]);
+    assert.equal(ledger.keyOf(at("13:22:05"), updated), at("12:54:33"));
+  });
+
   // The confirmed head was eligible, then an author pushes C on top of it: B keeps A's key, C its own.
   await withFixture(async (ledger) => {
     const { unreviewed, updated } = seed(ledger);
-    await sweepUpdate(ledger, at("12:41:24"), unreviewed, [open("bb74b21")]);
+    const gh = fakeGitHubPullRequest({ ...AT_BA824F8, update: { ...MERGE_BB74B21, lagMs: 0 } });
+    await sweepUpdate(ledger, unreviewed, gh);
     ledger.observe(at("12:54:33"), [updated]);
     const pushed = pushedHead(updated, "author-push-c", at("13:05:00"));
     ledger.observe(at("13:10:00"), [pushed]);
@@ -259,14 +338,16 @@ test("W1-T15162 criterion 2: invariant a-new-head-of-new-work-requeues — a pus
       "a new head with no sweep update before it queues from 12:54:33Z, behind 11:42Z");
   });
 
-  // The sweep updated a head that already had a verdict: the new head is a re-review and queues from its own time.
+  // The sweep updated a head that already had a verdict: the confirmed merge is a re-review and queues from its own time.
   await withFixture(async (ledger) => {
     const { unreviewed, competitor, updated } = seed(ledger);
     appendAt(ledger.ledgerPath, {
       run_id: "sweep-update-queue-test", task_id: "W1-T21097", step: "review.posted", state: "failure",
       pr_url: "https://github.com/o/r/pull/21097", head_sha: "ba824f8",
     }, at("12:00:00"));
-    await sweepUpdate(ledger, at("12:41:24"), unreviewed, [open("bb74b21")]);
+    const gh = fakeGitHubPullRequest({ ...AT_BA824F8, update: { ...MERGE_BB74B21, lagMs: 0 } });
+    const { row } = await sweepUpdate(ledger, unreviewed, gh);
+    assert.equal(row.new_head_sha, "bb74b21");
     ledger.observe(at("12:54:33"), [updated]);
     assert.equal(ledger.keyOf(at("13:22:05"), updated), at("12:54:33"));
     assert.equal(await lightFirst(ledger, at("13:22:05"), [updated, competitor]), 21112,
@@ -276,7 +357,10 @@ test("W1-T15162 criterion 2: invariant a-new-head-of-new-work-requeues — a pus
   // A fix round dispatched after an update whose head read failed: the fix's head is new work.
   await withFixture(async (ledger) => {
     const { unreviewed, competitor, updated } = seed(ledger);
-    await sweepUpdate(ledger, at("12:41:24"), unreviewed, [{ ok: false }]);
+    const gh = fakeGitHubPullRequest({
+      ...AT_BA824F8, update: { ...MERGE_BB74B21, lagMs: 0 }, readsAfterUpdate: ["unreadable"],
+    });
+    await sweepUpdate(ledger, unreviewed, gh);
     appendAt(ledger.ledgerPath, {
       run_id: "sweep-update-queue-test", task_id: "W1-T21097", step: "fix.dispatch", head_sha: "ba824f8",
     }, at("12:45:00"));
