@@ -118,6 +118,8 @@ export interface RedesignSources {
   landingRefusal: (rel: string, text: string, pinnedBase?: string) => string | undefined;
   /** Signatures a landed PR carried, an open PR carries, or an operator's close declined: none is asked again. */
   settled: () => ReadonlySet<string>;
+  /** Signatures held by an in-flight or declined ops landing, read by the production task runner. */
+  opsSettled?: () => readonly string[];
   /** A repo file's text at the Architect's head, or undefined when it is absent; lets the edit guard read a grep proof's
    *  target. Without it only a pattern that opens with a comment opener is judged. */
   readTarget?: (rel: string) => string | undefined;
@@ -492,16 +494,8 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
       // Ops landings have their own PR lifecycle and are deliberately absent from the public scorecard. Once submitted,
       // keep their signatures and evidence keys out of the Architect queue while that ops landing is in flight or has
       // been declined; the public PR must never settle them on the ops catalog's behalf.
-      const opsRows = sources.ledger([REDESIGN_OPS_LANDING_STEP, REDESIGN_OPS_LANDING_RESULT_STEP], fixedClock(0).iso());
-      const submissions = opsRows.filter((r) => r.step === REDESIGN_OPS_LANDING_STEP);
-      const results = opsRows.filter((r) => r.step === REDESIGN_OPS_LANDING_RESULT_STEP);
-      const failedAttempts = new Set(results.filter((r) => r.failure === true && typeof r.attempt_id === "string")
-        .map((r) => String(r.attempt_id)));
-      // Until the sealed landing reports back, the submission is in flight. A returned PR, queued path, or explicit
-      // refusal remains settled; a completed attempt with none of those outcomes is a failure and can be retried.
-      const ops = submissions.filter((r) => typeof r.attempt_id !== "string" || !failedAttempts.has(String(r.attempt_id)))
-        .flatMap((r) => rowKeys(r, r.signatures));
-      return new Set([...(state.pending?.targets ?? []), ...(state.declinedTargets ?? [])].map((t) => t.target).concat(landed, ops));
+      return new Set([...(state.pending?.targets ?? []), ...(state.declinedTargets ?? [])].map((t) => t.target)
+        .concat(landed, sources.opsSettled?.() ?? []));
     }),
   };
 }

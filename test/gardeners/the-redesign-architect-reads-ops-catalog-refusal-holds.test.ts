@@ -59,6 +59,16 @@ function fixture(t: TestContext, response = amend) {
   const overrides: Partial<RedesignSources> = {
     judgeText: async () => response,
     ledger: (steps, since) => rows.filter((r) => steps.includes(String(r.step)) && String(r.ts) >= since),
+    opsSettled: () => {
+      const opsRows = rows.filter((row) => row.step === REDESIGN_OPS_LANDING_STEP || row.step === REDESIGN_OPS_LANDING_RESULT_STEP);
+      const failedAttempts = new Set(opsRows.filter((row) => row.step === REDESIGN_OPS_LANDING_RESULT_STEP &&
+        row.failure === true && typeof row.attempt_id === "string").map((row) => String(row.attempt_id)));
+      return opsRows.filter((row) => row.step === REDESIGN_OPS_LANDING_STEP &&
+        (typeof row.attempt_id !== "string" || !failedAttempts.has(String(row.attempt_id)))).flatMap((row) => [
+          ...(Array.isArray(row.signatures) ? row.signatures.map(String) : typeof row.signatures === "string" ? [row.signatures] : []),
+          ...(Array.isArray(row.evidence_keys) ? row.evidence_keys.map(String) : []),
+        ]);
+    },
   };
   return { root, deps, landed, overrides, rows, readPublic: () => readFileSync(join(root, PUBLIC_SHARD), "utf8") };
 }
