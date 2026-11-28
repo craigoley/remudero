@@ -44,6 +44,12 @@ test("W1-T15168 criterion 1: a failed attempt's worker.attempt row keeps the las
   const tail = row.stderr_tail as string;
   assert.ok(Buffer.byteLength(tail, "utf8") <= 600, "the tail is capped at 600 bytes");
   assert.ok(tail.endsWith("fatal: the provider closed the stream before the first event\n"), "the tail keeps the END, where the cause is");
+
+  // A provider CLI echoes its base64url key (underscores included) when it exits early; the tail keeps the cause, never the key.
+  const oauth = "sk-ant-oat01-Ab_Cd-Ef_GhIjKlMnOp_QrStUvWx-Yz_0123456789";
+  const echoed = await attemptRow(worker({ subtype: "error_exit_1", isError: true,
+    stderr: `Error: invalid x-api-key ${oauth}\nfatal: exit 1\n` }));
+  assert.equal(echoed.stderr_tail, "Error: invalid x-api-key <redacted>\nfatal: exit 1\n");
 });
 
 test("W1-T15168 criterion 2: invariant:no-secret-reaches-the-ledger — secrets in stderr are replaced, and a successful attempt keeps no tail", async () => {
@@ -59,6 +65,26 @@ test("W1-T15168 criterion 2: invariant:no-secret-reaches-the-ledger — secrets 
     assert.ok(!JSON.stringify(row).includes(secret), "no other field of the row carries it either");
   }
   assert.ok(tail.includes("<redacted>"), "each secret is replaced, not dropped silently");
+
+  // Class: provider-issued keys in base64url (`_` and `-` anywhere), whatever the vendor prefix.
+  const hex = "0123456789abcdef0123456789abcdef";
+  const keys = ["sk-ant-oat01-Ab_Cd-Ef_GhIjKlMnOp_QrStUvWx", "sk-proj-Q1_w2-E3_r4T5y6U7i8O9p0_AsDf", "sk_live_51Hx_Yz0123456789abcdEF",
+    "AIzaSyD-Ab_Cd0123456789EfGhIjKlMnOpQrS"];
+  // Class: an auth header's WHOLE value, whatever its scheme word.
+  const headers = [`Authorization: Token ${hex}`, `Authorization: ApiKey ${hex}`, `Proxy-Authorization: Digest username="u", response="${hex}"`,
+    `Cookie: session_id=${hex}`];
+  // Class: a secret-named pair whose name and/or value is quoted, including JSON escaped inside a JSON string.
+  const pairs = [`{"api-key":"${hex}"}`, `{\\"x-api-key\\":\\"${hex}\\"}`, `'token': 'two ${hex} words'`, `"password": "${hex}`];
+  const shaped = await attemptRow(worker({ subtype: "error_exit_1", isError: true,
+    stderr: [...keys.map((key) => `key ${key}`), ...headers, ...pairs, "exit 1"].join("\n") }));
+  const shapedTail = shaped.stderr_tail as string;
+  for (const secret of [...keys, hex]) {
+    assert.ok(!shapedTail.includes(secret), `the ledger row never carries ${secret.slice(0, 8)}…`);
+    assert.ok(!JSON.stringify(shaped).includes(secret), "no other field of the row carries it either");
+  }
+  assert.equal(shapedTail, [...keys.map(() => "key <redacted>"), "Authorization: <redacted>", "Authorization: <redacted>",
+    "Proxy-Authorization: <redacted>", "Cookie: <redacted>", `{"api-key":"<redacted>"}`, `{\\"x-api-key\\":\\"<redacted>\\"}`,
+    `'token': '<redacted>'`, `"password": "<redacted>"`, "exit 1"].join("\n"), "each value is replaced and its name kept, so the cause stays legible");
 
   const ok = await attemptRow(worker({ subtype: "success", stderr: "warning: slow network\n" }));
   assert.equal(Object.hasOwn(ok, "stderr_tail"), false, "a successful attempt's row carries no stderr_tail");

@@ -771,22 +771,40 @@ export function benchmarkEvidenceLedgerPath(
 /** PRIMARY CONTROL (W1-T4616): the longest redacted error message a failed-spawn receipt keeps. */
 export const SPAWN_FAILURE_MESSAGE_MAX_CHARS = 240;
 
-/** W1-T4616: the cause of a spawn that threw before returning — its class, code and a bounded message
- *  with paths, credentials and long tokens redacted — and whether it failed before any model was
- *  selected, so the attempt is a counted coverage gap rather than a model's failure. */
 /** PRIMARY CONTROL (W1-T15168): the most bytes of a failed attempt's stderr its `worker.attempt` row keeps. */
 export const FAILED_ATTEMPT_STDERR_TAIL_BYTES = 600;
 
+const STDERR_SECRET_NAME = String.raw`[A-Za-z0-9_.-]*(?:token|secret|password|passwd|api[_-]?key|credential|authorization|cookie)[A-Za-z0-9_.-]*`;
+/** Provider CLI stderr shapes the shared redactor misses, applied BEFORE it: base64url keys (`_` included), an
+ *  auth header's WHOLE value whatever its scheme, and a secret-named pair whose name or value is (escaped-)quoted. */
+const STDERR_REDACTIONS: readonly { pattern: RegExp; replace: (...groups: string[]) => string }[] = [
+  { pattern: /(?<![A-Za-z0-9])(?:sk|pk|rk|xai)[-_][A-Za-z0-9_-]{16,}|(?<![A-Za-z0-9])AIza[A-Za-z0-9_-]{30,}/g,
+    replace: () => "<redacted>" },
+  { pattern: /(\\*["'])?\b((?:proxy-)?authorization|(?:set-)?cookie)\1(\s*[:=]\s*)(?![\\"'])[^\r\n]+/gi,
+    replace: (_m, q, name, sep) => `${q}${name}${q}${sep}<redacted>` },
+  { pattern: new RegExp(String.raw`(\\*["'])?\b(${STDERR_SECRET_NAME})\1(\s*[:=]\s*)` +
+      String.raw`(?:(\\*["'])(?:[^\r\n]*?\4|[^\r\n]*)|[^\s"',;{}\[\]\\]+)`, "gi"),
+    replace: (_m, q, name, sep, vq) => `${q}${name}${q}${sep}${vq ? `${vq}<redacted>${vq}` : "<redacted>"}` },
+];
+
+/** `stderr` with every recognised secret replaced: the stderr-specific shapes, then the shared secret redactor. */
+export function redactAttemptStderr(stderr: string): string {
+  const local = STDERR_REDACTIONS.reduce((out, { pattern, replace }) => out.replace(pattern, (...args: unknown[]) =>
+    replace(...args.slice(0, -2).map((group) => (typeof group === "string" ? group : "")))), stderr);
+  return redactProofOutput(local);
+}
+
 /** W1-T15168: the redacted stderr tail a FAILED attempt's receipt keeps, so an early provider exit (for example
  *  Codex `error_exit_1` in a few seconds, with no session file) can be read from the ledger. INVARIANT
- *  no-secret-reaches-the-ledger: the whole stderr passes the shared secret redactor BEFORE it is cut, so a secret
- *  is never sliced into a fragment no pattern matches. A successful attempt, or one with no stderr, gets no field. */
+ *  no-secret-reaches-the-ledger: the whole stderr passes {@link redactAttemptStderr} (ending in the shared secret
+ *  redactor) BEFORE it is cut, so a secret is never sliced into a fragment no pattern matches. A successful
+ *  attempt, or one with no stderr, gets no field. */
 export function failedAttemptStderrTail(result: Pick<WorkerResult, "subtype" | "stderr"> | undefined): { stderr_tail?: string } {
   // Reading the result never costs the row: a throwing getter yields no tail, never a lost worker.attempt receipt.
   try {
     if (result === undefined || typeof result.subtype !== "string" || result.subtype === "success") return {};
     if (typeof result.stderr !== "string" || result.stderr.trim().length === 0) return {};
-    const bytes = Buffer.from(redactProofOutput(result.stderr), "utf8");
+    const bytes = Buffer.from(redactAttemptStderr(result.stderr), "utf8");
     const tail = bytes.length > FAILED_ATTEMPT_STDERR_TAIL_BYTES
       ? bytes.subarray(bytes.length - FAILED_ATTEMPT_STDERR_TAIL_BYTES).toString("utf8").replace(/^\uFFFD+/, "")
       : bytes.toString("utf8");
@@ -800,6 +818,9 @@ export function failedAttemptStderrTail(result: Pick<WorkerResult, "subtype" | "
 /** W1-T12151: why a row for a spawn that threw before its result carries no count. */
 export const SPAWN_THREW_BEFORE_RESULT = "spawn-threw-before-result";
 
+/** W1-T4616: the cause of a spawn that threw before returning — its class, code and a bounded message
+ *  with paths, credentials and long tokens redacted — and whether it failed before any model was
+ *  selected, so the attempt is a counted coverage gap rather than a model's failure. */
 export function spawnFailureDetail(error: unknown, assignmentObserved: boolean,
   observations?: WeakMap<object, { servedModel: string | null; servedModelReason?: string }>): Record<string, unknown> {
   const errorClass = error instanceof Error ? error.constructor.name || "Error" : typeof error;
