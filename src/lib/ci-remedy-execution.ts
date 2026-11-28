@@ -403,6 +403,20 @@ function functionBody(tokens: readonly SourceToken[], partner: readonly number[]
   return -1;
 }
 
+/** True when the `const`/`let`/`var` at `i` opens a `for (… of …)` or `for (… in …)` head. */
+function forOfHead(tokens: readonly SourceToken[], partner: readonly number[], i: number): boolean {
+  const open = i - 1;
+  if (tokens[open]?.text !== "(" || partner[open]! < 0) return false;
+  if (tokens[open - 1]?.text !== "for" && !(tokens[open - 1]?.text === "await" && tokens[open - 2]?.text === "for")) return false;
+  for (let k = i + 1, depth = 0; k < partner[open]!; k++) {
+    const text = tokens[k]!.text;
+    if (OPENERS.has(text)) depth++;
+    else if (CLOSERS.has(text)) depth--;
+    else if (depth === 0 && (text === "of" || text === "in")) return true;
+  }
+  return false;
+}
+
 /** One declaration: the names it binds, the token range it spans, and whether it holds a function. */
 interface Declaration { names: string[]; from: number; to: number; callable: boolean }
 
@@ -422,6 +436,8 @@ function declarationsIn(tokens: readonly SourceToken[], partner: readonly number
       continue;
     }
     if (!["const", "let", "var"].includes(text) || !(isName(tokens[i + 1]) || OPENERS.has(tokens[i + 1]?.text ?? ""))) continue;
+    // A `for…of`/`for…in` head's locals are bound to its iterable by dataSources, not declared by its own text.
+    if (forOfHead(tokens, partner, i)) continue;
     const names = isName(tokens[i + 1]) ? [tokens[i + 1]!.text]
       : tokens.slice(i + 2, closing(tokens, i + 1)).filter((token) => isName(token)).map((token) => token.text);
     const to = statementEnd(tokens, i);
@@ -434,15 +450,15 @@ function declarationsIn(tokens: readonly SourceToken[], partner: readonly number
 /** What each name's value is computed from, file-wide: the names its declarations read, the names a `for…of`/`for…in`
  *  iterable reads (every one, so `Object.entries(TABLE)` binds to TABLE), and, for a callback's parameters, the
  *  names its call reads before it (`TABLE.forEach(([input, want]) => …)` binds both to TABLE). Scopes are not told
- *  apart, so a name declared twice reads from both. A table written inline, in a loop's iterable or a callback
- *  call's receiver (`[["a", 1]].forEach(([input, want]) => …)`), binds no name: it is kept as a declaration of its
- *  own, `inline(input, want)`, which those locals read. */
+ *  apart, so a name declared twice reads from both. A loop's iterable, and a callback call's receiver that holds a
+ *  literal (`[["a", 1]].forEach(([input, want]) => …)`), is kept as a declaration of its own, `inline(input, want)`,
+ *  which those locals read: an inline table binds no name. */
 function dataSources(text: string, tokens: readonly SourceToken[], declarations: readonly Declaration[],
   { partner, parent }: { partner: readonly number[]; parent: readonly number[] }):
   { sources: Map<string, Set<string>>; inline: Map<string, string[]> } {
   const sources = new Map<string, Set<string>>(), inline = new Map<string, string[]>();
-  const bind = (locals: readonly string[], read: readonly string[], from = 0, to = -1) => {
-    const literal = tokens.slice(from, to + 1).some(isLiteral);
+  const bind = (locals: readonly string[], read: readonly string[], from = 0, to = -1, always = false) => {
+    const literal = (always && to >= from) || tokens.slice(from, to + 1).some(isLiteral);
     const table = `inline(${locals.join(", ")})`;
     if (literal && locals.length > 0) inline.set(table, [...(inline.get(table) ?? []), sliceOf(text, tokens, from, to)]);
     for (const local of locals) {
@@ -462,7 +478,7 @@ function dataSources(text: string, tokens: readonly SourceToken[], declarations:
       while (of < close && !(parent[of] === open && (tokens[of]!.text === "of" || tokens[of]!.text === "in"))) of++;
       if (of >= close) continue;
       const first = ["const", "let", "var"].includes(tokens[open + 1]?.text ?? "") ? open + 2 : open + 1;
-      bind(namesIn(tokens, first, of - 1), namesIn(tokens, of + 1, close - 1), of + 1, close - 1);
+      bind(namesIn(tokens, first, of - 1), namesIn(tokens, of + 1, close - 1), of + 1, close - 1, true);
       continue;
     }
     // A callback: `(params) =>`, `name =>` or `function (params)`.
