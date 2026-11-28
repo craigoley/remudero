@@ -348,7 +348,10 @@ for (const suite of DRIFTING) {
 // and every other one of the fifteen must be a runnable candidate, so no pass below stands in for a suite the report
 // does not run.
 const DATE_LITERAL = /\d{4}-\d{2}-\d{2}/;
-const LEFT_THE_SWEEP = new Set(["sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views"]);
+const LEFT_THE_SWEEP = new Set([
+  "sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views",
+  "sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views",
+]);
 const measured = () => new Set(runnableCandidates(deriveCandidates()));
 
 test("W1-T14786 the clock sweep reports no new drift for the fifteen suites: the sweep measures each one it can", () => {
