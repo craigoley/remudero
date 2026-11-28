@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -21,7 +21,7 @@ import {
   type ShadowMemoryPorts,
 } from "#src/lib/host-memory-shadow.js";
 import { publishSharedHostMemory, type LaneMemoryReading } from "#src/lib/lane-governor.js";
-import { admitStaticWork, readLiveStaticWork } from "#src/lib/test-slot.js";
+import { admitStaticWork, readLiveStaticWork, scanProcessStarts, type LiveStaticWork } from "#src/lib/test-slot.js";
 
 const MIB = 1024 ** 2;
 const POLICY: HostMemoryBudgetPolicy = {
@@ -136,6 +136,25 @@ test("W1-T15179 criterion 3: with no live static record the projection is unchan
     pidNamespace: () => "ns-daemon", isPidAlive: () => true,
     processStartScan: () => ({ complete: true, starts: new Set() }) });
   assert.deepEqual(reconciled, { records: [] }, "a complete initial-namespace scan releases an ended foreign holder");
+  // A containerised daemon never gets a complete scan. Its record stays for admission, but no tree of it is measured,
+  // so an ended sandbox holder (and a sibling container's, whose rss MemAvailable already lacks) charges nothing.
+  const containedDir = mkdtempSync(join(tmpdir(), "rmd-t15179-contained-"));
+  t.after(() => rmSync(containedDir, { recursive: true, force: true }));
+  const kept = [["sandbox-ended", hostname()], ["sibling-live", "sibling-container"]].map(([label, host], index) => {
+    const path = join(containedDir, `static-00000000-0000-4000-8000-00000000001${index}.json`);
+    writeFileSync(path, JSON.stringify({ pid: 7 + index, host, bootId: "same-boot", pidNs: "ns-foreign",
+      processStart: `proc:${12345 + index}`, startedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(),
+      label: `typecheck:${label}`, memoryBytes: 4400 * MIB, admittedAt: new Date().toISOString() }));
+    return path;
+  });
+  const contained = ports(0, { readStaticWork: () => readLiveStaticWork({ dir: containedDir, hostname: () => hostname(),
+    bootId: () => "same-boot", pidNamespace: () => "ns-daemon",
+    processStartScan: () => scanProcessStarts({ platform: "linux", read: () => "pid:[4026532999]" }) }) }, false, root);
+  const uncharged = projected(contained, root);
+  assert.equal(uncharged.projectedAvailableMib, baseline.projectedAvailableMib);
+  assert.equal(uncharged.staticWorkChargeMib, 0);
+  assert.equal(uncharged.staticWorkStages, 2);
+  assert.deepEqual(kept.map((path) => existsSync(path)), [true, true], "no record is removed without proof its holder ended");
   const dead = join(root, "static-00000000-0000-4000-8000-000000000000.json");
   writeFileSync(dead, JSON.stringify({ pid: 2 ** 22 - 3, host: hostname(), startedAt: new Date().toISOString(),
     heartbeatAt: new Date().toISOString(), label: "typecheck:ended", memoryBytes: 4400 * MIB, admittedAt: new Date().toISOString() }));
@@ -153,6 +172,87 @@ test("W1-T15179 criterion 4: rss already out of MemAvailable is never charged tw
   assert.equal(projected(ports(5000 * 1024, {}, false, dir), root).staticWorkChargeMib, 0, "a tree past its peak claims nothing more");
   // The daemon's own main process is measured by its growth, never as the stage's tree: the stage claims its whole peak.
   assert.equal(projected(ports(5000 * 1024, { daemonPid: () => process.pid }, false, dir), root).staticWorkChargeMib, 4400);
+});
+
+/** A process of the injected /proc; `nsPid` is its pid in its own namespace when that differs from the listed one. */
+type FakeProc = { parent?: number; start: string; rssMib: number; nsPid?: number; cmdline?: string | Error };
+
+function procPorts(root: string, table: Record<number, FakeProc>, records: LiveStaticWork[],
+  over: Partial<ShadowMemoryPorts> = {}): ShadowMemoryPorts {
+  const base = ports(0, {}, false, root);
+  return {
+    ...base,
+    listProc: () => Object.keys(table),
+    readStaticWork: () => ({ records }),
+    readFile: (path) => {
+      const match = /^\/proc\/([0-9]+)\/(stat|status|cmdline)$/.exec(path);
+      const pid = Number(match?.[1]), item = table[pid];
+      if (!match || !item) return base.readFile(path);
+      if (match[2] === "stat") return statLine(pid, item.parent ?? 1, item.start);
+      if (match[2] === "status") {
+        const ids = item.nsPid === undefined ? `${pid}` : `${pid}\t${item.nsPid}`;
+        return `NSpid:\t${ids}\nVmRSS:\t${item.rssMib * 1024} kB\nVmSwap:\t0 kB\n`;
+      }
+      if (item.cmdline instanceof Error) throw item.cmdline;
+      return item.cmdline ?? "node\0worker\0";
+    },
+    ...over,
+  };
+}
+
+const held = (pid: number, processStart = "proc:900"): LiveStaticWork =>
+  ({ name: `static-${pid}`, label: `typecheck:${pid}`, pid, processStart, memoryBytes: 4400 * MIB, admitted: true });
+
+/** Each stage's [tree rss, charge] in record order, with the bases beside them. */
+function charges(p: ShadowMemoryPorts, root: string): { mib: number[][]; basis: string } {
+  const work = gatherShadowInputs({ workerClass: "implement", root, estimateMib: 0 }, p, POLICY).staticWork;
+  assert.ok(work && "records" in work);
+  return { mib: work.records.map((r) => [r.treeMib, r.chargeMib]), basis: work.records.map((r) => r.basis).join("\n") };
+}
+
+test("W1-T15179 criterion 4: only the holder's own tree is subtracted, whatever shares its start tick", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-t15179-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stages = (table: Record<number, FakeProc>, ...records: LiveStaticWork[]) => charges(procPorts(root, table, records), root);
+  const other = { start: "proc:900", rssMib: 100 }, holder = { start: "proc:900", rssMib: 1000 };
+  assert.deepEqual(stages({ 400: other, 500: holder }, held(500)).mib, [[1000, 3400]], "the recorded pid wins");
+  assert.deepEqual(stages({ 600: { ...other, nsPid: 6 }, 700: { ...holder, nsPid: 7 } }, held(7)).mib, [[1000, 3400]],
+    "a sandbox's pid is found by its namespace pid among same-tick processes");
+  assert.deepEqual(stages({ 7: { ...other, nsPid: 3 }, 700: { ...holder, nsPid: 7 } }, held(7)).mib, [[1000, 3400]],
+    "a listed pid that is another namespace's different pid is not the writer");
+  assert.deepEqual(stages({ 610: { ...holder, nsPid: 5 }, 620: { start: "proc:900", rssMib: 2000, nsPid: 5 } }, held(5), held(5)).mib,
+    [[1000, 3400], [2000, 2400]], "two sandboxes with one namespace pid and tick each claim their own process");
+  // Absent here (ended, reused, or a sibling container's): its rss may already be out of MemAvailable.
+  const strangers: [string, Record<number, FakeProc>][] = [
+    ["a same-tick stranger", { 400: other }], ["a reused pid", { 500: { start: "proc:901", rssMib: 100 } }],
+  ];
+  for (const [why, table] of strangers) {
+    const absent = stages(table, held(500));
+    assert.deepEqual(absent.mib, [[0, 0]], why);
+    assert.match(absent.basis, /holder not visible here.*nothing charged/, why);
+  }
+  const unlisted = charges(procPorts(root, {}, [held(500)], { listProc: () => { throw new Error("EACCES"); } }), root);
+  assert.deepEqual(unlisted.mib, [[0, 0]]);
+  assert.match(unlisted.basis, /process listing unread \(EACCES\).*nothing charged/);
+});
+
+test("W1-T15179 criterion 4: a daemon record never takes a worker's tree as its own tsc", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-t15179-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const daemon = { daemonPid: () => 800 };
+  const table: Record<number, FakeProc> = {
+    800: { start: "proc:800", rssMib: 500 },
+    810: { parent: 800, start: "proc:810", rssMib: 700 },
+    820: { parent: 800, start: "proc:820", rssMib: 50 },
+    821: { parent: 820, start: "proc:821", rssMib: 900, cmdline: "node\0/app/node_modules/.bin/tsc\0" },
+  };
+  const records = [held(800, "proc:800"), held(820, "proc:820")];
+  assert.deepEqual(charges(procPorts(root, table, records, daemon), root).mib, [[0, 4400], [950, 3450]]);
+  const denied = Object.assign(new Error("EACCES"), { code: "EACCES" });
+  const unattributed = charges(procPorts(root, { 800: table[800]!, 810: { ...table[810]!, cmdline: denied } },
+    [held(800, "proc:800")], daemon), root);
+  assert.deepEqual(unattributed.mib, [[0, 0]]);
+  assert.match(unattributed.basis, /tsc attribution unread \(EACCES\).*nothing charged/);
 });
 
 test("W1-T15179: a sandbox holder is resolved by kernel start and daemon records own distinct tsc trees", (t) => {
@@ -178,7 +278,8 @@ test("W1-T15179: a sandbox holder is resolved by kernel start and daemon records
       if (childMatch) {
         const child = Number(childMatch[1]), item = proc.get(child)!;
         if (childMatch[2] === "stat") return statLine(child, item.parent, item.start);
-        if (childMatch[2] === "status") return `VmRSS:\t${item.rss} kB\nVmSwap:\t0 kB\n`;
+        // 910011 is the sandboxed holder: pid 77 in its own namespace.
+        if (childMatch[2] === "status") return `NSpid:\t${child}${child === 910011 ? "\t77" : ""}\nVmRSS:\t${item.rss} kB\nVmSwap:\t0 kB\n`;
         return `node\0/usr/lib/node_modules/typescript/bin/tsc\0`;
       }
       return read(path);
