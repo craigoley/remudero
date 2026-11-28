@@ -3765,6 +3765,23 @@ function isGitWorktree(cwd: string): boolean {
   }
 }
 
+/** W1-T15260: true when cwd or any folder above it holds a `.git` entry of any kind, i.e. Codex's
+ *  default marker walk would find a project root. Checks the lexical and the physical chain. */
+function hasGitMarkerAtOrAbove(cwd: string): boolean {
+  for (const start of new Set([resolve(cwd), physicalPath(cwd)])) {
+    for (let at = start; ; at = dirname(at)) {
+      try {
+        lstatSync(join(at, ".git"));
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ENOTDIR") return true;
+      }
+      if (dirname(at) === at) break;
+    }
+  }
+  return false;
+}
+
 /**
  * The `project_doc_max_bytes` the Codex spawn pins (W1-T3135). KIND: BACKSTOP (W1-T1266) — the
  * PRIMARY CONTROL on this lane's doctrine size is the CLAUDE.md budget ratchet
@@ -3979,7 +3996,8 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   const effort = selection?.effort === "default" ? undefined : selection?.effort;
   const disposableReview = args.sandboxIntent === "disposable-review";
   const readOnly = codexReadOnly(args);
-  const skipGitRepoCheck = readOnly && !isGitWorktree(args.cwd);
+  const insideGitWorktree = isGitWorktree(args.cwd);
+  const skipGitRepoCheck = readOnly && !insideGitWorktree;
   const disposableReadRoots = disposableReview
     ? [...new Set((args.sandboxReadRoots ?? []).filter(isAbsolute).map(physicalPath))]
     : [];
@@ -4004,16 +4022,8 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     ...disposableReviewProfile,
     ...(privateProfile === undefined ? [] : ["--profile", privateProfile.name, "--strict-config", ...privateProfile.overrides,
       ...(disposableReview || !readOnly ? ["--enable", "network_proxy"] : [])]),
-    // W1-T2754: Codex refuses to start when its `-C` cwd is neither a git repository nor a
-    // configured trusted directory — "Not inside a trusted directory and --skip-git-repo-check
-    // was not specified." — and it does so by EXITING 0 WITH NO OUTPUT, so the caller sees an
-    // empty transcript rather than an error. That is how it reached production as a parse
-    // failure: `probeIsolation`'s `defaultExecutor` (src/lib/isolation.ts) creates its probe cwd
-    // with a bare `mkdirSync` under `config.root/tmp`, which is NOT a repo, so every Codex-routed
-    // isolation probe returned nothing, parsed to NaN counts and failed closed as
-    // `blocked_isolation — the probe's alias/function counts could not be parsed`, at $0 cost.
-    // Task workers never hit it because their cwd IS a git worktree, which is exactly why the
-    // failure looked provider-correlated and intermittent rather than structural.
+    // W1-T2754: Codex exits 0 without output for an untrusted non-repo cwd; isolation probes then
+    // looked like parse failures. Task workers avoid this because their cwd is a git worktree.
     //
     "-c", 'shell_environment_policy.inherit="core"',
     "-c", 'shell_environment_policy.exclude=["CODEX_HOME","OPENAI_API_KEY","ANTHROPIC_API_KEY"]',
@@ -4026,6 +4036,9 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     // test/a-dispatched-codex-worker-loads-the-whole-file.test.ts.
     "-c", 'project_doc_fallback_filenames=["AGENTS.md","CLAUDE.md"]',
     "-c", `project_doc_max_bytes=${CODEX_PROJECT_DOC_MAX_BYTES}`,
+    // W1-T15260: with no .git at or above cwd, disable the walk; Codex still reads cwd's instructions.
+    // A checkout subfolder (no .git in cwd itself) keeps the walk, exactly as before.
+    ...(hasGitMarkerAtOrAbove(args.cwd) ? [] : ["-c", "project_root_markers=[]"]),
   ];
   // W1-T2748 narrows W1-T2754's trust bypass to the two call-site properties that make it safe:
   // read-only tools and positive evidence that the cwd is not a Git worktree. The flag remains in
