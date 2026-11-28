@@ -33,7 +33,7 @@ import { configPath } from "./config.js";
 import { FOOTPRINT_MAX_SAMPLES, FOOTPRINT_RETAIN_MS } from "./daemon-footprint.js";
 import { sampleCgroupMemory } from "./daemon-memory-telemetry.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { CROSSING_WINDOW_MS, SWAP_STALL_HISTORY_MS, SWAP_STALL_MIN_SAMPLES, SWAP_STALL_WINDOW_MS } from "./host-memory-shadow.js";
+import { CROSSING_WINDOW_MS, readPsi, SWAP_STALL_HISTORY_MS, SWAP_STALL_MIN_SAMPLES, SWAP_STALL_WINDOW_MS } from "./host-memory-shadow.js";
 import { loadRunChildMode, type RunChildMode } from "./policy.js";
 import {
   bootRunChildModeTracker, readRunChildModeUnion, runChildModeEvidence, runChildModeFor, runChildModeWindow, type RunChildModeTracker,
@@ -1537,22 +1537,10 @@ export interface ContainerShedReadIo {
   platform?: string;
 }
 
-/** memory.pressure's `full avg60`, or the reason it is unread. host-memory-shadow.ts's readPsi parses the same line but
- *  is module-private; W1-T15181 names the scope amendment that would export it and remove this. */
-function psiFullAvg60(read: (path: string) => string, path: string): number | string {
-  let text: string;
-  try {
-    text = read(path);
-  } catch (e) {
-    return `memory.pressure (${(e as NodeJS.ErrnoException)?.code ?? String((e as Error)?.message ?? e).slice(0, 80)})`;
-  }
-  const m = /^full .*\bavg60=([0-9.]+)/m.exec(text);
-  return m ? Number(m[1]) : "memory.pressure (no full avg60)";
-}
-
 /**
  * One reading of the daemon's own cgroup: memory.current and memory.events `high` through sampleCgroupMemory
- * (daemon-memory-telemetry.ts), memory.high as {@link readDaemonMemory} reads it, and memory.pressure full avg60. Off
+ * (daemon-memory-telemetry.ts), memory.high as {@link readDaemonMemory} reads it, and memory.pressure full avg60 through
+ * host-memory-shadow.ts's readPsi. Off
  * Linux nothing is read and the reading is unread. `missedTicks` is the in-flight tick's own lateness.
  */
 export function readContainerShedReading(atMs: number, missedTicks: number | undefined, io: ContainerShedReadIo = {}): ContainerShedReading {
@@ -1570,9 +1558,10 @@ export function readContainerShedReading(atMs: number, missedTicks: number | und
   const high = finiteBytes(read, join(root, "memory.high"));
   if (high === undefined) unread.push("memory.high (unreadable, or max)");
   else reading.memory_high_mib = Math.round(high / MIB_BYTES);
-  const psi = psiFullAvg60(read, join(root, "memory.pressure"));
-  if (typeof psi === "string") unread.push(psi);
-  else reading.psi_full_avg60 = psi;
+  const psi = readPsi(read, join(root, "memory.pressure"));
+  if ("unread" in psi) unread.push(`memory.pressure (${psi.unread})`);
+  else if (psi.fullAvg60 === undefined) unread.push("memory.pressure (no full avg60)");
+  else reading.psi_full_avg60 = psi.fullAvg60;
   if (missedTicks === undefined || !Number.isFinite(missedTicks) || missedTicks < 0) unread.push("loop-lag reading");
   else reading.missed_ticks = missedTicks;
   if (unread.length > 0) reading.unread = unread;

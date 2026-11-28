@@ -1327,7 +1327,8 @@ function readSwapIn(read: ShadowMemoryPorts["readFile"], now: number, staleMs: n
   return swapInRateOf(counters, prior, seconds);
 }
 
-function readPsi(read: ShadowMemoryPorts["readFile"], path = "/proc/pressure/memory"): ShadowInputs["psi"] {
+/** A PSI file: the host's /proc/pressure/memory, or a cgroup's memory.pressure (W1-T15181 reads its full avg60). */
+export function readPsi(read: ShadowMemoryPorts["readFile"], path = "/proc/pressure/memory"): ShadowInputs["psi"] {
   let text: string;
   try {
     text = read(path);
