@@ -2310,6 +2310,40 @@ Each row names its judge in `surface` (`ci-judge` or `fix-progress`). To turn on
 and returns the judge to the risk judge's cell. A day with `ci_judge.judged` rows and no
 `judge_shadow` row means the arm is not on.
 
+### The ci judge spends no call it cannot use
+
+The ci judge (`src/lib/ci-escalation-judge.ts`) posts the `remudero/ci-judge` status once per PR
+head. Two kinds of head now get their status without a model call, and so without a shadow call:
+
+- **A full floor.** When the deterministic selector already chose a full run, the union with any
+  verdict is a full run. The daemon posts `ci-judge {"add":[],"escalateFull":true}` and writes
+  `ci_judge.skipped` with `reason: "floor already full"`.
+- **An unchanged diff.** The daemon keys each posted verdict by the `git patch-id --verbatim` of the
+  PR's diff (the diff `gh pr diff` returns, from the merge base to the head) and by the floor, in
+  `state/ci-judge-verdicts.json`. A new head whose patch id and floor match the PR's last posted
+  verdict, such as a rebase or a merge of main that leaves the PR's own change alone, gets that
+  verdict again and `ci_judge.reused` with the `patch_id`. Line-number shifts keep the patch id;
+  a change to any line of the diff, whitespace included, or a different floor gets a fresh verdict.
+  When the patch id cannot be computed, the head is judged as before and its `ci_judge.judged` row
+  has `patch_id: null` (with `patch_id_error` when git failed).
+
+To turn the reuse off, create `state/CI_JUDGE_REUSE_OFF`; every changed head is then judged afresh.
+The full-floor skip has no switch of its own: a full floor runs everything whatever the judge says.
+`state/CI_JUDGE_OFF` still turns the whole judge off and wins over both.
+
+### An inbox redraft carries a cited depends_on index
+
+The first draft of a proposal carries the depends_on index of every open task in `plan/tasks.yaml`.
+A redraft is a new session, so it pays for its whole prompt again. A relint retry, the escalation
+after a dirty draft, and a cash resume of a relint therefore carry a cited index instead. It lists
+only the tasks the failed fragment's `depends_on` names and the tasks the proposal names, and it
+tells the worker to Grep `plan/tasks.yaml` for any other dependency. The relint text follows it as
+before. Each `inbox.draft_synthesized` row of a redraft has `retry_index: "cited"` or `"full"`, and
+its `plan_index_chars` counts the index that prompt actually carried.
+
+To send the full index on every redraft again, create `state/DRAFT_RETRY_FULL_INDEX`. The next
+draft batch reads it; delete the file to return to the cited index.
+
 ### One fleet cash cap across core, site, and console
 
 The shared cash allowance is opt-in and requires a stopped-writer migration. Until it is

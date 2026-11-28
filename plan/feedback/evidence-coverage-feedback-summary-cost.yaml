@@ -4,8 +4,8 @@ raw: >-
   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
   `feedback-summary`, field `cost`.
 
-  Coverage: 44/51 joined worker calls (86.3%) in the trailing 7-day window;
-  below the field's 90.0% floor — a chronic gap no baseline excuses.
+  Coverage: 427/536 joined worker calls (79.7%) in the trailing 7-day window;
+  trailing baseline 90.9% — below it by more than 10.0%.
 
   First seen: 2026-09-28T17:59:01.334Z.
 
@@ -14,9 +14,12 @@ raw: >-
   lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
   reads), or record why this lane legitimately lacks it. The evidence-coverage
   gardener updates this entry in place while the gap persists.
+
+  Evidence coverage reopened 2026-11-27T22:35:17.141Z: 79.7% (427/536); window
+  2026-11-20T22:35:17.141Z through 2026-11-27T22:35:17.141Z; overrides answered.
 attachments: []
 origin: cli
-status: answered
+status: new
 reply_to: null
 proposal_pr: null
 summary: null
@@ -24,3 +27,68 @@ expansion: null
 submission_key: null
 thread_id: null
 answered_by: fb-1792030216299-e56dd6
+evidence_coverage_last_reopened: "79.7"
+evidence_coverage_revision:
+  version: 1
+  mainSha: 9cc1bcc7fda6af8ac41835ecdb41b33ab290bf3d
+  expectedRecord: >
+    id: evidence-coverage-feedback-summary-cost
+
+    ts: 2026-09-30T00:05:25.729Z
+
+    raw: >-
+      Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+      `feedback-summary`, field `cost`.
+
+      Coverage: 44/51 joined worker calls (86.3%) in the trailing 7-day window;
+      below the field's 90.0% floor — a chronic gap no baseline excuses.
+
+      First seen: 2026-09-28T17:59:01.334Z.
+
+
+      This follow-up never gates a PR or blocks work. Restore the field at the
+      lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+      reads), or record why this lane legitimately lacks it. The evidence-coverage
+      gardener updates this entry in place while the gap persists.
+    attachments: []
+
+    origin: cli
+
+    status: answered
+
+    reply_to: null
+
+    proposal_pr: null
+
+    summary: null
+
+    expansion: null
+
+    submission_key: null
+
+    thread_id: null
+
+    answered_by: fb-1792030216299-e56dd6
+  expectedPlan:
+    plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+    plan/tasks.d: f91d4dfd932259c859b643078612c8f225ebca29
+  measurement:
+    lane: feedback-summary
+    field: cost
+    observed: 427
+    denominator: 536
+    floor: 0.9
+    baseline: 0.9090909090909091
+    at: 2026-11-27T22:35:17.141Z
+    since: 2026-11-20T22:35:17.141Z
+    line: "Coverage: 427/536 joined worker calls (79.7%) in the trailing 7-day
+      window; trailing baseline 90.9% — below it by more than 10.0%."
+  closure:
+    eligible: true
+    reason: complete task PR evidence
+    completePlan: true
+    tasks:
+      - id: W1-T8511
+        state: closed
+      - id: W1-T9000
+        state: closed
