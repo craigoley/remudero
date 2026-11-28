@@ -248,3 +248,47 @@ test("W1-T14891 an unpublished commit is bundled before the tree is removed: a c
   const [copy] = copies(r, wt);
   assert.ok(copy && existsSync(join(copy, "MANIFEST.txt")), `a clean tree also leaves a MANIFEST:\n${out}`);
 });
+
+test("W1-T14891 a container-form gitdir is translated before preserving and retiring: a back-pointer through a non-symlink bind alias", () => {
+  const r = rig();
+  const hostState2 = join(r.state, "state2");
+  const clone = join(hostState2, "remudero");
+  git(r.fx.root, "clone", "-q", join(r.fx.root, "origin.git"), clone);
+  const name = "run-W1-T9012-1";
+  const wt = join(r.root, name);
+  git(clone, "worktree", "add", "-q", "-b", "run/bind-alias", wt, "main");
+  writeFileSync(join(wt, "feature.txt"), "unpublished\n");
+  git(wt, "add", "feature.txt");
+  git(wt, "commit", "-q", "-m", "unpublished bind-alias commit");
+  age(wt, 10 * DAY_HOURS);
+  const gitfile = join(wt, ".git");
+  const backfile = join(readFileSync(gitfile, "utf8").trim().slice("gitdir: ".length), "gitdir");
+  writeFileSync(gitfile, `gitdir: /home/node/Remudero/remudero/.git/worktrees/${name}\n`);
+  writeFileSync(backfile, `/home/node/Remudero/worktrees/${name}/.git\n`);
+  age(wt, 10 * DAY_HOURS);
+
+  // A bind-mount alias of the state folder is a different spelling of the same files. The fixture cannot bind-mount,
+  // so the alias holds a copy of the tree's .git file and stat reports the tree's own identity for it.
+  const alias = join(r.fx.root, "rmd-state2-bind");
+  mkdirSync(join(alias, "worktrees", name), { recursive: true });
+  const aliasGit = join(alias, "worktrees", name, ".git");
+  writeFileSync(aliasGit, readFileSync(gitfile, "utf8"));
+  const st = statSync(gitfile);
+  const realStat = execFileSync("sh", ["-c", "command -v stat"], { encoding: "utf8" }).trim();
+  const bin = join(r.fx.root, "bind-alias-bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "stat"), `#!/usr/bin/env bash
+for arg; do path="$arg"; done
+if [ "$path" = "${aliasGit}" ]; then printf '%s\\n' '${st.dev}:${st.ino}'; exit 0; fi
+exec "${realStat}" "$@"
+`, { mode: 0o755 });
+  const scratchWorktrees = join(r.fx.root, "bind-scratch-worktrees");
+  mkdirSync(scratchWorktrees, { recursive: true });
+  const docker = container(r, [
+    [clone, "/home/node/Remudero/remudero"], [alias, "/home/node/Remudero"], [scratchWorktrees, "/home/node/Remudero/worktrees"],
+  ]);
+  const out = pass(r, { PATH: `${bin}:${process.env.PATH}`, RMD_CLEANUP_DOCKER: docker });
+  assert.match(out, new RegExp(`REMOVE ${wt}: under shadowed worktree root ${r.root}; idle 7 days, preserved then retired`));
+  assert.equal(existsSync(wt), false, out);
+  assert.ok(copies(r, wt)[0], out);
+});

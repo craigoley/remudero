@@ -1177,7 +1177,14 @@ translate_shadowed_worktree_gitdir() {
       best_len="${#destination}"
     done <<< "$mounts"
   done <<< "$ids"
-  [ "$host_back" = "$wt/.git" ] || return 1
+  # The mount source may be a bind-mount alias (~/rmd-state2 for /mnt/rmd/state2), whose spelling differs from the
+  # worktree's: the back-pointer names this tree when it is the same file by device and inode.
+  [ -n "$host_back" ] || return 1
+  local back_id wt_id
+  back_id="$(container_path_identity "$host_back")" || return 1
+  wt_id="$(container_path_identity "$gitfile")" || return 1
+  [ "$back_id" = "$wt_id" ] || return 1
+  host_back="$wt/.git"
   printf '%s\n%s\n%s\n%s\n' "$raw" "$backraw" "$host_gitdir" "$host_back"
   # A dry run must not rewrite either side of Git's linked-worktree pointer. The
   # caller can read through GIT_DIR instead while simulating the retirement.
