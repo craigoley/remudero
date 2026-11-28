@@ -1063,19 +1063,56 @@ retire_orphan_home_tree() {
   log "REMOVE $wt: linked worktree of $clone without admin directory; saved then removed (${bytes:-unknown} bytes; copy: $final)"
   act rm -rf -- "$wt" && tally "home-orphan ${wt%/*}" "$bytes"
 }
-# W1-T14891: a worktree under a shadowed state-disk root is judged as a hand worktree: an idle one with unsaved work is
-# preserved (MANIFEST, verified bundle, patch, untracked tar), then retired, through retire_held_worktree. A root a
-# running container mounts, or one inside such a mount, is left alone. A tree whose Git metadata the host cannot read
-# (a container path) is kept and reported.
+# W1-T14891: container_reaches_root <root>: 0 when a running container can reach the root, 1 when none can, 2 when
+# Docker cannot be read. A container reaches it through a mount whose source is the root, holds it, or sits inside it,
+# unless the root's place in that container is covered by a deeper mount (the daemon mounts the scratch copy over its
+# worktrees folder, inside the mount of the state directory). Sources are compared by their physical paths.
+container_reaches_root() {
+  local root="$1" rp ids id lines line i j src dst ps cpath shadowed
+  local -a srcs=() dsts=()
+  rp="$(cd -P -- "$root" 2>/dev/null && pwd -P)" || return 2
+  ids="$($DOCKER_CMD ps -q 2>/dev/null)" || return 2
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    lines="$($DOCKER_CMD inspect --format '{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}' "$id" 2>/dev/null)" || return 2
+    srcs=(); dsts=()
+    while IFS='	' read -r src dst; do
+      [ -n "$src" ] && [ -n "$dst" ] || continue
+      srcs+=("$src"); dsts+=("${dst%/}")
+    done <<< "$lines"
+    for i in "${!srcs[@]}"; do
+      ps="$(cd -P -- "${srcs[$i]}" 2>/dev/null && pwd -P)" || ps="${srcs[$i]%/}"
+      case "$ps" in "$rp"/*) return 0 ;; esac                    # a mount from inside the root
+      case "$rp" in "$ps"|"$ps"/*) ;; *) continue ;; esac
+      cpath="${dsts[$i]}${rp#"$ps"}"
+      shadowed=0
+      for j in "${!dsts[@]}"; do
+        [ "$j" = "$i" ] && continue
+        [ "${#dsts[$j]}" -gt "${#dsts[$i]}" ] || continue
+        case "$cpath" in "${dsts[$j]}"|"${dsts[$j]}"/*) shadowed=1; break ;; esac
+      done
+      [ "$shadowed" = 1 ] || return 0
+    done
+  done <<< "$ids"
+  return 1
+}
+# W1-T14891: a worktree under a state-disk root that no running container reaches is preserved (MANIFEST, verified
+# bundle, patch, untracked tar), then retired through retire_held_worktree, idle past the held-worktree window. A root
+# a container reaches, or one Docker cannot prove unreached, is left alone. A tree whose Git metadata the host cannot
+# read (a container path) is kept and reported.
+SHADOWED_UNREACHED=""
 sweep_shadowed_worktree_roots() {
-  local root wt
+  local root wt status
   while IFS= read -r root; do
     root="${root%/}"
     [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
-    snapshot_docker
-    if [ "$DOCKER_OK" != 1 ]; then log "KEEP $root: Docker mount snapshot failed (unknown)"; continue; fi
-    if is_docker_mount "$root" || docker_mount_inside "$root"; then log "KEEP $root: a running container mounts this worktree root"; continue; fi
-    log "rmd-host-cleanup: shadowed worktree root $root (no running container mounts it)"
+    container_reaches_root "$root"; status=$?
+    case "$status" in
+      0) log "KEEP $root: a running container reaches this worktree root"; continue ;;
+      1) ;;
+      *) log "KEEP $root: Docker mounts unreadable (unknown)"; continue ;;
+    esac
+    log "rmd-host-cleanup: shadowed worktree root $root (no running container reaches it)"
     for wt in "$root"/* "$root"/.[!.]* "$root"/..?*; do
       [ -d "$wt" ] && [ ! -L "$wt" ] || continue
       { [ -e "$wt/.git" ] || [ -L "$wt/.git" ]; } || continue
@@ -1083,7 +1120,9 @@ sweep_shadowed_worktree_roots() {
       if ! rgit "$wt" rev-parse --absolute-git-dir >/dev/null 2>&1; then
         log "KEEP $wt: Git metadata is not readable from the host ($(sed -n '1s/^gitdir: //p' -- "$wt/.git" 2>/dev/null))"; continue
       fi
-      HOME_LINKED_TREE="$wt"; sweep_worktree "$wt"; HOME_LINKED_TREE=""
+      SHADOWED_UNREACHED="$root"; HOME_LINKED_TREE="$wt"
+      retire_held_worktree "$wt" "under shadowed worktree root $root"
+      HOME_LINKED_TREE=""; SHADOWED_UNREACHED=""
     done
   done < <(printf '%s\n' "$SHADOWED_WORKTREE_ROOTS" | tr ':' '\n' | awk 'NF && !seen[$0]++')
 }
@@ -1215,6 +1254,13 @@ keep_container_path() {
 is_docker_mount() {
   local p="$1" mount cursor identity
   [ "$DOCKER_OK" = 1 ] || return 0
+  # W1-T14891: inside a worktree root just proved unreached (every container mount covering it is shadowed by a
+  # deeper one), an ancestor mount does not reach the path. The proof is taken again from Docker each time.
+  if [ -n "$SHADOWED_UNREACHED" ]; then
+    case "$p" in "$SHADOWED_UNREACHED"|"$SHADOWED_UNREACHED"/*)
+      container_reaches_root "$SHADOWED_UNREACHED"; [ "$?" = 1 ] && return 1 ;;
+    esac
+  fi
   DOCKER_PATH_REASON="running container mount"
   while IFS= read -r mount; do
     [ -n "$mount" ] || continue

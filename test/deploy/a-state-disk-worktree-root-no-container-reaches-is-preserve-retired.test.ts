@@ -62,13 +62,15 @@ function copies(r: Rig, wt: string): string[] {
   return readdirSync(root).filter(n => n.startsWith(stem)).map(n => join(root, n));
 }
 
-/** A docker stub with one running container that mounts `path`. */
-function mounted(r: Rig, path: string): string {
-  const docker = join(r.fx.root, "docker-mounted");
+/** A docker stub with one running container whose mounts are `mounts` ([source, destination] pairs). */
+function container(r: Rig, mounts: Array<[string, string]>): string {
+  const docker = join(r.fx.root, "docker-mounts");
+  const pairs = mounts.map(([src, dst]) => `${src}\\t${dst}\\n`).join("");
+  const sources = mounts.map(([src]) => `${src}\\n`).join("");
   writeFileSync(docker, `#!/usr/bin/env bash
 case "$1" in
   ps) printf 'fixture-container\\n' ;;
-  inspect) case "$*" in *.Name*) printf '/fixture-container\\n' ;; *) printf '%s\\n' '${path}' ;; esac ;;
+  inspect) case "$*" in *.Name*) printf '/fixture-container\\n' ;; *Destination*) printf '${pairs}' ;; *) printf '${sources}' ;; esac ;;
   *) exit 64 ;;
 esac
 `, { mode: 0o755 });
@@ -79,8 +81,8 @@ test("W1-T14891 a shadowed state-disk worktree is preserve-retired", () => {
   const r = rig();
   const { wt } = shadowedTree(r, "run-W1-T9001-1");
   const out = pass(r);
-  assert.match(out, new RegExp(`shadowed worktree root ${r.root} \\(no running container mounts it\\)`), "the default root is the state disk's state2/worktrees");
-  assert.match(out, new RegExp(`REMOVE ${wt}: uncommitted changes; idle 7 days, preserved then retired`));
+  assert.match(out, new RegExp(`shadowed worktree root ${r.root} \\(no running container reaches it\\)`), "the default root is the state disk's state2/worktrees");
+  assert.match(out, new RegExp(`REMOVE ${wt}: under shadowed worktree root ${r.root}; idle 7 days, preserved then retired`));
   assert.equal(existsSync(wt), false, out);
   const [copy] = copies(r, wt);
   assert.ok(copy, out);
@@ -106,9 +108,42 @@ test("W1-T14891 an unpublished commit is bundled before the tree is removed", ()
 test("W1-T14891 a mounted worktree root is left alone", () => {
   const r = rig();
   const { wt } = shadowedTree(r, "run-W1-T9003-1");
-  const out = pass(r, { RMD_CLEANUP_DOCKER: mounted(r, r.root) });
-  assert.match(out, new RegExp(`KEEP ${r.root}: a running container mounts this worktree root`));
+  const out = pass(r, { RMD_CLEANUP_DOCKER: container(r, [[r.root, "/home/node/Remudero/worktrees"]]) });
+  assert.match(out, new RegExp(`KEEP ${r.root}: a running container reaches this worktree root`));
   assert.equal(existsSync(wt), true, out);
   assert.doesNotMatch(out, new RegExp(`REMOVE ${wt}[: ]`));
   assert.deepEqual(copies(r, wt), []);
+});
+
+test("W1-T14891 a shadowed state-disk worktree is preserve-retired: the state folder is mounted and a deeper mount covers its worktrees", () => {
+  const r = rig();
+  const { wt } = shadowedTree(r, "run-W1-T9004-1");
+  const scratchCopy = join(r.fx.root, "scratch-worktrees");
+  mkdirSync(scratchCopy, { recursive: true });
+  const docker = container(r, [[join(r.state, "state2"), "/home/node/Remudero"], [scratchCopy, "/home/node/Remudero/worktrees"]]);
+  const out = pass(r, { RMD_CLEANUP_DOCKER: docker });
+  assert.match(out, new RegExp(`shadowed worktree root ${r.root} \\(no running container reaches it\\)`));
+  assert.equal(existsSync(wt), false, out);
+  assert.ok(copies(r, wt)[0], out);
+
+  const reached = rig();
+  const kept = shadowedTree(reached, "run-W1-T9005-1").wt;
+  const parentOnly = container(reached, [[join(reached.state, "state2"), "/home/node/Remudero"]]);
+  const keptOut = pass(reached, { RMD_CLEANUP_DOCKER: parentOnly });
+  assert.match(keptOut, new RegExp(`KEEP ${reached.root}: a running container reaches this worktree root`));
+  assert.equal(existsSync(kept), true, keptOut);
+});
+
+test("W1-T14891 an unpublished commit is bundled before the tree is removed: a clean tree waits the held window and leaves a MANIFEST", () => {
+  const r = rig();
+  const wt = join(r.root, "run-W1-T9006-1");
+  git(r.clone, "worktree", "add", "-q", "-b", "run/clean", wt, "main");
+  age(wt, 2 * DAY_HOURS);
+  const early = pass(r);
+  assert.equal(existsSync(wt), true, `a clean tree idle two days stays:\n${early}`);
+  age(wt, 10 * DAY_HOURS);
+  const out = pass(r);
+  assert.equal(existsSync(wt), false, out);
+  const [copy] = copies(r, wt);
+  assert.ok(copy && existsSync(join(copy, "MANIFEST.txt")), `a clean tree also leaves a MANIFEST:\n${out}`);
 });
