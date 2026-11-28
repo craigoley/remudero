@@ -7,6 +7,7 @@ import { runDaemon, type DaemonDeps, type DaemonFreshness } from "#src/lib/daemo
 import { loadPlan } from "#src/lib/plan.js";
 import { inboxDraftBatchesInFlight, trackInboxDraftBatch } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
 import type { RunResult } from "#src/lib/run-result.js";
 
 /**
@@ -41,6 +42,7 @@ test("a freshness restart waits for a running inbox draft batch", async () => {
   const daemon = runDaemon(
     planOf(),
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => () => true,
       runOne: async (id: string) => okResult(id),
       // The batch ends on the third idle wait, so the daemon defers while it drafts and restarts after.
