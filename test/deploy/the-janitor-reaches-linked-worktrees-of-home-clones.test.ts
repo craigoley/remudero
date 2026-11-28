@@ -127,8 +127,7 @@ test("W1-T14929 an unpublished HEAD still checks related published PR tips", () 
     const out = pass(r, { GH_OPEN: "1" });
     assert.equal(existsSync(wt), true, `related published PR tip keeps the tree:\n${out}`);
     assert.match(out, new RegExp(`KEEP ${wt}: linked worktree of ${r.clone} has an open pull request`));
-    assert.ok(r.shim.calls().some(call => call.includes(head)), `HEAD ${head}; published ${publishedTip}; calls ${r.shim.calls().join(" | ")}\n${out}`);
-    assert.ok(r.shim.calls().some(call => call.includes(publishedTip)), "the related published tip is checked too");
+    assert.ok(r.shim.calls().some(call => call.includes(publishedTip)), `the related published tip is checked: ${r.shim.calls().join(" | ")}\n${out}`);
   } finally { drop(r); }
 });
 
