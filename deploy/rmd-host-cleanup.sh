@@ -167,6 +167,11 @@ PROTECTED_WORKTREE_ROOTS="${RMD_CLEANUP_PROTECTED_WORKTREE_ROOTS-$CLEAN_HOME/rmd
 # W1-T14929: home clones whose linked worktrees the janitor lists through `git worktree list` (default: the live
 # checkouts). Only their LINKED worktrees are judged; each clone's own checkout is never retired.
 HOME_CLONES="${RMD_CLEANUP_HOME_CLONES-$LIVE_CHECKOUTS}"
+# W1-T14891: worktree roots on the state disk that a container bind mount shadows (the daemon mounts the scratch-disk
+# copy over its worktrees folder), so no container reaches them. Empty off the host layout.
+if [ -n "${RMD_CLEANUP_SHADOWED_WORKTREE_ROOTS+x}" ]; then SHADOWED_WORKTREE_ROOTS="$RMD_CLEANUP_SHADOWED_WORKTREE_ROOTS"
+elif [ "${RMD_CLEANUP_ROOT_FS:-/}" = / ] || [ -n "${RMD_CLEANUP_STATE_DISK+x}" ]; then SHADOWED_WORKTREE_ROOTS="$STATE_DISK/state2/worktrees"
+else SHADOWED_WORKTREE_ROOTS=""; fi
 # W1-T9617: with the hot checkouts on scratch (deploy/scratch-mounts.sh), each daemon's own checkout
 # and serve's code dir live at <scratch>/rmd/<key>/remudero and .../serve-repo. They are live
 # checkouts, so each one present is protected exactly like rmd-serve-repo, whatever the list says.
@@ -1057,6 +1062,30 @@ retire_orphan_home_tree() {
   if ! audit_writable; then log "KEEP $wt: audit log unwritable ($AUDIT_LOG; copy kept: $final)"; return; fi
   log "REMOVE $wt: linked worktree of $clone without admin directory; saved then removed (${bytes:-unknown} bytes; copy: $final)"
   act rm -rf -- "$wt" && tally "home-orphan ${wt%/*}" "$bytes"
+}
+# W1-T14891: a worktree under a shadowed state-disk root is judged as a hand worktree: an idle one with unsaved work is
+# preserved (MANIFEST, verified bundle, patch, untracked tar), then retired, through retire_held_worktree. A root a
+# running container mounts, or one inside such a mount, is left alone. A tree whose Git metadata the host cannot read
+# (a container path) is kept and reported.
+sweep_shadowed_worktree_roots() {
+  local root wt
+  while IFS= read -r root; do
+    root="${root%/}"
+    [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
+    snapshot_docker
+    if [ "$DOCKER_OK" != 1 ]; then log "KEEP $root: Docker mount snapshot failed (unknown)"; continue; fi
+    if is_docker_mount "$root" || docker_mount_inside "$root"; then log "KEEP $root: a running container mounts this worktree root"; continue; fi
+    log "rmd-host-cleanup: shadowed worktree root $root (no running container mounts it)"
+    for wt in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+      [ -d "$wt" ] && [ ! -L "$wt" ] || continue
+      { [ -e "$wt/.git" ] || [ -L "$wt/.git" ]; } || continue
+      if is_protected_worktree "$wt"; then log "KEEP $wt: protected by janitor configuration"; continue; fi
+      if ! rgit "$wt" rev-parse --absolute-git-dir >/dev/null 2>&1; then
+        log "KEEP $wt: Git metadata is not readable from the host ($(sed -n '1s/^gitdir: //p' -- "$wt/.git" 2>/dev/null))"; continue
+      fi
+      HOME_LINKED_TREE="$wt"; sweep_worktree "$wt"; HOME_LINKED_TREE=""
+    done
+  done < <(printf '%s\n' "$SHADOWED_WORKTREE_ROOTS" | tr ':' '\n' | awk 'NF && !seen[$0]++')
 }
 sweep_home_clone_worktrees() {
   local IDLE_MINUTES=$(( HELD_WORKTREE_DAYS * 1440 ))
@@ -2968,6 +2997,7 @@ if [ "$ONLY_TMP" != 1 ]; then
   done < <(printf '%s\n' "$WORKTREE_ROOTS" | tr ':' '\n')
 
   sweep_home_clone_worktrees
+  sweep_shadowed_worktree_roots
   while IFS= read -r checkout; do
     [ -n "$checkout" ] && sweep_live_checkout "$checkout"
   done < <(printf '%s\n' "$LIVE_CHECKOUTS" | tr ':' '\n')
