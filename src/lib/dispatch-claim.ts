@@ -11,7 +11,7 @@ import { assertClaimRefPushAllowed, assertClaimRefPushAllowedAsync } from "./liv
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { Escalation } from "./escalate.js";
-import { workerAssignmentTracker } from "./non-worker-verdict.js";
+import { MONITOR_WRITTEN_RUN_STEPS, workerAssignmentTracker } from "./non-worker-verdict.js";
 
 /**
  * Cross-host git-ref CAS closing the dispatch-time race, in the same family as `refs/rmd-id/`
@@ -936,6 +936,7 @@ function readRunLedger(
       if (!line.includes(runId)) continue;
       const parsed = parseLedgerRow(line);
       if (parsed.kind !== "row" || parsed.row.run_id !== runId) continue;
+      if (typeof parsed.row.step === "string" && MONITOR_WRITTEN_RUN_STEPS.has(parsed.row.step)) continue;
       if (parsed.row.step === "run.start") started = true;
       if (parsed.row.step === "verdict") verdict = true;
       if (parsed.row.step === "pr.opened" && typeof parsed.row.pr_url === "string") prUrl = parsed.row.pr_url;

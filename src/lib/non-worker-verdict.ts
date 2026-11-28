@@ -51,7 +51,9 @@ export function endedBeforeWorkerAssignment(verdict: Record<string, unknown>, ru
   if (typeof verdict.worker_assigned === "boolean") return !verdict.worker_assigned;
   // A checkpoint may predate assignment history; the verdict's own assignment receipt still proves it ran.
   if (typeof verdict.selection_assignment_id === "string" && verdict.selection_assignment_id.length > 0) return false;
-  if (infrastructureRefusal(verdict) !== undefined) return true;
+  // A legacy refusal is evidence only when the reader saw this run's rows and knows it wrote
+  // no assignment. A partial checkpoint cannot infer that from an unseen assignment row.
+  if (runAssigned === false && infrastructureRefusal(verdict) !== undefined) return true;
   return runAssigned === false && verdict.verdict === "handed_off" && verdict.reason === ORPHANED_BY_RESTART_REASON;
 }
 
@@ -183,7 +185,7 @@ function inconclusiveProofRefusal(line: Record<string, unknown>): boolean {
 export const DEFAULT_LIVENESS_BOUND_MS = 30 * 60_000;
 
 /** Rows a monitor writes ABOUT a run, so they are not rows the run itself produced. */
-const MONITOR_WRITTEN_RUN_STEPS: ReadonlySet<string> = new Set([
+export const MONITOR_WRITTEN_RUN_STEPS: ReadonlySet<string> = new Set([
   "run.running_long", // the duration sentinel reports about a run that may already be dead
   "cost.anomaly", // the cost sentinel reports about a run after the run has stopped
   "worker.stalled", // the daemon's quiet-episode detector writes about the observed run

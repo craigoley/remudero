@@ -214,10 +214,12 @@ test("W1-T12154 criterion 2: a rotated ledger keeps the latest orphan stage when
   const claim = { ts: "2000-01-01T00:00:00.500Z", run_id: RUN_ID, task_id: TASK, step: "dispatch.claim", host: LOCAL,
     actor: "run_child", ref: dispatchClaimRef(TASK), outcome: "created" };
   const reached = { ts: "2000-01-01T00:00:02.000Z", run_id: RUN_ID, task_id: TASK, step: "worktree.node_modules" };
+  const monitor = { ts: "2000-01-01T00:00:03.000Z", run_id: RUN_ID, task_id: TASK, step: "run.running_long" };
   writeFileSync(join(stateDir, "ledger.2000-01-01T00-00-01-000Z.ndjson.gz"), gzipSync(`${JSON.stringify(start)}\n${JSON.stringify(claim)}\n`));
   const ledger = join(stateDir, "ledger.ndjson");
-  // Rotation replays retained older rows after the newer live event.
-  writeFileSync(ledger, [reached, start, claim].map((row) => `${JSON.stringify(row)}\n`).join(""));
+  // Rotation replays retained older rows after the newer live event; then a monitor writes
+  // about the run. Neither source is part of the run's own latest stage and step.
+  writeFileSync(ledger, [reached, monitor, start, claim].map((row) => `${JSON.stringify(row)}\n`).join(""));
   const lockIso = new Date().toISOString();
   await bootSweepDispatchClaimsAsync(fakeReserver({ [TASK]: anchorMessage(DEAD_PID, LOCAL, MINT_ISO) }), {
     hostProbe: FIXED_HOST_PROBE,
@@ -232,6 +234,23 @@ test("W1-T12154 criterion 2: a rotated ledger keeps the latest orphan stage when
   assert.equal(verdict.worker_assigned, false);
   assert.equal(verdict.last_stage, "worktree.node_modules");
   assert.equal(verdict.last_step, "worktree.node_modules");
+});
+
+test("W1-T12154 criterion 4: an unknown assignment history does not classify an unstamped refusal as unassigned", async (t) => {
+  const runId = "W1-T1-20";
+  const corpus = ledgerDir(t, [{ ts: "2026-11-10T02:00:00.000Z", run_id: runId, task_id: "W1-T1", step: "run.start" },
+    { ts: "2026-11-10T02:01:00.000Z", run_id: runId, task_id: "W1-T1", step: "worker.assignment", worker_assignment: ASSIGNMENT }]);
+  const older = JSON.parse(JSON.stringify((await scan(corpus.dir)).checkpoint)) as AnalyticsCheckpoint;
+  delete older.state.history.assigned;
+  corpus.append([{ ts: "2026-11-10T03:00:00.000Z", run_id: runId, task_id: "W1-T1", step: "verdict",
+    verdict: "blocked_transient", reason: "progress judge unavailable" }]);
+  const resumed = await scan(corpus.dir, older);
+  const full = await scan(corpus.dir);
+  assert.equal(resumed.scan?.mode, "resume");
+  assert.equal(full.scan?.mode, "full");
+  assert.equal(seriesPoint(full, "runs.completed").value, 1, "positive control: the full scan sees the assignment row");
+  assert.equal(seriesPoint(resumed, "runs.completed").value, 1, "an unknown checkpoint cannot infer absence of assignment");
+  assert.equal(seriesPoint(resumed, "runs.completed").note, undefined);
 });
 
 test("W1-T12154 criterion 2: the daemon's boot sweep stamps nothing on an orphan that had assigned a worker", async (t) => {
