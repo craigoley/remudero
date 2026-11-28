@@ -2,10 +2,12 @@ name: Security merge policy
 
 # Trusted metadata producer: no PR source, dependency install, artifact download or model call.
 # Staged producer only. Requiring its context is a separate, verified activation boundary.
+# No pull_request_target trigger: GitHub blocks it by default in public repositories from
+# 2026-12-02 (github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2).
+# Every PR to main still reaches this producer through workflow_run, because
+# semgrep-runtime-compatibility.yml runs on every pull_request to main with no path filter;
+# sweep's dispatchSecurityMergeProducer backfills through workflow_dispatch.
 on:
-  pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [main]
   workflow_run:
     workflows: [CodeQL, Semgrep runtime compatibility]
     types: [requested, in_progress, completed]

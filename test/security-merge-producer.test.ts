@@ -91,11 +91,21 @@ test('merge-group security evidence is explicitly UNKNOWN until separately quali
 });
 test('security producer workflow always checks out trusted main with no credentials or dependencies',()=>{
  const text=readFileSync(new URL('../.github/workflows/security-merge-policy.yml',import.meta.url),'utf8');
- const flow=parse(text);assert.ok(flow.on.pull_request_target);assert.ok(flow.on.workflow_run);assert.ok(flow.on.merge_group);
+ const flow=parse(text);assert.ok(flow.on.workflow_run);assert.ok(flow.on.merge_group);
  assert.equal(flow.jobs.metadata.steps[0].with.ref,'main');assert.equal(flow.jobs.metadata.steps[0].with['persist-credentials'],false);
  assert.equal(flow.jobs.metadata.permissions['statuses'],'write');
  assert.equal(text.includes('npm ci'),false);assert.equal(text.includes('pull_request.head.sha'),false);
  assert.equal(text.includes('schedule:'),false);
+});
+test('security producer workflow has no pull_request_target trigger and still hears every pull request through workflow_run',()=>{
+ const flow=parse(readFileSync(new URL('../.github/workflows/security-merge-policy.yml',import.meta.url),'utf8'));
+ assert.equal('pull_request_target' in flow.on,false);
+ assert.ok(flow.on.workflow_run.workflows.includes('Semgrep runtime compatibility'));
+ assert.ok(flow.on.workflow_run.types.includes('requested'));
+ const runtime=parse(readFileSync(new URL('../.github/workflows/semgrep-runtime-compatibility.yml',import.meta.url),'utf8'));
+ assert.deepEqual(runtime.on.pull_request.branches,['main']);
+ assert.equal(runtime.on.pull_request.paths,undefined);assert.equal(runtime.on.pull_request['paths-ignore'],undefined);
+ assert.ok(flow.on.workflow_dispatch.inputs.pr_number);
 });
 test('security producer real CLI transport shells out, publishes exact-head metadata and preserves API failure as UNKNOWN',t=>{
  const dir=mkdtempSync(join(tmpdir(),'rmd-security-transport-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
