@@ -925,6 +925,8 @@ function readRunLedger(
   let verdict = false;
   let prUrl: string | undefined;
   const ownRows = workerAssignmentTracker();
+  const runRows: Array<{ row: Record<string, unknown>; fileOrder: number }> = [];
+  let fileOrder = 0;
   const names = fs.existsSync(stateDir) ? fs.readdirSync(stateDir) : [];
   const files = ledgerRotationEntries(names, stateDir)
     .map((entry) => ({ path: entry.path, gzip: entry.form === "gzip" }));
@@ -937,9 +939,19 @@ function readRunLedger(
       if (parsed.row.step === "run.start") started = true;
       if (parsed.row.step === "verdict") verdict = true;
       if (parsed.row.step === "pr.opened" && typeof parsed.row.pr_url === "string") prUrl = parsed.row.pr_url;
-      if (typeof parsed.row.step === "string") ownRows.written(parsed.row.step, parsed.row);
+      if (typeof parsed.row.step === "string") runRows.push({ row: parsed.row, fileOrder: fileOrder++ });
     }
   }
+  // Rotation can replay retained rows into the live ledger after newer rows. Reconstruct the
+  // run's view by event time so replayed run.start/dispatch.claim rows cannot erase its last step.
+  runRows.sort((a, b) => {
+    const aTime = typeof a.row.ts === "string" ? Date.parse(a.row.ts) : Number.NaN;
+    const bTime = typeof b.row.ts === "string" ? Date.parse(b.row.ts) : Number.NaN;
+    if (Number.isFinite(aTime) && Number.isFinite(bTime) && aTime !== bTime) return aTime - bTime;
+    if (Number.isFinite(aTime) !== Number.isFinite(bTime)) return Number.isFinite(aTime) ? 1 : -1;
+    return a.fileOrder - b.fileOrder;
+  });
+  for (const { row } of runRows) ownRows.written(row.step as string, row);
   return { state: { started, verdict, ...(prUrl !== undefined ? { prUrl } : {}) }, assignmentFields: ownRows.verdictFields({}) };
 }
 

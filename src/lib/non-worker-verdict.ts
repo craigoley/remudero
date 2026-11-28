@@ -49,6 +49,8 @@ const ORPHANED_BY_RESTART_REASON = "orphaned-by-restart";
 export function endedBeforeWorkerAssignment(verdict: Record<string, unknown>, runAssigned?: boolean): boolean {
   if (runAssigned === true) return false;
   if (typeof verdict.worker_assigned === "boolean") return !verdict.worker_assigned;
+  // A checkpoint may predate assignment history; the verdict's own assignment receipt still proves it ran.
+  if (typeof verdict.selection_assignment_id === "string" && verdict.selection_assignment_id.length > 0) return false;
   if (infrastructureRefusal(verdict) !== undefined) return true;
   return runAssigned === false && verdict.verdict === "handed_off" && verdict.reason === ORPHANED_BY_RESTART_REASON;
 }

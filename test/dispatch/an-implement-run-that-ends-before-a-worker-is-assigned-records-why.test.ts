@@ -7,6 +7,7 @@
  * for such a run, and the analytics time series counts it apart from completed runs and durations.
  */
 import assert from "node:assert/strict";
+import { gzipSync } from "node:zlib";
 import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -206,6 +207,33 @@ test("W1-T12154 criterion 2: the daemon's boot sweep writes the same record on a
   assert.deepEqual([synced?.worker_assigned, synced?.last_stage, synced?.last_step], [false, "recon", "run.phase"]);
 });
 
+test("W1-T12154 criterion 2: a rotated ledger keeps the latest orphan stage when retained rows replay", async (t) => {
+  const stateDir = makeTempDir("unassigned-orphan-rotation");
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const start = { ts: "1999-12-31T23:59:59.000Z", run_id: RUN_ID, task_id: TASK, step: "run.start" };
+  const claim = { ts: "2000-01-01T00:00:00.500Z", run_id: RUN_ID, task_id: TASK, step: "dispatch.claim", host: LOCAL,
+    actor: "run_child", ref: dispatchClaimRef(TASK), outcome: "created" };
+  const reached = { ts: "2000-01-01T00:00:02.000Z", run_id: RUN_ID, task_id: TASK, step: "worktree.node_modules" };
+  writeFileSync(join(stateDir, "ledger.2000-01-01T00-00-01-000Z.ndjson.gz"), gzipSync(`${JSON.stringify(start)}\n${JSON.stringify(claim)}\n`));
+  const ledger = join(stateDir, "ledger.ndjson");
+  // Rotation replays retained older rows after the newer live event.
+  writeFileSync(ledger, [reached, start, claim].map((row) => `${JSON.stringify(row)}\n`).join(""));
+  const lockIso = new Date().toISOString();
+  await bootSweepDispatchClaimsAsync(fakeReserver({ [TASK]: anchorMessage(DEAD_PID, LOCAL, MINT_ISO) }), {
+    hostProbe: FIXED_HOST_PROBE,
+    lockHeldSinceMs: Date.parse(lockIso),
+    lockHeldSinceIso: lockIso,
+    stateDir,
+    log: (step, fields) => appendLedger(ledger, { run_id: "DAEMON-1", task_id: "DAEMON", step, lane: "daemon", ...fields }),
+  });
+  const rows = readFileSync(ledger, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Row);
+  const [verdict] = orphanVerdicts(rows);
+  assert.ok(verdict, "the boot sweep ended the rotated orphan");
+  assert.equal(verdict.worker_assigned, false);
+  assert.equal(verdict.last_stage, "worktree.node_modules");
+  assert.equal(verdict.last_step, "worktree.node_modules");
+});
+
 test("W1-T12154 criterion 2: the daemon's boot sweep stamps nothing on an orphan that had assigned a worker", async (t) => {
   const [verdict] = orphanVerdicts(await daemonBootSweep(t, orphanRows(true)));
   assert.ok(verdict, "the daemon's boot sweep ended the orphaned run");
@@ -365,4 +393,20 @@ test("W1-T12154 criterion 4: an assigned run's orphan verdict counts as one pass
   for (const id of ["runs.completed", "duration.p50.ms"]) assert.deepEqual(seriesPoint(second, id), seriesPoint(onePass, id), id);
   // A scan that starts from zero has seen every assignment, so its checkpoint is complete again.
   assert.equal(onePass.checkpoint.state.history.assignedIncomplete, undefined);
+});
+
+test("W1-T12154 criterion 4: a resumed older checkpoint honors assignment named by a refusal verdict", async (t) => {
+  const corpus = ledgerDir(t, [{ ts: "2026-11-10T02:00:00.000Z", run_id: "W1-T1-19", task_id: "W1-T1", step: "run.start" },
+    { ts: "2026-11-10T02:01:00.000Z", run_id: "W1-T1-19", task_id: "W1-T1", step: "worker.assignment", worker_assignment: ASSIGNMENT }]);
+  const older = JSON.parse(JSON.stringify((await scan(corpus.dir)).checkpoint)) as AnalyticsCheckpoint;
+  delete older.state.history.assigned;
+  corpus.append([{ ts: "2026-11-10T03:00:00.000Z", run_id: "W1-T1-19", task_id: "W1-T1", step: "verdict",
+    verdict: "blocked_transient", selection_assignment_id: "assignment-1" }]);
+  const resumed = await scan(corpus.dir, older);
+  const full = await scan(corpus.dir);
+  assert.equal(resumed.scan?.mode, "resume");
+  assert.equal(full.scan?.mode, "full");
+  assert.equal(seriesPoint(full, "runs.completed").value, 1, "positive control: the full scan sees the assignment row");
+  assert.equal(seriesPoint(resumed, "runs.completed").value, 1, "the verdict assignment receipt overrides refusal fallback");
+  assert.equal(seriesPoint(resumed, "runs.completed").note, undefined);
 });
